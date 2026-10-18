@@ -87,6 +87,17 @@ func withNAT64(blocked []netip.Prefix) []netip.Prefix {
 	return out
 }
 
+// blockedSet is every prefix the filter drops: the defaults, blocked, and
+// their NAT64 forms, each once. blocked may already hold the defaults, as
+// the set read back from a running filter does.
+func blockedSet(blocked []netip.Prefix) []netip.Prefix {
+	all := withNAT64(append(DefaultEgressBlocked(), blocked...))
+	for i, p := range all {
+		all[i] = p.Masked()
+	}
+	return slices.Compact(kernel.SortPrefixes(all))
+}
+
 // IsEgressAddr reports whether an address belongs to an egress link, which
 // the agent creates and the underlay never routes.
 func IsEgressAddr(a netip.Addr) bool {
@@ -129,8 +140,7 @@ func (k *Kernel) EnsureEgress(blocked []netip.Prefix) error {
 	}
 	fromLink := ifnamePrefix(expr.MetaKeyIIFNAME, egressPrefix)
 	toLink := ifnamePrefix(expr.MetaKeyOIFNAME, egressPrefix)
-	for _, p := range withNAT64(append(DefaultEgressBlocked(), blocked...)) {
-		p = p.Masked()
+	for _, p := range blockedSet(blocked) {
 		c.AddRule(&nftables.Rule{Table: t, Chain: fwd, Exprs: concat(fromLink, prefixMatch(p), []expr.Any{drop()}),
 			UserData: []byte(blockedTag + p.String())})
 	}

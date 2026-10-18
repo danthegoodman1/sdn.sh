@@ -34,22 +34,47 @@ import (
 //	go test -exec 'sudo unshare --net' ./internal/kernel/linux/
 //
 // so devices' sockets land in a throwaway namespace, not the host's.
+// began records that a test found the namespace fresh, so links found later
+// are an earlier test's leftovers rather than the environment's.
+var began bool
+
 func newKernel(t *testing.T) *Kernel {
 	t.Helper()
 	if os.Geteuid() != 0 {
 		t.Skip("needs root: go test -exec 'sudo unshare --net'")
 	}
-	links, err := netlink.LinkList()
+	// A namespace an earlier test deleted is torn down on a workqueue
+	// (__put_net in net/core/net_namespace.c), and its egress link with it.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		links, err := netlink.LinkList()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var extra []string
+		for _, l := range links {
+			if l.Attrs().Name != "lo" {
+				extra = append(extra, l.Attrs().Name)
+			}
+		}
+		if len(extra) == 0 {
+			break
+		}
+		if !began {
+			t.Skipf("needs a fresh network namespace, found %v: go test -exec 'sudo unshare --net'", extra)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("an earlier test left %v", extra)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	began = true
+	lo, err := netlink.LinkByName("lo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, l := range links {
-		if l.Attrs().Name != "lo" {
-			t.Skipf("needs a fresh network namespace, found %s: go test -exec 'sudo unshare --net'", l.Attrs().Name)
-		}
-		if err := netlink.LinkSetUp(l); err != nil {
-			t.Fatal(err)
-		}
+	if err := netlink.LinkSetUp(lo); err != nil {
+		t.Fatal(err)
 	}
 	k, err := New()
 	if err != nil {
@@ -767,6 +792,36 @@ func TestTheModelAgreesWithLinuxOnEgress(t *testing.T) {
 	}
 }
 
+// TestAFilterRefreshedFromWhatItHoldsStaysTheSame refreshes the egress
+// filter from the set it reads back, as each agent start does, and checks
+// the filter keeps one rule per prefix.
+func TestAFilterRefreshedFromWhatItHoldsStaysTheSame(t *testing.T) {
+	k := newKernel(t)
+	if err := k.EnsureEgress([]netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := k.EgressBlocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		kept, err := k.EgressBlocked()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := k.EnsureEgress(kept); err != nil {
+			t.Fatal(err)
+		}
+	}
+	again, err := k.EgressBlocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(again, first) {
+		t.Fatalf("after three refreshes the filter blocks %d prefixes, first %d: %v", len(again), len(first), again)
+	}
+}
+
 // TestADeletedNamespaceADescriptorHoldsIsFoundAndReaped holds a namespace
 // open with a descriptor alone, deletes its name, and checks the device is
 // still found, reaped, and its listen port freed.
@@ -798,6 +853,47 @@ func TestADeletedNamespaceADescriptorHoldsIsFoundAndReaped(t *testing.T) {
 	priv, _ := model.NewPrivateKey(r)
 	run(t, k, kernel.Op{Kind: kernel.CreateDevice, Namespace: other, Device: "sdn0",
 		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: a.port, Alias: "sdn:test:e"}})
+}
+
+// TestANameAnOperatorDeletesStopsReachingTheAgentsSockets deletes a
+// namespace's name as `ip netns del` does, behind the agent, and checks that
+// the agent learns it, that the device keeps its port while the agent's
+// sockets hold the namespace, and that the port frees once the agent deletes
+// it.
+func TestANameAnOperatorDeletesStopsReachingTheAgentsSockets(t *testing.T) {
+	k := newKernel(t)
+	r := prng.New(9)
+	a, _ := pair(t, k, r)
+	if out, err := exec.Command("ip", "netns", "del", a.ns).CombinedOutput(); err != nil {
+		t.Fatalf("ip netns del: %v: %s", err, out)
+	}
+	if _, err := k.Namespace(a.ns, "sdn:test:"); !errors.Is(err, kernel.ErrNoNamespace) {
+		t.Fatalf("observing a deleted name: %v", err)
+	}
+	if _, err := k.Run(kernel.Op{Kind: kernel.SetPeers, Namespace: a.ns, Device: "sdn0"}); !errors.Is(err, kernel.ErrNoNamespace) {
+		t.Fatalf("configuring through a deleted name: %v", err)
+	}
+	other := namespace(t, k, prefix(t)+"f")
+	priv, _ := model.NewPrivateKey(r)
+	create := kernel.Op{Kind: kernel.CreateDevice, Namespace: other, Device: "sdn0",
+		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: a.port, Alias: "sdn:test:f"}}
+	if _, err := k.Run(create); !errors.Is(err, kernel.ErrPortInUse) {
+		t.Fatalf("binding the port the agent's sockets hold: %v", err)
+	}
+	run(t, k, kernel.Op{Kind: kernel.DeleteNamespace, Namespace: a.ns})
+	// A namespace is torn down on a workqueue once its last reference goes
+	// (__put_net in net/core/net_namespace.c), so the port frees soon after.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := k.Run(create)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, kernel.ErrPortInUse) || time.Now().After(deadline) {
+			t.Fatalf("binding the port once the agent deleted the namespace: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // TestANameACrashLeftUnmountedIsReplaced leaves a namespace's name as the

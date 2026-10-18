@@ -10,7 +10,8 @@
 //   - giving a peer an allowed IP another peer holds moves it, silently, as
 //     wg_allowedips_insert does;
 //   - a namespace whose name is deleted lives on while a process holds it,
-//     with its devices still bound;
+//     or while the agent holds sockets it opened inside, with its devices
+//     still bound;
 //   - an nftables transaction applies whole or not at all.
 package kmodel
 
@@ -89,7 +90,11 @@ type Netns struct {
 	Name string
 	Ref  string
 	// Held counts processes inside the namespace.
-	Held    int
+	Held int
+	// opened is the name the agent opened sockets inside by, while it
+	// holds them. They outlive the name, and hold the namespace as a
+	// process does.
+	opened  string
 	Devices map[string]*Device
 	Rules   *nft.Ruleset
 	// Flows are the connections conntrack and sockets hold, keyed by an
@@ -175,34 +180,73 @@ func (k *Kernel) Hold(name string) bool {
 	return ok
 }
 
-// Unhold records a process leaving a namespace. A namespace with no name
-// and no process dies, and its devices with it. A namespace this kernel no
+// Unhold records a process leaving a namespace. A namespace this kernel no
 // longer holds, as one from before a reboot, is gone already.
 func (k *Kernel) Unhold(ns *Netns) {
 	if ns.Held > 0 {
 		ns.Held--
 	}
-	if ns.Held == 0 && ns.Name == "" && k.anon[ns.Ref] == ns {
-		k.destroy(ns)
-		delete(k.anon, ns.Ref)
-	}
+	k.collect(ns)
 }
 
 // Unname deletes a namespace's name, as `ip netns del` does; a namespace a
-// process holds lives on without one.
+// process or the agent's sockets hold lives on without one.
 func (k *Kernel) Unname(name string) {
 	ns, ok := k.named[name]
 	if !ok {
 		return
 	}
 	delete(k.named, name)
-	if ns.Held == 0 {
-		k.destroy(ns)
-		return
-	}
 	k.nextRef++
 	ns.Name, ns.Ref = "", fmt.Sprintf("ns-%d", k.nextRef)
 	k.anon[ns.Ref] = ns
+	k.collect(ns)
+}
+
+// AgentExit closes every socket the agent held, as its process ending does.
+func (k *Kernel) AgentExit() {
+	for _, name := range slices.Sorted(maps.Keys(k.named)) {
+		k.named[name].opened = ""
+	}
+	for _, ref := range slices.Sorted(maps.Keys(k.anon)) {
+		ns := k.anon[ref]
+		ns.opened = ""
+		k.collect(ns)
+	}
+}
+
+// open records the agent opening sockets inside a named namespace, as its
+// first operation or look there does. Sockets it held in a namespace the
+// name used to open close then, as the Linux implementation replaces them.
+func (k *Kernel) open(ns *Netns) {
+	if ns.opened == ns.Name {
+		return
+	}
+	k.release(ns.Name)
+	ns.opened = ns.Name
+}
+
+// release closes the sockets the agent opened by name, as deleting the
+// namespace does first.
+func (k *Kernel) release(name string) {
+	if ns, ok := k.named[name]; ok && ns.opened == name {
+		ns.opened = ""
+	}
+	for _, ref := range slices.Sorted(maps.Keys(k.anon)) {
+		if ns := k.anon[ref]; ns.opened == name {
+			ns.opened = ""
+			k.collect(ns)
+		}
+	}
+}
+
+// collect destroys a namespace that has no name, no process and no socket
+// of the agent's, and its devices with it.
+func (k *Kernel) collect(ns *Netns) {
+	if ns.Held == 0 && ns.opened == "" && ns.Name == "" && k.anon[ns.Ref] == ns {
+		k.destroy(ns)
+		delete(k.anon, ns.Ref)
+	}
 }
 
 // PortOwner returns the device bound to a host UDP port.
@@ -260,6 +304,7 @@ func (k *Kernel) Snapshot(prefix, aliasPrefix string) (kernel.Snapshot, error) {
 	var s kernel.Snapshot
 	for _, name := range slices.Sorted(maps.Keys(k.named)) {
 		if strings.HasPrefix(name, prefix) {
+			k.open(k.named[name])
 			s.Namespaces = append(s.Namespaces, observe(k.named[name], aliasPrefix))
 		}
 	}
@@ -278,6 +323,7 @@ func (k *Kernel) Namespace(name, aliasPrefix string) (kernel.Namespace, error) {
 	if !ok {
 		return kernel.Namespace{}, kernel.ErrNoNamespace
 	}
+	k.open(ns)
 	return observe(ns, aliasPrefix), nil
 }
 
@@ -322,6 +368,7 @@ func (k *Kernel) Run(op kernel.Op) (kernel.Result, error) {
 		}
 		return kernel.Result{}, nil
 	case kernel.DeleteNamespace:
+		k.release(op.Namespace)
 		k.Unname(op.Namespace)
 		return kernel.Result{}, nil
 	case kernel.Reap:
@@ -347,6 +394,7 @@ func (k *Kernel) Run(op kernel.Op) (kernel.Result, error) {
 		}
 		return kernel.Result{}, kernel.ErrNoNamespace
 	}
+	k.open(ns)
 	switch op.Kind {
 	case kernel.CreateDevice:
 		return kernel.Result{}, k.createDevice(ns, op.Device, *op.Create)

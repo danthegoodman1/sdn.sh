@@ -78,6 +78,18 @@ func (c *Core) target(now time.Time, st *nsState, n *api.NetworkState, x *api.In
 	if i, ok := c.ifaces[st.iface]; ok {
 		port = i.port
 	}
+	// A relay peer no slot names carries nothing until its peer sends,
+	// which the relay can forward only once it holds the port.
+	slotted := map[model.InterfaceID]bool{}
+	for _, r := range x.Reach {
+		if svc, ok := n.Service(r.Service); ok {
+			for _, b := range svc.Backends {
+				slotted[b.Interface] = true
+			}
+		}
+	}
+	st.awaiting = nil
+	var reverse []model.InterfaceID
 	if x.State == api.Live {
 		for _, p := range x.Peers {
 			if p.Draining {
@@ -108,7 +120,10 @@ func (c *Core) target(now time.Time, st *nsState, n *api.NetworkState, x *api.In
 			case p.Draining:
 			case p.Loopback != 0:
 				tp.awaiting = !c.holdsReverse(st, p)
-			default:
+				if tp.awaiting {
+					reverse = append(reverse, p.Interface)
+				}
+			case slotted[p.Interface]:
 				tp.awaiting = c.awaitsAck(now, st, port, p, tp)
 				acking[p.PublicKey] = tp.awaiting
 			}
@@ -127,6 +142,7 @@ func (c *Core) target(now time.Time, st *nsState, n *api.NetworkState, x *api.In
 			delete(st.drain, key)
 		}
 	}
+	c.setReverse(st, reverse)
 	st.ackBy = time.Time{}
 	for _, key := range slices.SortedFunc(maps.Keys(st.acks), compareKey) {
 		w := st.acks[key]

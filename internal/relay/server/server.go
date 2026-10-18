@@ -211,8 +211,10 @@ func (s *Server) ack(regs []relaycore.Registration) {
 	if len(regs) == 0 {
 		return
 	}
-	s.smu.Lock()
-	defer s.smu.Unlock()
+	// Sends share the sockets with forwarding, which a write lock would
+	// stall for the whole batch.
+	s.smu.RLock()
+	defer s.smu.RUnlock()
 	for _, r := range regs {
 		k, ok := s.socks[r.Local]
 		if !ok {

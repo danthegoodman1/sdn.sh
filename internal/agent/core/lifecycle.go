@@ -358,6 +358,9 @@ func (c *Core) finish(i *iface) {
 	if i.phase == detaching {
 		c.emit(DeleteJournal{Interface: i.id})
 	}
+	if st, ok := c.ns[i.ns]; ok {
+		c.dropWaits(st)
+	}
 	delete(c.ifaces, i.id)
 	delete(c.ns, i.ns)
 }

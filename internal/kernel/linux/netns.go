@@ -213,8 +213,7 @@ func nsPaths() ([]string, error) {
 		}
 		for _, fd := range fds {
 			path := filepath.Join(dir, "fd", fd.Name())
-			var st unix.Stat_t
-			if err := unix.Stat(path, &st); err == nil && st.Dev == self.Dev && isNetNS(path) {
+			if onNSFS(path, self.Dev) && isNetNS(path) {
 				out = append(out, path)
 			}
 		}
@@ -234,6 +233,18 @@ func nsPaths() ([]string, error) {
 		out = append(out, unescapeMount(fields[4]))
 	}
 	return out, nil
+}
+
+// onNSFS reports whether the file a descriptor's path opens lives on the
+// namespace filesystem, device dev. A descriptor may open a file on a
+// network filesystem whose server hangs, so the look takes what the kernel
+// has cached rather than asking it (AT_STATX_DONT_SYNC, statx(2)).
+func onNSFS(path string, dev uint64) bool {
+	var st unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_STATX_DONT_SYNC, unix.STATX_TYPE, &st); err != nil {
+		return false
+	}
+	return unix.Mkdev(st.Dev_major, st.Dev_minor) == dev
 }
 
 // isNetNS reports whether path opens a network namespace.

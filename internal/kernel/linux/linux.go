@@ -50,8 +50,11 @@ type Kernel struct {
 // their use, since the agent observes a namespace while another goroutine
 // may be configuring it.
 type nsHandles struct {
-	mu   sync.Mutex
-	fd   netns.NsHandle
+	mu sync.Mutex
+	fd netns.NsHandle
+	// dev and ino identify the namespace, which its name must still open.
+	dev  uint64
+	ino  uint64
 	nl   *netlink.Handle
 	wg   *wgctrl.Client
 	nft  *nftables.Conn
@@ -102,25 +105,52 @@ func (k *Kernel) Close() {
 	k.root.Close()
 }
 
-// open returns a namespace's held sockets, opening them on first use.
+// open returns a namespace's held sockets, opening them on first use. They
+// keep working in their namespace after an operator's `ip netns del`, so
+// every open checks that the name still reaches it, and that check is how
+// the agent learns the namespace went. Sockets the name no longer reaches
+// stay held until the agent deletes the namespace, so its device keeps its
+// peers while the agent tears the interface down.
 func (k *Kernel) open(name string) (*nsHandles, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if h, ok := k.handles[name]; ok {
-		return h, nil
+	path := filepath.Join(netnsDir, name)
+	var st unix.Stat_t
+	if err := unix.Stat(path, &st); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil, kernel.ErrNoNamespace
+		}
+		return nil, fmt.Errorf("namespace %s: %w", name, err)
 	}
-	fd, err := netns.GetFromPath(filepath.Join(netnsDir, name))
+	if h, ok := k.handles[name]; ok {
+		if h.dev == st.Dev && h.ino == st.Ino {
+			return h, nil
+		}
+		// The name reaches another namespace, as once the agent creates it
+		// again.
+		h.mu.Lock()
+		h.close()
+		h.mu.Unlock()
+		delete(k.handles, name)
+	}
+	fd, err := netns.GetFromPath(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, kernel.ErrNoNamespace
 	}
 	if err != nil {
 		return nil, err
 	}
+	var fst unix.Stat_t
+	if err := unix.Fstat(int(fd), &fst); err != nil {
+		fd.Close()
+		return nil, fmt.Errorf("namespace %s: %w", name, err)
+	}
 	h, err := k.openAt(fd)
 	if err != nil {
 		fd.Close()
 		return nil, err
 	}
+	h.dev, h.ino = fst.Dev, fst.Ino
 	k.handles[name] = h
 	return h, nil
 }
@@ -473,6 +503,10 @@ func (k *Kernel) Snapshot(prefix, aliasPrefix string) (kernel.Snapshot, error) {
 	}
 	for _, name := range names {
 		ns, err := k.Namespace(name, aliasPrefix)
+		if errors.Is(err, kernel.ErrNoNamespace) {
+			// The name went between listing and looking.
+			continue
+		}
 		if err != nil {
 			return s, fmt.Errorf("observe %s: %w", name, err)
 		}

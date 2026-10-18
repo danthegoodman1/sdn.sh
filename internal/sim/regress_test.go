@@ -65,3 +65,14 @@ func TestAPeerWaitsForTheHolderOfItsAddress(t *testing.T) {
 // the relay then dropped, stranding the peer. A disconnected pair now keeps
 // its edge, dormant, for the port quarantine.
 func TestAPairThatReconnectsKeepsItsEdge(t *testing.T) { runSeed(t, 6135) }
+
+// Seeds 371, 2425 and 3389: an operator deleted a live workload's namespace
+// name, the workload exited, and the model let the namespace die at once,
+// although the agent's sockets inside still held it on Linux. A co-located
+// peer's slot then pointed at a device that was gone before the agent could
+// know.
+func TestAnUnnamedNamespaceLivesWhileTheAgentHoldsIt(t *testing.T) {
+	for _, seed := range []uint64{371, 2425, 3389} {
+		runSeed(t, seed)
+	}
+}

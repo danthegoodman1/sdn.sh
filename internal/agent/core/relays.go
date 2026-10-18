@@ -159,23 +159,24 @@ func (c *Core) registerFresh(now time.Time, st *nsState) {
 	for _, d := range sent {
 		r := sched[d.key]
 		if r == nil {
-			r = &resend{paths: map[netip.AddrPort]bool{}}
+			r = &resend{paths: map[netip.AddrPort]uint16{}}
 			sched[d.key] = r
 		}
 		r.left, r.gap = c.cfg.RegisterRetries, c.cfg.RegisterRetry
 		r.at = now.Add(r.gap)
-		r.paths[d.path] = true
+		r.paths[d.path] = port
 		c.resendAck[ackKey{port, d.path}] = resendRef{st.name, d.key}
 	}
 }
 
 // resend is one direction's schedule of further registrations, to the
-// relay ports that have yet to acknowledge it.
+// relay ports that have yet to acknowledge it, each with the listen port it
+// was sent from.
 type resend struct {
 	at    time.Time
 	gap   time.Duration
 	left  int
-	paths map[netip.AddrPort]bool
+	paths map[netip.AddrPort]uint16
 }
 
 // resendRef names the direction an acknowledgment ends a schedule for.
@@ -202,7 +203,13 @@ func (c *Core) resendDue(now time.Time) {
 		if len(due) == 0 {
 			continue
 		}
-		c.register(now, st, func(key model.Key, path netip.AddrPort) bool { return due[key] && sched[key].paths[path] })
+		c.register(now, st, func(key model.Key, path netip.AddrPort) bool {
+			if !due[key] {
+				return false
+			}
+			_, waiting := sched[key].paths[path]
+			return waiting
+		})
 		for _, key := range slices.SortedFunc(maps.Keys(due), compareKey) {
 			r := sched[key]
 			r.left--
@@ -222,16 +229,10 @@ func (c *Core) endResends(name string, keys []model.Key) {
 	if keys == nil {
 		keys = slices.SortedFunc(maps.Keys(sched), compareKey)
 	}
-	var port uint16
-	if st, ok := c.ns[name]; ok {
-		if i, ok := c.ifaces[st.iface]; ok {
-			port = i.port
-		}
-	}
 	for _, key := range keys {
 		if r, ok := sched[key]; ok {
 			for _, path := range slices.SortedFunc(maps.Keys(r.paths), netip.AddrPort.Compare) {
-				delete(c.resendAck, ackKey{port, path})
+				delete(c.resendAck, ackKey{r.paths[path], path})
 			}
 			delete(sched, key)
 		}
@@ -405,9 +406,14 @@ var errAttachTimeout = errors.New("the control plane did not answer in time")
 // RegistrationAcked takes a relay's acknowledgment, from the relay port
 // from, of a registration sent from a device's listen port. It ends that
 // direction's resends to the relay, and releases a new peer waiting on it.
-func (c *Core) RegistrationAcked(now time.Time, port uint16, from netip.AddrPort) {
+// It reports whether the acknowledgment changed anything; the relay
+// acknowledges every registration, periodic ones included, and most change
+// nothing.
+func (c *Core) RegistrationAcked(now time.Time, port uint16, from netip.AddrPort) bool {
 	key := ackKey{port, from}
+	changed := false
 	if ref, ok := c.resendAck[key]; ok {
+		changed = true
 		delete(c.resendAck, key)
 		if r, ok := c.resends[ref.ns][ref.key]; ok {
 			delete(r.paths, from)
@@ -417,16 +423,16 @@ func (c *Core) RegistrationAcked(now time.Time, port uint16, from netip.AddrPort
 		}
 	}
 	name, ok := c.awaitingAck[key]
+	if !ok {
+		return changed
+	}
 	if c.Debug != nil {
 		c.Debug(fmt.Sprintf("ack from %v for port %d awaited by %q", from, port, name))
-	}
-	if !ok {
-		return
 	}
 	delete(c.awaitingAck, key)
 	st, ok := c.ns[name]
 	if !ok {
-		return
+		return changed
 	}
 	for _, k := range slices.SortedFunc(maps.Keys(st.acks), compareKey) {
 		if w := st.acks[k]; w.path == from && !w.acked {
@@ -435,6 +441,7 @@ func (c *Core) RegistrationAcked(now time.Time, port uint16, from netip.AddrPort
 			c.Stats.Acked++
 		}
 	}
+	return true
 }
 
 // handoverWaits reports whether a configuring interface's namespace holds

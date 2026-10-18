@@ -31,6 +31,7 @@ const (
 	relayServer = "internal/relay/server/server.go"
 	relayDisk   = "internal/relay/server/disk.go"
 	simCP       = "internal/sim/cpnode.go"
+	kmodelGo    = "internal/kernel/kmodel/kmodel.go"
 )
 
 // Code that more than one edit moves or matches.
@@ -469,7 +470,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "egress-ignores-host-change",
 		Breaks: "an underlay change refreshes the egress filter with the host's current prefixes",
-		Edits:  []Edit{{agentDaemon, "\t\tif d.Egress != nil && d.egressSent {\n\t\t\td.refreshEgress()\n\t\t}\n", ""}},
+		Edits:  []Edit{{agentDaemon, "\t\t\t\td.egressRelays = d.EgressKept\n\t\t\t}\n\t\t\td.refreshEgress()\n", "\t\t\t\td.egressRelays = d.EgressKept\n\t\t\t}\n"}},
 		Catch:  []string{"agent-daemon"},
 	},
 	{
@@ -493,7 +494,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "held-by-descriptor-missed",
 		Breaks: "a namespace only a descriptor holds is found and reaped",
-		Edits:  []Edit{{linuxNetns, "st.Dev == self.Dev && isNetNS(path) {", "st.Dev == self.Dev && isNetNS(path) && false {"}},
+		Edits:  []Edit{{linuxNetns, "if onNSFS(path, self.Dev) && isNetNS(path) {", "if onNSFS(path, self.Dev) && isNetNS(path) && false {"}},
 		Catch:  []string{"kernel"},
 	},
 	{
@@ -573,5 +574,67 @@ var Mutants = []Mutant{
 		Breaks: "a relay's acknowledgment ends that direction's resends to it, so registrations stay bounded under churn",
 		Edits:  []Edit{{agentRelays, "\t\t\tdelete(r.paths, from)\n", ""}},
 		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "rearm-replans-everyone",
+		Breaks: "a finished batch replans only the namespaces waiting on its device, so waits on acknowledgments cost nothing per batch",
+		Edits: []Edit{{agentPlan, "\tfor _, name := range slices.Sorted(maps.Keys(c.reverseWait[changed.iface])) {\n\t\tif st, ok := c.ns[name]; ok && st != changed {\n",
+			"\tfor _, name := range slices.Sorted(maps.Keys(c.ns)) {\n\t\tif st, ok := c.ns[name]; ok && st != changed && len(st.awaiting) > 0 {\n"}},
+		Catch: []string{"agent-core"},
+	},
+	{
+		ID:     "client-ack-holds-handover",
+		Breaks: "only a relay peer a slot names waits for its acknowledgment, so a backend hands over without waiting on its clients",
+		Edits:  []Edit{{agentTarget, "\t\t\tcase slotted[p.Interface]:\n", "\t\t\tdefault:\n"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "unawaited-ack-reports-change",
+		Breaks: "an acknowledgment nobody awaits changes nothing, so the agent's loop skips its pass over every namespace",
+		Edits:  []Edit{{agentRelays, "\tif !ok {\n\t\treturn changed\n\t}\n\tif c.Debug", "\tif !ok {\n\t\treturn true\n\t}\n\tif c.Debug"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "stale-ack-wake-spins",
+		Breaks: "a network that leaves desired state takes its acknowledgment waits with it, so no past deadline keeps waking the loop",
+		Edits:  []Edit{{agentPlan, "\t} else {\n\t\tc.dropWaits(st)\n", "\t} else {\n"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "resend-forgets-its-port",
+		Breaks: "a resend schedule ends with its namespace, so acknowledgment lookups stay bounded",
+		Edits:  []Edit{{agentRelays, "delete(c.resendAck, ackKey{r.paths[path], path})", "delete(c.resendAck, ackKey{0, path})"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "convergence-only-after-batches",
+		Breaks: "convergence is observed whenever a namespace settles, batch or no batch",
+		Edits:  []Edit{{agentDaemon, "\tidle := d.core.Stats.Idle != d.stats.Idle\n", "\tidle := false\n"}},
+		Catch:  []string{"agent-daemon"},
+	},
+	{
+		ID:     "underlay-change-drops-kept-filter",
+		Breaks: "an underlay change before desired state keeps blocking the relays an earlier run's filter named",
+		Edits:  []Edit{{agentDaemon, "\t\t\tif !d.egressSent {\n\t\t\t\td.egressRelays = d.EgressKept\n\t\t\t}\n", ""}},
+		Catch:  []string{"agent-daemon"},
+	},
+	{
+		ID:     "agent-sockets-hold-nothing",
+		Breaks: "the agent's sockets hold a namespace its name no longer reaches, so its device keeps its peers until the agent tears it down",
+		Edits:  []Edit{{kmodelGo, "\tif ns.Held == 0 && ns.opened == \"\" && ns.Name == \"\" && k.anon[ns.Ref] == ns {", "\tif ns.Held == 0 && ns.Name == \"\" && k.anon[ns.Ref] == ns {"}},
+		Catch:  []string{"kmodel"},
+	},
+	{
+		ID:     "cached-handle-trusted",
+		Breaks: "every open checks the namespace's name still reaches it, which is how the agent learns an operator deleted it",
+		Edits: []Edit{{linuxKernel, "\tpath := filepath.Join(netnsDir, name)\n\tvar st unix.Stat_t\n",
+			"\tpath := filepath.Join(netnsDir, name)\n\tif h, ok := k.handles[name]; ok {\n\t\treturn h, nil\n\t}\n\tvar st unix.Stat_t\n"}},
+		Catch: []string{"kernel"},
+	},
+	{
+		ID:     "egress-duplicates-kept",
+		Breaks: "refreshing the egress filter from what it holds leaves one rule per prefix",
+		Edits:  []Edit{{linuxEgress, "\treturn slices.Compact(kernel.SortPrefixes(all))\n", "\treturn all\n"}},
+		Catch:  []string{"kernel"},
 	},
 }

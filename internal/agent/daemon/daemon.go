@@ -101,9 +101,12 @@ type Daemon struct {
 	Resolver Resolver
 	// Egress, when set, has its blocked prefixes refreshed with every relay
 	// address desired state names, on top of EgressBase and the host's own
-	// prefixes, which HostPrefixes lists anew on every refresh.
+	// prefixes, which HostPrefixes lists anew on every refresh. Until
+	// desired state names the relays, a refresh keeps EgressKept, what an
+	// earlier run's filter blocked.
 	Egress       EgressHost
 	EgressBase   []netip.Prefix
+	EgressKept   []netip.Prefix
 	HostPrefixes func() ([]netip.Prefix, error)
 	m            *Metrics
 	now          func() time.Time
@@ -139,8 +142,9 @@ type Daemon struct {
 	egressSyncs  chan []netip.Prefix
 	// reported is the network revision each interface last settled at, so
 	// convergence is observed once per revision.
-	reported    map[model.InterfaceID]uint64
-	settleCheck bool
+	reported map[model.InterfaceID]uint64
+	// quiet marks an event that changed nothing, so the loop skips its pass.
+	quiet bool
 
 	ready sync.Once
 	up    chan struct{}
@@ -244,17 +248,28 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
+	drove := true
 	for {
 		if d.fatal != nil {
 			return d.fatal
 		}
-		next := d.core.NextWake(d.now())
-		timer.Reset(max(time.Until(next), 0))
+		if drove {
+			next := d.core.NextWake(d.now())
+			timer.Reset(max(time.Until(next), 0))
+		}
+		drove = true
 		select {
 		case <-ctx.Done():
 			return nil
 		case fn := <-d.events:
 			fn()
+			if d.quiet {
+				// The event changed nothing the core plans from, so the
+				// pass over every namespace and the next wake keep.
+				d.quiet = false
+				drove = false
+				continue
+			}
 		case <-timer.C:
 			d.core.Tick(d.now())
 		}
@@ -291,11 +306,11 @@ func (d *Daemon) drive() {
 		}
 		d.carry(a)
 	}
+	idle := d.core.Stats.Idle != d.stats.Idle
 	d.noteStats()
 	d.syncResolver()
 	d.syncEgress()
-	if d.settleCheck {
-		d.settleCheck = false
+	if idle {
 		d.noteConvergence()
 	}
 }
@@ -525,7 +540,6 @@ func (d *Daemon) runBatch(b agentcore.RunBatch) {
 		}
 		d.post(func() {
 			d.core.BatchDone(d.now(), b.Namespace, b.ID, done, err)
-			d.settleCheck = true
 		})
 	}()
 }
@@ -751,7 +765,9 @@ func (d *Daemon) ack(from netip.AddrPort, port uint16, payload []byte) {
 	}
 	d.post(func() {
 		d.m.registrations.WithLabelValues("acked").Inc()
-		d.core.RegistrationAcked(d.now(), port, from)
+		if !d.core.RegistrationAcked(d.now(), port, from) {
+			d.quiet = true
+		}
 	})
 }
 
@@ -762,7 +778,10 @@ func (d *Daemon) UnderlayChanged() {
 		d.log.Info().Msg("underlay changed; registering every direction")
 		d.core.UnderlayChanged(d.now())
 		// The host's own prefixes may have moved with it.
-		if d.Egress != nil && d.egressSent {
+		if d.Egress != nil {
+			if !d.egressSent {
+				d.egressRelays = d.EgressKept
+			}
 			d.refreshEgress()
 		}
 	})

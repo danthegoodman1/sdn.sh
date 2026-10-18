@@ -273,10 +273,12 @@ type nsState struct {
 	sweep     bool
 	// awaiting names the interfaces slots wait for: co-located ones whose
 	// devices have yet to hold this namespace's interface as a peer, and
-	// relay peers new to the namespace whose active relay has yet to
-	// acknowledge its registration. Keepalive toward a co-located one
-	// waits too.
+	// relay peers a slot names, new to the namespace, whose active relay
+	// has yet to acknowledge its registration. Keepalive toward a
+	// co-located one waits too. reverse holds the co-located ones, which
+	// only their own namespaces' batches release.
 	awaiting []model.InterfaceID
+	reverse  []model.InterfaceID
 	// acks holds each relay peer new to the namespace until the active
 	// relay acknowledges it or AckWait passes; ackBy is the earliest
 	// deadline among those still waiting.
@@ -357,6 +359,9 @@ type Core struct {
 	// holding only directions a peer waits on, so acknowledgments nobody
 	// awaits cost nothing to ignore.
 	awaitingAck map[ackKey]string
+	// reverseWait finds the namespaces waiting for a co-located
+	// interface's device to hold their reverse peers.
+	reverseWait map[model.InterfaceID]map[string]bool
 	lastProbe   time.Time
 	lastResync  time.Time
 	// scanning records a Scan awaiting its answer, and rescan one wanted
@@ -374,6 +379,9 @@ type Stats struct {
 	// Acked counts acknowledgments that released a new peer's wait, and
 	// AckTimeouts waits that ended at AckWait instead.
 	Acked, AckTimeouts uint64
+	// Idle counts plans that found a namespace with nothing to do, after
+	// which it may count as settled.
+	Idle uint64
 }
 
 // Census counts what the core manages, for the agent's gauges.
@@ -423,6 +431,7 @@ func New(cfg Config, rand io.Reader) *Core {
 
 		awaitingAck: map[ackKey]string{},
 		resendAck:   map[ackKey]resendRef{},
+		reverseWait: map[model.InterfaceID]map[string]bool{},
 	}
 }
 

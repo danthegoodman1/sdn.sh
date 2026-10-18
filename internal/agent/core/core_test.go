@@ -440,3 +440,167 @@ func TestAnAcknowledgedDirectionIsNotResentAndANewPeerResendsAlone(t *testing.T)
 		t.Fatalf("the new direction was registered %d times, want %d", got, 1+c.cfg.RegisterRetries)
 	}
 }
+
+// adoptedMany is a core that adopted n interfaces, if-0 in sdn-0 onward,
+// each a client of db through if-b's relay path.
+func adoptedMany(t *testing.T, n int) (*Core, time.Time, func(rev uint64, backends ...api.Peer)) {
+	t.Helper()
+	c, now := New(DefaultConfig("h1"), prng.New(1)), time.Unix(1000, 0)
+	var journal []JournalEntry
+	var snap kernel.Snapshot
+	for i := range n {
+		id, ns, key, port := model.InterfaceID(fmt.Sprintf("if-%d", i)), fmt.Sprintf("sdn-%d", i), model.Key{byte(20 + i)}, uint16(40000+i)
+		journal = append(journal, JournalEntry{Interface: id, Name: fmt.Sprintf("w%d", i), Network: "net-1", Service: "svc-1",
+			Kind: api.Workload, Namespace: ns, ListenPort: port, PublicKey: key})
+		snap.Namespaces = append(snap.Namespaces, kernel.Namespace{Name: ns,
+			Devices: []kernel.Device{{Name: c.cfg.Device, HasKey: true, PublicKey: key, ListenPort: port}}})
+	}
+	c.Start(now, journal, snap)
+	update := func(rev uint64, backends ...api.Peer) {
+		t.Helper()
+		net := client(rev, "if-0", journal[0].PublicKey, backends...)
+		x := net.Interfaces[0]
+		net.Interfaces = nil
+		for i, e := range journal {
+			x.ID, x.PublicKey, x.ListenPort = e.Interface, e.PublicKey, e.ListenPort
+			x.Addr6 = netip.AddrFrom16([16]byte{0xfd, 15: byte(0x10 + i)})
+			net.Interfaces = append(net.Interfaces, x)
+		}
+		if err := c.State(now, api.StateUpdate{Host: "h1", Generation: rev, Networks: []api.NetworkState{net},
+			Present: []api.NetworkRef{{Network: "net-1", Revision: rev}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return c, now, update
+}
+
+func TestABatchReplansOnlyTheNamespacesItCanRelease(t *testing.T) {
+	const n = 8
+	c, now, update := adoptedMany(t, n)
+	update(3, backend("if-b", peer, "fd00::6"))
+	for range 4 {
+		drive(c, now, succeed)
+	}
+	for i := range n {
+		if ns := fmt.Sprintf("sdn-%d", i); len(c.ns[ns].awaiting) == 0 {
+			t.Fatalf("%s holds its slot before the relay acknowledged", ns)
+		}
+	}
+	idle := c.Stats.Idle
+	c.RegistrationAcked(now, 40000, relayAt)
+	for range 4 {
+		drive(c, now, succeed)
+	}
+	if !slotted(c, "sdn-0") {
+		t.Fatal("the acknowledged namespace never took its slot")
+	}
+	// The released namespace plans once after the ack and once after its
+	// batch; the rest, still waiting on their own acks, plan nothing.
+	if planned := c.Stats.Idle - idle; planned != 1 {
+		t.Fatalf("%d idle plans after one namespace's ack, want 1", planned)
+	}
+}
+
+func TestABackendHandsOverWithoutWaitingOnItsClientsRelay(t *testing.T) {
+	c, now := New(DefaultConfig("h1"), prng.New(1)), time.Unix(1000, 0)
+	c.Start(now, nil, kernel.Snapshot{})
+	c.Attach(now, 1, api.LocalAttach{Name: "db", Network: "n", Service: "db"})
+	var replies []Reply
+	for range 8 {
+		for _, a := range c.Actions(now) {
+			switch a := a.(type) {
+			case RunBatch:
+				c.BatchDone(now, a.Namespace, a.ID, len(a.Ops), nil)
+			case CallAttach:
+				// The new interface backs db, and its one peer is a client
+				// no slot of its own names.
+				n := client(3, a.Request.Interface, a.Request.PublicKey, backend("if-web", peer, "fd00::6"))
+				n.Interfaces[0].Reach = nil
+				c.AttachDone(now, a.Request.Interface, &api.AttachResponse{Interface: a.Request.Interface, State: n}, nil)
+			case Reply:
+				replies = append(replies, a)
+			}
+		}
+	}
+	if len(replies) != 1 || replies[0].Err != nil {
+		t.Fatalf("replies %+v before any ack; want the attach answered at once", replies)
+	}
+}
+
+func TestOnlyAnAwaitedAcknowledgmentChangesAnything(t *testing.T) {
+	c, now := adopted(t)
+	if err := c.State(now, state(3, nil, backend("if-b", peer, "fd00::6"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.State(now, api.StateUpdate{Host: "h1", Generation: 4, Networks: []api.NetworkState{client(4, "if-a", self, backend("if-b", peer, "fd00::6"))},
+		Present: []api.NetworkRef{{Network: "net-1", Revision: 4}}}); err != nil {
+		t.Fatal(err)
+	}
+	drive(c, now, succeed)
+	if c.RegistrationAcked(now, 40001, relayAt) {
+		t.Fatal("an acknowledgment for another port changed something")
+	}
+	if !c.RegistrationAcked(now, 40000, relayAt) {
+		t.Fatal("the awaited acknowledgment changed nothing")
+	}
+	if c.RegistrationAcked(now, 40000, relayAt) {
+		t.Fatal("a repeated acknowledgment changed something")
+	}
+}
+
+func TestANetworkThatLeavesWhileAPeerWaitsLeavesNoWakeBehind(t *testing.T) {
+	c, now := adopted(t)
+	if err := c.State(now, api.StateUpdate{Host: "h1", Generation: 3, Networks: []api.NetworkState{client(3, "if-a", self, backend("if-b", peer, "fd00::6"))},
+		Present: []api.NetworkRef{{Network: "net-1", Revision: 3}}}); err != nil {
+		t.Fatal(err)
+	}
+	drive(c, now, succeed)
+	if c.ns["sdn-a"].ackBy.IsZero() {
+		t.Fatal("the new peer waits on no acknowledgment")
+	}
+	if err := c.State(now, api.StateUpdate{Host: "h1", Generation: 4}); err != nil {
+		t.Fatal(err)
+	}
+	drive(c, now, succeed)
+	now = now.Add(2 * c.cfg.AckWait)
+	for range 4 {
+		c.Tick(now)
+		drive(c, now, succeed)
+	}
+	if next := c.NextWake(now); !next.After(now) {
+		t.Fatalf("next wake %v, at or before now %v: the loop would spin", next, now)
+	}
+}
+
+func TestAResendScheduleEndsWithItsNamespace(t *testing.T) {
+	c, now := adopted(t)
+	if err := c.State(now, api.StateUpdate{Host: "h1", Generation: 3, Networks: []api.NetworkState{client(3, "if-a", self, backend("if-b", peer, "fd00::6"))},
+		Present: []api.NetworkRef{{Network: "net-1", Revision: 3}}}); err != nil {
+		t.Fatal(err)
+	}
+	drive(c, now, succeed)
+	if len(c.resendAck) == 0 {
+		t.Fatal("no resend scheduled for the new direction")
+	}
+	c.Detach(now, 2, "if-a")
+	for range 8 {
+		for _, a := range c.Actions(now) {
+			switch a := a.(type) {
+			case RunBatch:
+				c.BatchDone(now, a.Namespace, a.ID, len(a.Ops), nil)
+			case CallRelease:
+				c.ReleaseDone(now, a.Interfaces, nil)
+			}
+		}
+	}
+	if _, ok := c.ns["sdn-a"]; ok {
+		t.Fatal("the detached namespace is still tracked")
+	}
+	for at := now; at.Before(now.Add(2 * time.Second)); at = at.Add(10 * time.Millisecond) {
+		c.Tick(at)
+		c.Actions(at)
+	}
+	if len(c.resends) > 0 || len(c.resendAck) > 0 {
+		t.Fatalf("after the namespace went: resends %d, resendAck %d", len(c.resends), len(c.resendAck))
+	}
+}

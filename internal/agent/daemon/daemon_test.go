@@ -11,6 +11,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/rs/zerolog"
 
 	agentcore "sdn.sh/internal/agent/core"
@@ -52,6 +53,7 @@ type soloCP struct{}
 
 func (soloCP) Attach(ctx context.Context, req api.AttachRequest) (*api.AttachResponse, error) {
 	n := api.NetworkState{Network: "net-1", Name: req.Network, Revision: 1, Prefix6: netip.MustParsePrefix("fd00::/64"), MTU: 1380,
+		Changed: time.Now(),
 		Interfaces: []api.Interface{{ID: req.Interface, Service: "svc-1", Kind: api.Workload, PublicKey: req.PublicKey,
 			Addr6: netip.MustParseAddr("fd00::5"), ListenPort: req.ListenPort, State: api.Live}}}
 	return &api.AttachResponse{Interface: req.Interface, State: n}, nil
@@ -133,6 +135,13 @@ func TestAnAttachIsAnsweredOnceItsResolverListens(t *testing.T) {
 	}
 	if n := testutil.ToFloat64(d.m.localCalls.WithLabelValues("attach", "ok")); n != 1 {
 		t.Fatalf("sdn_agent_local_calls_total{call=attach,result=ok} = %v, want 1", n)
+	}
+	var conv dto.Metric
+	if err := d.m.convergence.Write(&conv); err != nil {
+		t.Fatal(err)
+	}
+	if n := conv.GetHistogram().GetSampleCount(); n != 1 {
+		t.Fatalf("sdn_agent_convergence_seconds holds %d samples after one namespace settled, want 1", n)
 	}
 	// The census gauges refresh once a second.
 	deadline := time.Now().Add(3 * time.Second)
@@ -226,3 +235,29 @@ func TestTheEgressFilterRetriesAndFollowsTheHostsPrefixes(t *testing.T) {
 		t.Fatalf("after the underlay moved the filter blocks %v; want the new host prefix and the relay", got)
 	}
 }
+
+func TestAnUnderlayChangeBeforeDesiredStateKeepsTheEarlierFilter(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	core := agentcore.New(agentcore.DefaultConfig("h1"), prng.New(1))
+	d := New(DefaultConfig("h1"), core, &lockedKernel{k: kmodel.New()}, soloCP{}, memJournal{}, nil, nil, NewMetrics(prometheus.NewRegistry()), zerolog.Nop())
+	applied := make(chan []netip.Prefix, 16)
+	kept, host := netip.MustParsePrefix("192.0.2.1/32"), netip.MustParsePrefix("198.51.101.0/24")
+	d.Egress, d.EgressKept = egressFunc(func(b []netip.Prefix) error { applied <- b; return nil }), []netip.Prefix{kept}
+	d.HostPrefixes = func() ([]netip.Prefix, error) { return []netip.Prefix{host}, nil }
+	go d.Run(ctx)
+	<-d.Up()
+	d.UnderlayChanged()
+	select {
+	case got := <-applied:
+		if !slices.Contains(got, kept) || !slices.Contains(got, host) {
+			t.Fatalf("the filter blocks %v; want the earlier relay and the new host prefix", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("an underlay change before desired state left the filter as it was")
+	}
+}
+
+type egressFunc func([]netip.Prefix) error
+
+func (f egressFunc) EnsureEgress(b []netip.Prefix) error { return f(b) }

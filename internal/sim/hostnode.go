@@ -135,7 +135,8 @@ func (h *hostNode) start() {
 	h.renew()
 }
 
-// crash kills the agent. The kernel, the journal and the workloads stay.
+// crash kills the agent. The kernel, the journal and the workloads stay;
+// the sockets the agent held close.
 func (h *hostNode) crash() {
 	if !h.up {
 		return
@@ -143,6 +144,7 @@ func (h *hostNode) crash() {
 	h.w.summary.AgentCrashes++
 	h.w.logf("%s agent crashes", h.name)
 	h.up = false
+	h.kernel.AgentExit()
 	h.inc++
 	h.core = nil
 	for _, id := range slices.Sorted(maps.Keys(h.requests)) {

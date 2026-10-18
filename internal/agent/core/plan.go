@@ -28,6 +28,7 @@ func (c *Core) Actions(now time.Time) []Action {
 		i := c.ifaces[st.iface]
 		ops := c.plan(now, st, i)
 		if len(ops) == 0 {
+			c.Stats.Idle++
 			c.settled(now, st, i)
 			continue
 		}
@@ -48,7 +49,7 @@ func (c *Core) plan(now time.Time, st *nsState, i *iface) []kernel.Op {
 	// phase owes them nothing.
 	st.nextDrain = time.Time{}
 	if i == nil || i.phase != configuring && i.phase != ready {
-		c.dropAcks(st)
+		c.dropWaits(st)
 	}
 	if st.ref != "" {
 		if st.reaped {
@@ -94,6 +95,33 @@ func (c *Core) plan(now time.Time, st *nsState, i *iface) []kernel.Op {
 	return ops
 }
 
+// dropWaits forgets everything a namespace's slots wait on.
+func (c *Core) dropWaits(st *nsState) {
+	st.awaiting = nil
+	c.setReverse(st, nil)
+	c.dropAcks(st)
+}
+
+// setReverse records the co-located interfaces a namespace waits on, so a
+// batch done on one replans only the namespaces waiting for it.
+func (c *Core) setReverse(st *nsState, ids []model.InterfaceID) {
+	for _, id := range st.reverse {
+		if w := c.reverseWait[id]; w != nil {
+			delete(w, st.name)
+			if len(w) == 0 {
+				delete(c.reverseWait, id)
+			}
+		}
+	}
+	st.reverse = ids
+	for _, id := range ids {
+		if c.reverseWait[id] == nil {
+			c.reverseWait[id] = map[string]bool{}
+		}
+		c.reverseWait[id][st.name] = true
+	}
+}
+
 // dropAcks forgets every acknowledgment a namespace's peers wait on.
 func (c *Core) dropAcks(st *nsState) {
 	port := uint16(0)
@@ -122,7 +150,6 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 		}
 		st.revision = n.Revision
 	}
-	st.awaiting = nil
 	var tgt target
 	if ok {
 		tgt = c.target(now, st, n, x)
@@ -134,6 +161,7 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 			c.Debug(fmt.Sprintf("plan %s rev %d state %s desired %v target %d installed %d", st.name, n.Revision, x.State, ids, len(tgt.peers), len(st.peers)))
 		}
 	} else {
+		c.dropWaits(st)
 		tgt = target{rules: &nft.Ruleset{}}
 	}
 	st.nextDrain = tgt.nextDrain
@@ -391,11 +419,11 @@ func (c *Core) BatchDone(now time.Time, namespace string, id uint64, done int, e
 	}
 }
 
-// rearm replans every namespace awaiting a co-located device's reverse
-// peer, since the batch just done may have installed it.
-func (c *Core) rearm(done *nsState) {
-	for _, name := range slices.Sorted(maps.Keys(c.ns)) {
-		if st := c.ns[name]; st != done && len(st.awaiting) > 0 {
+// rearm replans the namespaces waiting for a co-located device to hold
+// their reverse peers, once its namespace's peers may have changed.
+func (c *Core) rearm(changed *nsState) {
+	for _, name := range slices.Sorted(maps.Keys(c.reverseWait[changed.iface])) {
+		if st, ok := c.ns[name]; ok && st != changed {
 			st.dirty = true
 		}
 	}
@@ -519,6 +547,7 @@ func (c *Core) Observed(now time.Time, ns kernel.Namespace, err error) {
 		}
 	}
 	defer c.registerFresh(now, st)
+	c.rearm(st)
 	for _, key := range slices.SortedFunc(maps.Keys(st.chosen), compareKey) {
 		if _, ok := st.peers[key]; !ok {
 			delete(st.chosen, key)

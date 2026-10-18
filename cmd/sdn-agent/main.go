@@ -114,6 +114,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	var kept []netip.Prefix
 	if *egress {
 		ipv6, err := linux.EnableForwarding()
 		if err != nil {
@@ -130,8 +131,7 @@ func run() error {
 		// A filter an earlier run installed names relays that desired
 		// state names again only once the control plane answers; until
 		// then it keeps blocking them.
-		kept, err := kern.EgressBlocked()
-		if err != nil {
+		if kept, err = kern.EgressBlocked(); err != nil {
 			return err
 		}
 		if err := kern.EnsureEgress(slices.Concat(kept, blocked, own)); err != nil {
@@ -142,7 +142,7 @@ func run() error {
 	core := agentcore.New(cfg.Core, rand.Reader)
 	d := daemon.New(cfg, core, kern, cp, j, raw, prober, daemon.NewMetrics(reg), log)
 	if *egress {
-		d.Egress, d.EgressBase, d.HostPrefixes = kern, blocked, hostPrefixes
+		d.Egress, d.EgressBase, d.EgressKept, d.HostPrefixes = kern, blocked, kept, hostPrefixes
 	}
 	if *serveDNS {
 		up, err := resolver.Upstream("/etc/resolv.conf")

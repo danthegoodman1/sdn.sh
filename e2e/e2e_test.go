@@ -184,4 +184,3 @@ func grep(text, pattern string) string {
 	}
 	return strings.Join(out, "\n")
 }
-

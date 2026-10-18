@@ -27,6 +27,7 @@ import (
 	"sdn.sh/internal/devconf"
 	"sdn.sh/internal/lab"
 	"sdn.sh/internal/model"
+	"sdn.sh/internal/store/pgstore/pgtest"
 )
 
 // newLab starts a lab for one test, named for it so a crashed run's leftovers
@@ -45,8 +46,9 @@ func newLab(t *testing.T, name string, cpArgs ...string) *lab.Lab {
 	}
 	dir := t.TempDir()
 	store := "memory"
-	if dsn := os.Getenv("SDN_TEST_POSTGRES"); dsn != "" {
-		store = dsn
+	if os.Getenv("SDN_TEST_POSTGRES") != "" {
+		// A schema of its own, so a test never sees another's records.
+		store = pgtest.NewSchema(t)
 	}
 	l, err := lab.New(lab.Options{Name: name, Dir: dir, Bin: bin, Store: store, CPArgs: cpArgs, Log: testWriter{t}})
 	if err != nil {
@@ -842,4 +844,50 @@ func TestEveryDaemonReportsWhatItDoes(t *testing.T) {
 		t.Errorf("the control plane's revocation line: %v", lines)
 	}
 	_ = r2
+}
+
+// TestTrafficOutlivesTheControlPlaneAndARestartRevokesNothing stops the
+// control plane for longer than a lease term: traffic continues on what
+// the agents hold, and the restarted control plane holds expiry off until
+// agents have renewed, so no interface is revoked.
+func TestTrafficOutlivesTheControlPlaneAndARestartRevokesNothing(t *testing.T) {
+	if os.Getenv("SDN_TEST_POSTGRES") == "" {
+		t.Skip("needs a durable store: set SDN_TEST_POSTGRES")
+	}
+	l := newLab(t, "e2em", fastClocks...)
+	ctx := context.Background()
+	relay := must(l.AddRelay(ctx, "r1"))
+	h1 := must(l.AddHost(ctx, "h1"))
+	h2 := must(l.AddHost(ctx, "h2"))
+	svc := webDB(t, l, relay)
+	db := attachDB(t, h2, "db-1")
+	web := must(h1.Attach(ctx, "web-1", "prod", "web"))
+	dbAddr := netip.AddrPortFrom(svc.Addr6, 5432)
+	if _, err := lab.DialUntil(web.Namespace, dbAddr, 20*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	l.CP().Stop()
+	// Past a lease term with no control plane.
+	time.Sleep(9 * time.Second)
+	if got, err := lab.Dial(web.Namespace, dbAddr, 2*time.Second); err != nil || got != "db-1" {
+		t.Fatalf("during the outage: %q %v", got, err)
+	}
+	if err := l.RestartCP(); err != nil {
+		t.Fatal(err)
+	}
+	// Give the agents a renewal or two, then check nothing was revoked.
+	time.Sleep(4 * time.Second)
+	for _, i := range must(l.Admin.Interfaces(ctx, "prod")) {
+		if (i.ID == web.Interface || i.ID == db.Interface) && i.State != api.Live {
+			t.Errorf("%s is %s after the control plane returned", i.ID, i.State)
+		}
+	}
+	if got, err := lab.Dial(web.Namespace, dbAddr, 2*time.Second); err != nil || got != "db-1" {
+		t.Fatalf("after the restart: %q %v", got, err)
+	}
+	// Change works again.
+	db2 := attachDB(t, h2, "db-2")
+	if db2.Interface == "" {
+		t.Fatal("no attach after the restart")
+	}
 }

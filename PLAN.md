@@ -10,7 +10,7 @@ v1 is deliberately smaller than the spec. These are designed and deferred, not m
 - **Direct paths.** An endpoint rewrite over a working relay, so it is an optimization of a shipped path rather than a second architecture.
 - **Guest-owned keys.** The control plane already only ever sees public keys, so this needs no protocol change later.
 - **Application health checking.** An interface joins a service when its lease is live and its agent reports the interface up.
-- **`sk_lookup` or XDP in the relay.** Required for the stated edge capacity, so the userspace relay ships with a documented edge ceiling and this follows in Phase 6.
+- **`sk_lookup` or XDP in the relay.** Required for the stated edge capacity, so the userspace relay ships with a documented edge ceiling and this follows in Phase 7.
 
 The **device pool** has left the plan rather than being deferred: creating a device straight into the workload namespace removes the namespace move, which was the only reason a pool was worth its bookkeeping.
 
@@ -135,7 +135,7 @@ Scope:
 - Relay peers configured without `persistent-keepalive`, once the NAT test below passes. Until the registration datagram ships, relay peers keep keepalive, because the current relay learns endpoints only from traffic.
 
 Out of scope:
-- `sk_lookup` and XDP, which Phase 6 covers.
+- `sk_lookup` and XDP, which Phase 7 covers.
 - Anycast relay addressing.
 
 Completion gate:
@@ -253,7 +253,45 @@ Status ledger:
 | Incomplete | Gate | Every Trust claim has a cannot-reach assertion | Missing: the suite. |
 | Incomplete | Risk | Island partitions serve stale state | Documented in SPEC.md; needs a test pinning the behavior rather than fixing it. |
 
-## Phase 6: Performance hardening
+## Phase 6: Development machines
+
+Goal:
+A developer joins a network from a laptop with a stock WireGuard client and reaches services by name, under the same policy, leases and revocation as any interface.
+
+Scope:
+- A gateway interface: agent-managed, on a host with an inbound UDP port, routing the network's prefixes, translating service addresses in `prerouting`, and serving the network's names.
+- Config generation that mints the keypair on the developer's machine, registers only the public key, and writes a standard `wg-quick` file that the macOS app imports unmodified.
+- The policy compiler treating a development machine as an interface: a peer on its gateway, its addresses in each permitted backend's entry for that gateway, and nftables rules naming it.
+- Fixed-term leases, extended by regenerating the config, and revocation that removes the machine from its gateway and from the backends' entries with no grace period.
+
+Out of scope:
+- Reaching a gateway through a relay, since a stock client cannot send the registration datagram.
+- Failover between gateways.
+- An agent on macOS or Windows.
+
+Completion gate:
+A generated config, imported unmodified into the macOS WireGuard app, reaches a service by name, keeps working through a backend replacement, and reaches nothing once its lease is revoked, while every flow policy does not name stays dropped at the receiver.
+
+Testing plan:
+- In CI, a namespace running `wg-quick` with a generated config stands in for the laptop: it reaches a service by name, and the backend sees the laptop's own address as the source.
+- A backend replacement while the laptop holds a connection open: established connections stay with the old backend, new ones reach the new backend, and the config is unchanged.
+- Revocation: the laptop reaches nothing, with no grace period.
+- Cannot-reach assertions in each family: a service policy does not name, and one laptop sending as another laptop's address through the same gateway.
+- A test asserting the control plane never receives the laptop's private key.
+- A manual run importing the generated file into the macOS WireGuard app.
+
+Status ledger:
+
+| Status | Type | Item | Evidence / Gap |
+| --- | --- | --- | --- |
+| Incomplete | Scope | Gateway interface: prefixes, `prerouting` translation, resolver | Missing: implementation. |
+| Incomplete | Work | 6A: Config generation with the key minted on the developer's machine | Missing: implementation. |
+| Incomplete | Work | 6B: Policy compilation for development machines | Missing: implementation plus compiler tests. |
+| Incomplete | Work | 6C: Fixed-term leases and revocation through the gateway | Missing: implementation. |
+| Incomplete | Gate | A stock macOS client reaches a service by name and loses access on revocation | Missing: test. |
+| Incomplete | Test | One laptop cannot send as another through a shared gateway | Missing: adversarial test. |
+
+## Phase 7: Performance hardening
 
 Goal:
 Take the throughput levers the measurements identified, in the order their payoff warrants.
@@ -282,13 +320,13 @@ Status ledger:
 | --- | --- | --- | --- |
 | Complete | Doc | Per-core one-way encryption, ~1.3–1.5 Gbit/s at a 1380-byte MTU | SPEC.md "Encryption at the edge". |
 | Complete | Doc | MTU lever is worth 4.4× for 1.15× CPU, on paths that carry large frames | SPEC.md; measured on loopback, so it does not apply across the internet. |
-| Incomplete | Work | 6A: XDP or TC relay data path | Missing: implementation. Userspace baseline carried ~118k pps on a hot edge; `sk_lookup` alone fixes only the receive side, so sends need a raw socket or the whole path moves to XDP/TC. |
-| Incomplete | Work | 6B: Underlay MTU probing and overlay raise | Missing: implementation. |
-| Incomplete | Work | 6C: Direct paths with relay fallback | Missing: implementation. |
-| Incomplete | Work | 6D: Loopback short-circuit, keepalive on one side only | Missing: implementation and the simultaneous-send test. Both sides armed was observed to lock step for minutes on Linux 7.0; see SPEC.md "Paths". |
+| Incomplete | Work | 7A: XDP or TC relay data path | Missing: implementation. Userspace baseline carried ~118k pps on a hot edge; `sk_lookup` alone fixes only the receive side, so sends need a raw socket or the whole path moves to XDP/TC. |
+| Incomplete | Work | 7B: Underlay MTU probing and overlay raise | Missing: implementation. |
+| Incomplete | Work | 7C: Direct paths with relay fallback | Missing: implementation. |
+| Incomplete | Work | 7D: Loopback short-circuit, keepalive on one side only | Missing: implementation and the simultaneous-send test. Both sides armed was observed to lock step for minutes on Linux 7.0; see SPEC.md "Paths". |
 | Incomplete | Gate | Every lever measured against the path it replaces | Missing: measurements. |
 
-## Phase 7: Open questions
+## Phase 8: Open questions
 
 Goal:
 Settle what the design leaves open, with measurement rather than argument.

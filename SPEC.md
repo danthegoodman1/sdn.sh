@@ -266,6 +266,34 @@ Compilation produces two things, and default is deny:
 
 The veth carries per-host addresses outside the network's prefixes, in whichever families the host can route, so a service without IPv4 still reaches the IPv4 internet. IPv6 egress is masqueraded like IPv4, because the network's IPv6 addresses are ULAs.
 
+### Development machines
+
+A developer joins a network from a laptop with a stock WireGuard client, such as the macOS app or `wg-quick`, by importing a generated config. The laptop becomes an interface like any other, with its own key, addresses and lease, and policy names it like any other.
+
+```ini
+[Interface]
+PrivateKey = <minted on the laptop>
+Address = fd8a:2c41:7e09::51/128, 10.42.0.51/32
+DNS = fd8a:2c41:7e09::3, shop.internal
+MTU = 1380
+
+[Peer]
+PublicKey = <the gateway interface's public key>
+Endpoint = gw.example.com:51820
+AllowedIPs = fd8a:2c41:7e09::/64, 10.42.0.0/16
+PersistentKeepalive = 25
+```
+
+- **The laptop mints its own key.** The tool that writes the config generates the keypair locally and registers only the public half, so the control plane still sees public keys only. A web page can do the same in the browser.
+- **The laptop has one peer: a gateway interface.** A stock client holds a static peer list and runs no agent, so it can neither follow backends as they churn nor translate service addresses itself. It peers with a gateway instead: an agent-managed interface on a Linux host that routes the network's prefixes. The config stays valid as backends come and go.
+- **The gateway translates and forwards.** It translates service addresses in its `prerouting` hook, as any forwarding namespace does, and forwards to the backend with the laptop's own address as the source. Each backend's peer entry for the gateway carries the addresses of the laptops it fronts, the one peer entry that holds more than its own addresses, so receivers enforce policy against the laptop's address like any other source. The gateway's own peer entry for each laptop stops one laptop sending as another.
+- **The laptop dials the gateway directly.** A stock client cannot send the relay's registration datagram, so the gateway host exposes one inbound UDP port, and the laptop's keepalive holds its own NAT mapping open.
+- **The gateway serves names.** The `DNS` line points at a resolver the agent serves on the gateway's address, answering the network's names and forwarding everything else, and the search domain lets `db` resolve on the laptop as it does in a workload.
+- **The lease has a fixed term.** No agent renews it, so the control plane issues it with an expiry and the developer regenerates the config to extend it. Revocation removes the laptop's peer from the gateway and its addresses from the backends' entries, with no grace period.
+- **IPv6 keeps the laptop's routes clean.** ULA prefixes are random, so a network's IPv6 prefix collides neither with another network's nor with the laptop's own LAN. Two networks with overlapping IPv4 prefixes cannot both be routed on one laptop.
+
+The gateway decrypts the laptop's traffic and re-encrypts it toward backends, the terminating hop the design avoids for workloads. A developer's traffic needs reach rather than throughput, so the cost is acceptable here, and the laptop trusts the gateway's host the way a workload trusts its own.
+
 ### Leases and keys
 
 A lease binds `(interface, public key, host)` with a TTL the agent renews. **The host agent mints the keypair**; the private half never leaves the host and the control plane only ever sees public keys. The key is minted at attach and discarded at detach, and no key is ever reused.
@@ -343,6 +371,7 @@ Every namespace clamps TCP MSS, and ICMP and ICMPv6 `Packet Too Big` are permitt
 
 - **Workloads trust their own host.** A host running a workload can read its traffic. The guest-owned key variant moves that boundary into the guest. What is untrusted is the path between hosts, not the host a workload runs on.
 - **Workloads do not trust relays with data.** A relay forwards ciphertext and holds no key that decrypts or forges traffic — only the per-relay registration keys that let it authenticate an endpoint change. It is trusted for availability: it can drop or misdeliver. A compromised relay cannot register endpoints at its peers, because each relay's key is derived from its own identity.
+- **Development machines trust their gateway's host.** The gateway decrypts their traffic, and receivers accept the laptop addresses it carries. A compromised gateway host speaks as the laptops it fronts and no others.
 - **Workloads do not trust the control plane with data.** It distributes public keys, addresses, and policy, and carries no packet and no private key.
 - **Hosts do not vouch for each other.** Authorization is per interface and per lease, so a compromised host reaches only what its current leases grant.
 - **Every decision is enforced at the receiver.** `AllowedIPs` and nftables both run in the destination's kernel, so a sender cannot widen what it may do by changing its own configuration.
@@ -356,6 +385,7 @@ Every namespace clamps TCP MSS, and ICMP and ICMPv6 `Packet Too Big` are permitt
 | **One relay** | Agents repoint endpoints to another relay in the set, where both sides are already registered. Established flows **survive**: keys, sessions and conntrack all live at the edges, so a sub-second repoint looks like brief packet loss and TCP retransmits across it. |
 | **Every relay in a network** | Only loopback and direct paths survive. |
 | **A host** | Its leases expire, and its interfaces leave every backend map. Workloads elsewhere are unaffected. |
+| **A gateway** | Development machines joined through it lose the network until it returns. Workloads are unaffected. |
 | **A workload** | Its interface stays leased while the agent renews, so a restart in place keeps the address and the keys. |
 | **The agent** | Traffic continues: the kernel holds the data plane. Name resolution pauses rather than failing: the resolver's listening descriptors are handed across the restart, so queries wait in the socket buffer and are answered once the agent reloads its state. |
 | **Partition between client and server** | WireGuard retries handshakes; the flow resumes when connectivity does. |
@@ -527,14 +557,14 @@ Semantics are verifiable inside one Linux kernel, with namespaces standing in fo
 
 ## Scope
 
-Supported: L3 overlays carrying IPv6 and, per service, IPv4, over an IPv4 or IPv6 underlay, TCP and UDP and any other IP protocol, overlapping address spaces, multi-instance services, per-connection selection, Linux hosts with kernel WireGuard.
+Supported: L3 overlays carrying IPv6 and, per service, IPv4, over an IPv4 or IPv6 underlay, TCP and UDP and any other IP protocol, overlapping address spaces, multi-instance services, per-connection selection, Linux hosts with kernel WireGuard, and development machines on any OS with a stock WireGuard client.
 
 Out of scope for now:
 
 - **L2.** No broadcast, multicast, or Ethernet-level attachment.
 - **Live connection migration.** Stable address with bounded interruption is the promise.
 - **Exclusive-writer guarantees.** See [Convergence](#convergence).
-- **Non-Linux workloads.** A laptop or a Windows host joins through a gateway interface that routes a network's prefix, and the gateway is a normal interface with a wider `AllowedIPs`.
+- **Non-Linux workloads.** The agent runs on Linux only. A macOS or Windows development machine still joins, through a gateway with a stock WireGuard client; see [Development machines](#development-machines).
 - **Application health checking.** An interface joins a service's backend map when its lease is live and its agent reports the interface up.
 - **Sender-side policy for `CAP_NET_ADMIN` workloads.** Such a workload keeps its identity, since the receiver enforces it, and loses only the local layer that would have stopped it from trying.
 

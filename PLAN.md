@@ -62,8 +62,8 @@ Status ledger:
 
 | Status | Type | Item | Evidence / Gap |
 | --- | --- | --- | --- |
-| Complete | Gate | 10,000-seed simulator sweep with no failures | `go run ./cmd/sdn-sim --seeds 10000 1` at `46afa06`: 0 of 10,000 failed, 1,355s on the Core Ultra 9. The sweep before it, at `0ceb8f3`, failed seeds 371, 2425 and 3389 (1G), which `TestAnUnnamedNamespaceLivesWhileTheAgentHoldsIt` now replays. |
-| Complete | Gate | Every planted bug caught | `go run ./scripts/mutants -root -all-layers -jobs 6` at `29c0c28`, with Postgres: 90 of 93 caught in 733s. `egress-filter-outlives-namespace` had never been caught, since no simulator seed tears down an egress-granted interface whose namespace vanished; `TestAnInterfaceWhoseNamespaceVanishesIsTornDown` now gives it a grant and checks the index. `unmounted-name-accepted` and `metric-increment-dropped` had stopped compiling. All three caught on rerun. |
+| Complete | Gate | 10,000-seed simulator sweep with no failures | `go run ./cmd/sdn-sim --seeds 10000 1` at `429463a`: 0 of 10,000 failed, 1,368s on the Core Ultra 9. The sweep at `0ceb8f3` failed seeds 371, 2425 and 3389 (1G), which `TestAnUnnamedNamespaceLivesWhileTheAgentHoldsIt` now replays; one at `46afa06` passed before the changes in 2F. |
+| Complete | Gate | Every planted bug caught | `go run ./scripts/mutants -root -all-layers -jobs 6` at `429463a`, with Postgres: 94 of 94 caught in 742s. The run before it, at `29c0c28`, caught 90 of 93: `egress-filter-outlives-namespace` had never been caught, since no simulator seed tears down an egress-granted interface whose namespace vanished, and `TestAnInterfaceWhoseNamespaceVanishesIsTornDown` now gives it a grant and checks the index; `unmounted-name-accepted` and `metric-increment-dropped` had stopped compiling. |
 | Complete | Gate | Code review, findings fixed or recorded | Reviews of the agent and kernel (1F), the control plane (2E), the relay (3H), and the acknowledgment work (1G); what they left is recorded as Risk rows in Phases 1 and 9. |
 
 ## Phase 0: Scaffold
@@ -92,7 +92,7 @@ Status ledger:
 | Complete | Work | 0A: Go 1.27.2 and package layout | `go.mod` (`go 1.27.2`); deterministic cores in `internal/agent/core`, `internal/relay/core`, `internal/cp`, `internal/compile`, `internal/dns`, `internal/nft`, `internal/sim`, each with its daemon around it. |
 | Complete | Work | 0B: Determinism check | `internal/detcheck`: `TestModuleIsDeterministic` loads every `//sdn:deterministic` package; `TestFixtureViolatesEveryRule` fails a fixture on clocks, goroutines, channels, global randomness, I/O imports, package variables and unsorted map iteration. |
 | Complete | Work | 0C: Simulator frame with seed replay and sweeps | `internal/sim` (`TestASeedReplaysExactly`, `TestNetworkReplaysFromItsSeed`, `TestEventsAtOneInstantRunInScheduleOrder`, `TestPartitionHoldsBackDelivery`); `cmd/sdn-sim --seeds N S` sweeps in parallel and `--trace SEED` replays with the last events. |
-| Complete | Work | 0D: Planted-bug harness | `scripts/mutants`: 93 mutants across 17 layers, `pgstore` among them when `SDN_TEST_POSTGRES` is set, `-root -all-layers`, `-only`, `-plant`; `TestEveryMutantApplies` fails when a mutant's anchor stops matching. Skips nested repositories such as worktrees. |
+| Complete | Work | 0D: Planted-bug harness | `scripts/mutants`: 94 mutants across 17 layers, `pgstore` among them when `SDN_TEST_POSTGRES` is set, `-root -all-layers`, `-only`, `-plant`; `TestEveryMutantApplies` fails when a mutant's anchor stops matching. Skips nested repositories such as worktrees. |
 | Complete | Work | 0E: Telemetry wiring | `internal/telemetry` (`TestLoggerTagsItsComponent`, `TestServerServesMetricsAndReadiness`): zerolog JSON or console, one Prometheus registry, `/metrics`, `/healthz`, `/readyz` and pprof per daemon. |
 | Complete | Work | 0F: CI workflow | `.github/workflows/ci.yml` calls `scripts/ci` for check, test, Postgres 18 service, a 500-seed simulation from the commit hash, kernel tests and e2e as root, and Terraform; actionlint clean. |
 | Complete | Gate | Build, vet, tests and replay pass | `go build ./... && go vet ./... && go test ./...` pass at the commit that records this ledger; `scripts/ci all` passed locally with Postgres. |
@@ -153,7 +153,7 @@ Status ledger:
 | Complete | Test | Kill-at-each-step recovery with no orphans | The simulator's agent crashes, and e2e `TestAnAgentKilledMidLifeAdoptsItsInterfacesAndLeaksNothing`. |
 | In Progress | Gate | Attach to first packet under 100ms at degree 20 | Lab, one machine, 30 rounds (`sdn-lab --plan attach`): first connection p50 21.4ms and max 54ms on the memory store, p50 39.8ms and max 55.7ms on Postgres, with each attach answered once the active relay acknowledges its new peers. Needs: the figure on a 4-vCPU EC2 host. |
 | Incomplete | Gate | Attach and detach over 100/s | Lab: 24 pairs a second on Postgres, where 11 of 370 attaches outlasted the agent's 10-second wait after 20 serialization failures, and 38 on the memory store, across three hosts sharing one kernel with 32 loops each (`sdn-lab --plan churn --concurrency 32 --churn-degree 20`). Every control-plane write takes one revision row (SPEC.md "Open questions"). Needs: EC2 hosts, and a control plane whose writes do not all serialize; Phase 9 item 9E. |
-| In Progress | Gate | 10,000-seed sweep, planted bugs caught, code review | See "Every phase's gate" below. |
+| Complete | Gate | 10,000-seed sweep, planted bugs caught, code review | See "Every phase's gate". |
 
 ## Phase 2: Control plane, API and storage
 
@@ -204,7 +204,7 @@ Status ledger:
 | Complete | Work | 2F: An IPv4 address's quarantine runs from its holder's drain | The simulator's `/28` regression options found an address held by two connected interfaces: a release's quarantine ran from the release, a control-plane outage held the drain past it, and the address went to a new interface while peers still routed it to the old. The quarantine now starts when the interface drains (`TestAnIPv4AddressWaitsOutItsQuarantineFromItsHoldersDrain`), and the configuration needs only a positive quarantine; mutant `ipv4-quarantine-from-release`. |
 | Blocked | Decision | Which networks a host may join | A host token authorizes attaches into every service of every network, so a compromised host reaches whatever policy grants any service it joins; SPEC.md records it under Trust and in "Open questions". Blocked by: a product decision on how hosts are scoped — by network, by service, or by attestation. |
 | Complete | Test | The control plane on Postgres outlives an outage | e2e `TestTrafficOutlivesTheControlPlaneAndARestartRevokesNothing`, Postgres only. |
-| In Progress | Gate | 10,000-seed sweep, planted bugs caught, code review | See "Every phase's gate" below. |
+| Complete | Gate | 10,000-seed sweep, planted bugs caught, code review | See "Every phase's gate". |
 
 ## Phase 3: The relay in production shape
 
@@ -259,7 +259,7 @@ Status ledger:
 | In Progress | Test | Round-trip time per path, idle and under load, against the plain underlay | Lab: relay p50 0.25ms idle and 7.5ms loaded, gateway 0.77ms and 1.8ms, plain TCP 0.007ms and 0.013ms. Needs: EC2. |
 | Complete | Test | Unknown port, unauthorized source, and hijack all rejected | `TestAnUnknownPortDrops`, `TestAnUnauthorizedSourceIsDropped`, `TestNoOneHijacksADirection`; the simulator's attacker sends to every port it has seen and replays every registration it captured, and any forward or release to it fails the run. |
 | Complete | Decision | Registration packet format, key distribution, and a port the relay has yet to bind | SPEC.md "The relay": 32 bytes, a per-relay key derived from a per-direction secret, keys pushed in the port table; a registration that beats the relay's bind is lost and resent, and a 16-byte acknowledgment with no MAC tells the agent the relay holds it. |
-| In Progress | Gate | 10,000-seed sweep, planted bugs caught, code review | See "Every phase's gate" below. |
+| Complete | Gate | 10,000-seed sweep, planted bugs caught, code review | See "Every phase's gate". |
 
 ## Phase 4: Services, selection and convergence
 
@@ -309,7 +309,7 @@ Status ledger:
 | Complete | Work | 4D: Stub resolver with descriptors handed across restarts | `internal/dns` (`TestAWorkloadResolvesOnlyWhatItMayReach`, `TestAnIPv6OnlyClientReceivesNoARecord`, `TestGarbageIsIgnoredOrRefusedNeverCrashes`); `internal/agent/resolver` with systemd's descriptor store; e2e `TestAQuerySentWhileTheAgentRestartsWaitsAndIsAnswered` (379–584ms). Each namespace forwards at most 64 UDP queries at once off the loop that answers local names, and holds at most 16 TCP connections (`TestASlowUpstreamDelaysNoLocalAnswer`, `TestATCPConnectionPastTheCapIsClosed`); the descriptor store holds 65,536; mutants `resolver-forwards-inline`, `resolver-tcp-uncapped`. |
 | Complete | Gate | Single-instance replace flips atomically, nothing broken | e2e `TestAReplacedBackendKeepsItsConnectionsUntilTheGracePeriodEnds`; `TestAnElementUpdateMovesNewConnectionsOnly`. |
 | In Progress | Gate | Convergence p99 under 250ms including the slot-map rewrite | Lab, 30 clients on 3 hosts under churn, two runs: cold replacement max 164–178ms, warm removal max 171–210ms (`sdn-lab --plan converge`). Needs: EC2, and the rewrite across hundreds of namespaces. |
-| In Progress | Gate | 10,000-seed sweep, planted bugs caught, code review | See "Every phase's gate" below. |
+| Complete | Gate | 10,000-seed sweep, planted bugs caught, code review | See "Every phase's gate". |
 
 ## Phase 5: Isolation, policy enforcement and failure behavior
 
@@ -350,7 +350,7 @@ Status ledger:
 | Complete | Work | 5C: Partition behavior and workload-liveness teardown | e2e `TestTrafficOutlivesTheControlPlaneAndARestartRevokesNothing`; `TestExpiryWaitsOutTheControlPlanesDowntime`; the simulator crashes and partitions the control plane. |
 | In Progress | Gate | Every Trust claim has a cannot-reach assertion | Covered: forbidden port and direction in both families, the underlay, relays and own host, egress beyond its grant, one laptop as another, a backend opening a flow to a laptop, a revoked interface. Missing: a peer spoofing a source address from a workload namespace, and a workload with `CAP_NET_ADMIN` widening its own `AllowedIPs`, each asserted at the receiver. |
 | Incomplete | Risk | Island partitions serve stale state | Documented in SPEC.md "Leases and keys". Needs: a simulator scenario pinning the behavior. |
-| In Progress | Gate | 10,000-seed sweep, planted bugs caught, code review | See "Every phase's gate" below. |
+| Complete | Gate | 10,000-seed sweep, planted bugs caught, code review | See "Every phase's gate". |
 
 ## Phase 6: Development machines
 
@@ -391,7 +391,7 @@ Status ledger:
 | Complete | Test | One laptop cannot send as another through a shared gateway | e2e: a second laptop that takes the first's address reaches nothing; the gateway's peer for each machine allows its own addresses alone. |
 | Incomplete | Test | Development machines in the simulator | The simulator attaches no devices or gateways, so their ordering and churn run only in unit and e2e tests. |
 | Incomplete | Gate | A stock macOS client reaches a service by name and loses access on revocation | The e2e laptop is Linux `wg-quick` semantics. Needs: a manual run importing a generated file into the macOS WireGuard app. |
-| In Progress | Gate | 10,000-seed sweep, planted bugs caught, code review | See "Every phase's gate" below. |
+| Complete | Gate | 10,000-seed sweep, planted bugs caught, code review | See "Every phase's gate". |
 
 ## Phase 7: Telemetry
 

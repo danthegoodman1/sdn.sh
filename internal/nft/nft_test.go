@@ -1,6 +1,7 @@
 package nft
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"testing"
@@ -110,6 +111,15 @@ func TestApplyRejectsUpdatesToMissingObjects(t *testing.T) {
 	}
 	if _, err := Apply(rs, Transaction{Rules: &Rules{Translate: []Translate{{Addr: netip.MustParseAddr("fd00::9"), Map: "nope"}}}}); err == nil {
 		t.Fatal("wrote a rule naming a missing map")
+	}
+	// The kernel fails a whole batch that deletes a missing element, and
+	// accepts one that adds a present element.
+	withSet := &Ruleset{Sets: []Set{{Name: "s", Family: IPv6, Addrs: []netip.Addr{netip.MustParseAddr("fd00::2")}}}}
+	if _, err := Apply(withSet, Transaction{SetDel: []SetElems{{Set: "s", Addrs: []netip.Addr{netip.MustParseAddr("fd00::1")}}}}); !errors.Is(err, ErrMissing) {
+		t.Fatalf("deleting a missing element: %v, want ErrMissing", err)
+	}
+	if _, err := Apply(withSet, Transaction{SetAdd: []SetElems{{Set: "s", Addrs: []netip.Addr{netip.MustParseAddr("fd00::2")}}}}); err != nil {
+		t.Fatalf("adding a present element: %v", err)
 	}
 }
 

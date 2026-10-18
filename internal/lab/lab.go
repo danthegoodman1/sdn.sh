@@ -626,7 +626,7 @@ func (h *Host) startUnit(args []string) error {
 	// bind-mounts; nsenter execs, so the agent stays the main process.
 	run := []string{"systemd-run", "--unit=" + h.Unit, "--collect",
 		"-p", "Restart=always", "-p", "RestartSec=300ms",
-		"-p", "NotifyAccess=main", "-p", "FileDescriptorStoreMax=4096", "-p", "FileDescriptorStorePreserve=yes",
+		"-p", "NotifyAccess=main", "-p", "FileDescriptorStoreMax=65536", "-p", "FileDescriptorStorePreserve=yes",
 		"-p", "StandardOutput=append:" + logPath, "-p", "StandardError=append:" + logPath,
 		"--", "nsenter", "--net=/run/netns/" + h.NS, "--"}
 	if err := sh(append(run, args...)...); err != nil {

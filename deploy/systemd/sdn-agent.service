@@ -15,7 +15,9 @@ ExecStart=/usr/local/bin/sdn-agent $SDN_AGENT_ARGS
 Restart=always
 RestartSec=300ms
 NotifyAccess=main
-FileDescriptorStoreMax=4096
+# Two descriptors per namespace, UDP and TCP, plus two per extra resolver
+# address: enough for every listen port a host can hand out.
+FileDescriptorStoreMax=65536
 FileDescriptorStorePreserve=yes
 # One netlink socket per workload namespace, and devices by the thousand.
 LimitNOFILE=1048576

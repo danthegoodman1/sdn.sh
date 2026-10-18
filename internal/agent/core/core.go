@@ -20,7 +20,9 @@ package core
 
 import (
 	"io"
+	"maps"
 	"net/netip"
+	"slices"
 	"time"
 
 	"sdn.sh/internal/api"
@@ -332,6 +334,38 @@ type Core struct {
 // Stats counts the core's decisions.
 type Stats struct {
 	Batches, Failures, Conflicts, Preempted, Registrations, Failovers uint64
+}
+
+// Census counts what the core manages, for the agent's gauges.
+type Census struct {
+	// Interfaces counts interfaces by phase, every phase present.
+	Interfaces map[string]int
+	// Namespaces counts the named namespaces the core tracks, and Held
+	// those only something else holds, awaiting their reap.
+	Namespaces, Held int
+	// Peers counts the peers the core believes its devices hold.
+	Peers int
+}
+
+// Census counts interfaces, namespaces and peers.
+func (c *Core) Census() Census {
+	out := Census{Interfaces: map[string]int{}}
+	for p := creating; p <= orphan; p++ {
+		out.Interfaces[p.String()] = 0
+	}
+	for _, id := range slices.Sorted(maps.Keys(c.ifaces)) {
+		out.Interfaces[c.ifaces[id].phase.String()]++
+	}
+	for _, name := range slices.Sorted(maps.Keys(c.ns)) {
+		st := c.ns[name]
+		if st.ref != "" {
+			out.Held++
+			continue
+		}
+		out.Namespaces++
+		out.Peers += len(st.peers)
+	}
+	return out
 }
 
 // New returns a core for a host. Call Start before anything else.

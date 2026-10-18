@@ -17,7 +17,8 @@
 // so leave the tree alone while the harness runs.
 //
 // Layers that need root run only with -root, or when the harness runs as
-// root; without them a mutant only they would catch is reported as skipped.
+// root, and a layer that names an environment variable runs only when it is
+// set; without them a mutant only they would catch is reported as skipped.
 // The harness exits non-zero if the baseline fails, an edit does not apply,
 // a mutant does not build, or any mutant is missed.
 //
@@ -61,8 +62,10 @@ type Edit struct {
 // Layer is a test layer: commands run from the copy's root unless a step
 // names a directory.
 type Layer struct {
-	Name  string
-	Root  bool
+	Name string
+	Root bool
+	// Env names a variable the layer needs, such as a database's DSN.
+	Env   string
 	Steps []Step
 }
 
@@ -210,9 +213,13 @@ func Layers(o options) map[string]Layer {
 		goTest("regproto", "./internal/regproto"),
 		goTest("relay-core", "./internal/relay/core"),
 		goTest("relay-server", "./internal/relay/server"),
+		goTest("api", "./internal/api"),
 		goTest("cp", "./internal/cp"),
 		goTest("cpserver", "./internal/cpserver"),
 		goTest("agent-core", "./internal/agent/core"),
+		goTest("agent-daemon", "./internal/agent/daemon"),
+		goTest("agent-resolver", "./internal/agent/resolver"),
+		goTest("agent-cmd", "./cmd/sdn-agent"),
 		goTest("sim", "./internal/sim"),
 		{Name: "kernel", Root: true, Steps: []Step{
 			{Args: []string{"mkdir", "-p", ".mutants"}},
@@ -220,6 +227,7 @@ func Layers(o options) map[string]Layer {
 			{Dir: "internal/kernel/linux", Root: true, Args: []string{"unshare", "--net", "../../../.mutants/linux.test", "-test.timeout", o.timeout.String()}},
 		}},
 		{Name: "e2e", Root: true, Steps: []Step{{Args: []string{"scripts/e2e"}}}},
+		{Name: "pgstore", Env: "SDN_TEST_POSTGRES", Steps: goTest("", "./internal/store/pgstore").Steps},
 	}
 	out := map[string]Layer{}
 	for _, l := range ls {
@@ -389,7 +397,9 @@ func copyFiles(root string, files []string, dir string) error {
 }
 
 // enabled reports whether a layer can run under these options.
-func enabled(l Layer, o options) bool { return !l.Root || o.root }
+func enabled(l Layer, o options) bool {
+	return (!l.Root || o.root) && (l.Env == "" || os.Getenv(l.Env) != "")
+}
 
 // baseline runs every layer the mutants name against the unmutated tree.
 func baseline(root string, files []string, ms []Mutant, layers map[string]Layer, o options) error {
@@ -658,6 +668,9 @@ func printList(ms []Mutant, layers map[string]Layer) {
 		root := ""
 		if layers[n].Root {
 			root = " (root)"
+		}
+		if layers[n].Env != "" {
+			root += " (" + layers[n].Env + ")"
 		}
 		fmt.Printf("  %-12s %s%s\n", n, layers[n], root)
 	}

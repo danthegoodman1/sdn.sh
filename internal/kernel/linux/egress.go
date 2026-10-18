@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -50,19 +51,52 @@ func egressAddrs(idx uint16) (host4, ns4, host6, ns6 netip.Addr) {
 }
 
 // DefaultEgressBlocked is what no egress link may reach whatever the
-// host: loopback, link-local and metadata addresses, private and shared
-// ranges, multicast and reserved space, in both families.
+// host: loopback, link-local and metadata addresses (Azure's WireServer
+// among them), private and shared ranges, multicast and reserved space, in
+// both families.
 func DefaultEgressBlocked() []netip.Prefix {
 	var out []netip.Prefix
 	for _, s := range []string{
-		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
-		"192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
+		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "168.63.129.16/32", "169.254.0.0/16",
+		"172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
 		"::/127", "::ffff:0:0/96", "64:ff9b:1::/48", "fc00::/7", "fe80::/10", "ff00::/8",
 	} {
 		out = append(out, netip.MustParsePrefix(s))
 	}
 	return out
 }
+
+// nat64 is the well-known NAT64 prefix (RFC 6052), which embeds an IPv4
+// address in its last 32 bits: behind a NAT64 gateway 64:ff9b::a00:5
+// reaches 10.0.0.5. The local-use prefix 64:ff9b:1::/48 embeds by the
+// operator's choice of length, so it is blocked whole.
+var nat64 = netip.MustParsePrefix("64:ff9b::/96")
+
+// withNAT64 adds, for each IPv4 prefix, the NAT64 prefix that embeds it.
+func withNAT64(blocked []netip.Prefix) []netip.Prefix {
+	out := slices.Clone(blocked)
+	for _, p := range blocked {
+		if !p.Addr().Is4() {
+			continue
+		}
+		b := nat64.Addr().As16()
+		a4 := p.Addr().As4()
+		copy(b[12:], a4[:])
+		out = append(out, netip.PrefixFrom(netip.AddrFrom16(b), 96+p.Bits()))
+	}
+	return out
+}
+
+// IsEgressAddr reports whether an address belongs to an egress link, which
+// the agent creates and the underlay never routes.
+func IsEgressAddr(a netip.Addr) bool {
+	host4, _, host6, _ := egressAddrs(0)
+	return netip.PrefixFrom(host4, 15).Contains(a) || netip.PrefixFrom(host6, 64).Contains(a)
+}
+
+// blockedTag marks a rule that drops one blocked prefix; the prefix follows
+// it in the rule's user data, so the filter records what it blocks.
+const blockedTag = "blocked "
 
 // EnsureEgress installs the host's egress table, or refreshes the
 // prefixes it blocks, in one transaction that leaves every link's grant in
@@ -95,9 +129,10 @@ func (k *Kernel) EnsureEgress(blocked []netip.Prefix) error {
 	}
 	fromLink := ifnamePrefix(expr.MetaKeyIIFNAME, egressPrefix)
 	toLink := ifnamePrefix(expr.MetaKeyOIFNAME, egressPrefix)
-	for _, p := range append(DefaultEgressBlocked(), blocked...) {
+	for _, p := range withNAT64(append(DefaultEgressBlocked(), blocked...)) {
 		p = p.Masked()
-		add(fwd, concat(fromLink, prefixMatch(p), []expr.Any{drop()})...)
+		c.AddRule(&nftables.Rule{Table: t, Chain: fwd, Exprs: concat(fromLink, prefixMatch(p), []expr.Any{drop()}),
+			UserData: []byte(blockedTag + p.String())})
 	}
 	add(fwd, concat(fromLink, []expr.Any{
 		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
@@ -115,6 +150,40 @@ func (k *Kernel) EnsureEgress(blocked []netip.Prefix) error {
 	add(in, concat(fromLink, []expr.Any{drop()})...)
 	add(post, concat(fromLink, []expr.Any{&expr.Masq{}})...)
 	return c.Flush()
+}
+
+// EgressBlocked lists the prefixes the installed filter blocks, or none
+// when there is no filter, so a restarted agent keeps blocking every relay
+// it knew of until desired state names them again.
+func (k *Kernel) EgressBlocked() ([]netip.Prefix, error) {
+	k.egressMu.Lock()
+	defer k.egressMu.Unlock()
+	c, err := nftables.New(nftables.WithNetNSFd(int(k.root)))
+	if err != nil {
+		return nil, err
+	}
+	defer c.CloseLasting()
+	t := &nftables.Table{Name: egressTable, Family: nftables.TableFamilyINet}
+	rules, err := c.GetRules(t, &nftables.Chain{Name: "forward", Table: t})
+	if errors.Is(err, unix.ENOENT) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("egress rules: %w", err)
+	}
+	var out []netip.Prefix
+	for _, r := range rules {
+		tag, ok := strings.CutPrefix(string(r.UserData), blockedTag)
+		if !ok {
+			continue
+		}
+		p, err := netip.ParsePrefix(tag)
+		if err != nil {
+			return nil, fmt.Errorf("egress rule %d: %w", r.Handle, err)
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }
 
 func egressMap(t *nftables.Table) *nftables.Set {

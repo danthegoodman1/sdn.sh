@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
+
+	agentcore "sdn.sh/internal/agent/core"
 )
 
 // Metrics are the agent's Prometheus metrics.
@@ -22,6 +24,9 @@ type Metrics struct {
 	localSeconds  *prometheus.HistogramVec
 	core          *prometheus.CounterVec
 	convergence   prometheus.Histogram
+	interfaces    *prometheus.GaugeVec
+	namespaces    *prometheus.GaugeVec
+	peers         prometheus.Gauge
 }
 
 // NewMetrics registers the agent's metrics.
@@ -81,10 +86,30 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		core: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "sdn_agent_core_events_total", Help: "Core decisions: conflicts deferred, batches preempted, relay failovers, failed batches.",
 		}, []string{"event"}),
+		interfaces: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "sdn_agent_interfaces", Help: "Interfaces the agent manages, by phase.",
+		}, []string{"phase"}),
+		namespaces: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "sdn_agent_namespaces", Help: "Namespaces the agent tracks: named, or held by something else and awaiting a reap.",
+		}, []string{"kind"}),
+		peers: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "sdn_agent_peers", Help: "Peers the agent's devices hold, as it believes them.",
+		}),
 	}
 	reg.MustRegister(m.kernelOps, m.kernelSeconds, m.batches, m.batchSeconds, m.nftSize, m.flushed, m.cpCalls,
-		m.polls, m.generation, m.registrations, m.probes, m.probeRTT, m.localCalls, m.localSeconds, m.core, m.convergence)
+		m.polls, m.generation, m.registrations, m.probes, m.probeRTT, m.localCalls, m.localSeconds, m.core, m.convergence,
+		m.interfaces, m.namespaces, m.peers)
 	return m
+}
+
+// census sets the gauges from a core census.
+func (m *Metrics) census(c agentcore.Census) {
+	for phase, n := range c.Interfaces {
+		m.interfaces.WithLabelValues(phase).Set(float64(n))
+	}
+	m.namespaces.WithLabelValues("named").Set(float64(c.Namespaces))
+	m.namespaces.WithLabelValues("held").Set(float64(c.Held))
+	m.peers.Set(float64(c.Peers))
 }
 
 func (m *Metrics) coreStat(event string, delta uint64) {

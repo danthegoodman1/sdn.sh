@@ -74,11 +74,14 @@ type Config struct {
 	PollWait time.Duration
 	// Workers bounds how many namespaces' batches run at once.
 	Workers int
+	// EgressRetry is how long a failed egress filter refresh waits to try
+	// again.
+	EgressRetry time.Duration
 }
 
 // DefaultConfig returns production settings for a host.
 func DefaultConfig(host model.HostID) Config {
-	return Config{Core: agentcore.DefaultConfig(host), RenewEvery: 10 * time.Second, PollWait: 40 * time.Second, Workers: 32}
+	return Config{Core: agentcore.DefaultConfig(host), RenewEvery: 10 * time.Second, PollWait: 40 * time.Second, Workers: 32, EgressRetry: 5 * time.Second}
 }
 
 // Daemon is one host's agent.
@@ -94,11 +97,13 @@ type Daemon struct {
 	// Resolver, when set, serves workloads' names.
 	Resolver Resolver
 	// Egress, when set, has its blocked prefixes refreshed with every relay
-	// address desired state names, on top of EgressBase.
-	Egress     EgressHost
-	EgressBase []netip.Prefix
-	m          *Metrics
-	now        func() time.Time
+	// address desired state names, on top of EgressBase and the host's own
+	// prefixes, which HostPrefixes lists anew on every refresh.
+	Egress       EgressHost
+	EgressBase   []netip.Prefix
+	HostPrefixes func() ([]netip.Prefix, error)
+	m            *Metrics
+	now          func() time.Time
 
 	events chan func()
 	sem    chan struct{}
@@ -112,12 +117,23 @@ type Daemon struct {
 	stats    agentcore.Stats
 
 	// resolverDirty marks zones that need recomputing; syncs carries the
-	// latest set to the goroutine applying them.
+	// latest set to the goroutine applying them. Each set sent takes the
+	// next of resolverSeq, and resolved is the latest one applied.
 	resolverDirty bool
 	resolverGen   uint64
 	syncs         chan resolverSync
-	egressGen     uint64
-	egressRelays  []netip.Prefix
+	resolverSeq   uint64
+	resolved      uint64
+	// awaitingResolver holds attach replies until the sync that opens
+	// their namespaces' resolver sockets has run; seq 0 marks one no sync
+	// has carried yet.
+	awaitingResolver []heldReply
+	// egressSyncs carries the latest relay set to the goroutine refreshing
+	// the filter; egressSent records that one has gone.
+	egressGen    uint64
+	egressRelays []netip.Prefix
+	egressSent   bool
+	egressSyncs  chan []netip.Prefix
 	// reported is the network revision each interface last settled at, so
 	// convergence is observed once per revision.
 	reported    map[model.InterfaceID]uint64
@@ -150,6 +166,7 @@ func New(cfg Config, core *agentcore.Core, kern kernel.Kernel, cp ControlPlane, 
 		probes:        map[uint64]probe{},
 		up:            make(chan struct{}),
 		syncs:         make(chan resolverSync, 1),
+		egressSyncs:   make(chan []netip.Prefix, 1),
 		reported:      map[model.InterfaceID]uint64{},
 		resolverDirty: true,
 	}
@@ -158,6 +175,12 @@ func New(cfg Config, core *agentcore.Core, kern kernel.Kernel, cp ControlPlane, 
 type resolverSync struct {
 	zones   map[string]dns.Served
 	settled bool
+	seq     uint64
+}
+
+type heldReply struct {
+	reply agentcore.Reply
+	seq   uint64
 }
 
 // Up closes once the daemon has adopted what the journal and kernel hold.
@@ -182,6 +205,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	go d.pollLoop(ctx)
 	go d.renewLoop(ctx)
+	go d.censusLoop(ctx)
+	if d.Egress != nil {
+		go d.egressLoop(ctx)
+	}
 	if d.Resolver != nil {
 		go func() {
 			// A socket that failed to open, as on an address not yet
@@ -199,6 +226,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 				}
 				if last != nil {
 					d.Resolver.Sync(last.zones, last.settled)
+					seq := last.seq
+					d.post(func() { d.resolverRan(seq) })
 				}
 			}
 		}()
@@ -288,7 +317,8 @@ func (d *Daemon) noteConvergence() {
 
 // syncEgress blocks every relay address desired state names from egress
 // links, refreshing the host's filter when the set changes. A workload that
-// could reach a relay could attack endpoint registration.
+// could reach a relay could attack endpoint registration. Until the agent
+// holds desired state, the filter keeps what the last run installed.
 func (d *Daemon) syncEgress() {
 	gen := d.core.Generation()
 	if d.Egress == nil || gen == d.egressGen {
@@ -312,18 +342,58 @@ func (d *Daemon) syncEgress() {
 	}
 	slices.SortFunc(relays, func(a, b netip.Prefix) int { return a.Addr().Compare(b.Addr()) })
 	relays = slices.Compact(relays)
-	if slices.Equal(relays, d.egressRelays) {
+	// The first refresh runs whatever the set, replacing what the last run
+	// left.
+	if d.egressSent && slices.Equal(relays, d.egressRelays) {
 		return
 	}
-	d.egressRelays = relays
-	blocked := append(slices.Clone(d.EgressBase), relays...)
-	go func() {
-		if err := d.Egress.EnsureEgress(blocked); err != nil {
-			d.log.Error().Err(err).Msg("refreshing the egress filter")
+	d.egressRelays, d.egressSent = relays, true
+	d.refreshEgress()
+}
+
+// refreshEgress hands the relay set to the egress goroutine, replacing one
+// it has yet to take.
+func (d *Daemon) refreshEgress() {
+	select {
+	case <-d.egressSyncs:
+	default:
+	}
+	d.egressSyncs <- slices.Clone(d.egressRelays)
+}
+
+// egressLoop refreshes the filter with the latest relay set and the host's
+// current prefixes, one refresh at a time, so an older set never lands
+// after a newer one. A failed refresh retries until it succeeds or a newer
+// set replaces it.
+func (d *Daemon) egressLoop(ctx context.Context) {
+	var relays []netip.Prefix
+	var retry <-chan time.Time
+	for {
+		select {
+		case <-ctx.Done():
 			return
+		case relays = <-d.egressSyncs:
+		case <-retry:
+		}
+		retry = nil
+		if err := d.applyEgress(relays); err != nil {
+			d.log.Error().Err(err).Dur("retry", d.cfg.EgressRetry).Msg("refreshing the egress filter")
+			retry = time.After(d.cfg.EgressRetry)
+			continue
 		}
 		d.log.Info().Int("relays", len(relays)).Msg("egress filter blocks every relay")
-	}()
+	}
+}
+
+func (d *Daemon) applyEgress(relays []netip.Prefix) error {
+	var host []netip.Prefix
+	if d.HostPrefixes != nil {
+		var err error
+		if host, err = d.HostPrefixes(); err != nil {
+			return fmt.Errorf("host prefixes: %w", err)
+		}
+	}
+	return d.Egress.EnsureEgress(slices.Concat(d.EgressBase, host, relays))
 }
 
 // syncResolver recomputes every ready namespace's zone after desired state
@@ -347,11 +417,30 @@ func (d *Daemon) syncResolver() {
 			zones[li.Namespace] = dns.ServedFor(n, x)
 		}
 	}
+	d.resolverSeq++
+	for i := range d.awaitingResolver {
+		if d.awaitingResolver[i].seq == 0 {
+			d.awaitingResolver[i].seq = d.resolverSeq
+		}
+	}
 	select {
 	case <-d.syncs:
 	default:
 	}
-	d.syncs <- resolverSync{zones: zones, settled: gen > 0}
+	d.syncs <- resolverSync{zones: zones, settled: gen > 0, seq: d.resolverSeq}
+}
+
+// resolverRan answers the attach calls whose resolver sockets the sync seq
+// opened, or tried to: a socket that failed retries at the next tick.
+func (d *Daemon) resolverRan(seq uint64) {
+	d.resolved = max(d.resolved, seq)
+	d.awaitingResolver = slices.DeleteFunc(d.awaitingResolver, func(h heldReply) bool {
+		if h.seq == 0 || h.seq > d.resolved {
+			return false
+		}
+		d.reply(h.reply)
+		return true
+	})
 }
 
 func (d *Daemon) carry(a agentcore.Action) {
@@ -382,8 +471,14 @@ func (d *Daemon) carry(a agentcore.Action) {
 			d.fatal = fmt.Errorf("journal delete for %s: %w", a.Interface, err)
 		}
 	case agentcore.Reply:
-		d.reply(a)
 		d.resolverDirty = true
+		if d.Resolver != nil && a.Err == nil && a.Interface.Ready {
+			// A workload may resolve the moment it holds its namespace,
+			// so the reply waits for the resolver socket.
+			d.awaitingResolver = append(d.awaitingResolver, heldReply{reply: a})
+			return
+		}
+		d.reply(a)
 	case agentcore.SendRegistration:
 		if err := d.raw.Send(a.From, a.To, a.Payload[:]); err != nil {
 			d.m.registrations.WithLabelValues("error").Inc()
@@ -648,7 +743,30 @@ func (d *Daemon) UnderlayChanged() {
 	d.post(func() {
 		d.log.Info().Msg("underlay changed; registering every direction")
 		d.core.UnderlayChanged(d.now())
+		// The host's own prefixes may have moved with it.
+		if d.Egress != nil && d.egressSent {
+			d.refreshEgress()
+		}
 	})
+}
+
+// censusLoop refreshes the census gauges once a second, which counting on
+// every event would cost more than it shows.
+func (d *Daemon) censusLoop(ctx context.Context) {
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		c, err := query(d, ctx, d.core.Census)
+		if err != nil {
+			return
+		}
+		d.m.census(c)
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
 }
 
 // noteStats turns the core's counters into metrics and logs failovers.

@@ -216,34 +216,70 @@ func (r *Resolver) open(ns, key string, addr netip.AddrPort) (*served, error) {
 			continue
 		}
 		if err := r.store.add(key+"."+kind, file); err != nil {
-			r.log.Debug().Err(err).Str("namespace", ns).Msg("descriptor store")
+			r.log.Warn().Err(err).Str("namespace", ns).Msg("descriptor store; queries during a restart will fail")
 		}
 		file.Close()
 	}
 	return &s, nil
 }
 
+// Per namespace, at most udpForwards UDP queries wait on the upstream at
+// once and at most tcpConns TCP connections are open; past either, a query
+// or connection is dropped and its client retries.
+const (
+	udpForwards = 64
+	tcpConns    = 16
+)
+
+// serveUDP answers local names inline and forwards the rest off the read
+// loop, so a slow upstream delays no local answer.
 func (r *Resolver) serveUDP(ns string, c *net.UDPConn) {
 	buf := make([]byte, 1500)
+	forwards := make(chan struct{}, udpForwards)
 	for {
 		n, from, err := c.ReadFromUDPAddrPort(buf)
 		if err != nil {
 			return
 		}
 		q := append([]byte(nil), buf[:n]...)
-		if resp := r.answer(ns, q, false); resp != nil {
-			c.WriteToUDPAddrPort(resp, from)
+		resp, forward := r.answer(ns, q)
+		if !forward {
+			if resp != nil {
+				c.WriteToUDPAddrPort(resp, from)
+			}
+			continue
 		}
+		select {
+		case forwards <- struct{}{}:
+		default:
+			r.queries.WithLabelValues("upstream_busy").Inc()
+			continue
+		}
+		go func() {
+			defer func() { <-forwards }()
+			if resp := r.forwarded(q, false); resp != nil {
+				c.WriteToUDPAddrPort(resp, from)
+			}
+		}()
 	}
 }
 
 func (r *Resolver) serveTCP(ns string, ln *net.TCPListener) {
+	conns := make(chan struct{}, tcpConns)
 	for {
 		c, err := ln.AcceptTCP()
 		if err != nil {
 			return
 		}
+		select {
+		case conns <- struct{}{}:
+		default:
+			r.queries.WithLabelValues("tcp_busy").Inc()
+			c.Close()
+			continue
+		}
 		go func() {
+			defer func() { <-conns }()
 			defer c.Close()
 			for {
 				c.SetDeadline(time.Now().Add(10 * time.Second))
@@ -255,7 +291,10 @@ func (r *Resolver) serveTCP(ns string, ln *net.TCPListener) {
 				if _, err := io.ReadFull(c, q); err != nil {
 					return
 				}
-				resp := r.answer(ns, q, true)
+				resp, forward := r.answer(ns, q)
+				if forward {
+					resp = r.forwarded(q, true)
+				}
 				if resp == nil {
 					return
 				}
@@ -268,29 +307,36 @@ func (r *Resolver) serveTCP(ns string, ln *net.TCPListener) {
 	}
 }
 
-// answer returns the response to a query, or nil to send nothing.
-func (r *Resolver) answer(ns string, q []byte, tcp bool) []byte {
+// answer returns the local response to a query, nil to send nothing, or
+// forward to ask the upstream.
+func (r *Resolver) answer(ns string, q []byte) (resp []byte, forward bool) {
 	z := r.zone(ns)
 	if z == nil {
 		r.queries.WithLabelValues("no_zone").Inc()
-		return nil
+		return nil, false
 	}
 	v, resp := z.Answer(q)
 	switch v {
 	case dns.Reply:
 		r.queries.WithLabelValues("local").Inc()
-		return resp
+		return resp, false
 	case dns.Forward:
-		resp, err := r.forward(q, tcp)
-		if err != nil {
-			r.queries.WithLabelValues("upstream_failed").Inc()
-			return nil
-		}
-		r.queries.WithLabelValues("upstream").Inc()
-		return resp
+		return nil, true
 	}
 	r.queries.WithLabelValues("ignored").Inc()
-	return nil
+	return nil, false
+}
+
+// forwarded returns the upstream's answer to a query, or nil if it gave
+// none.
+func (r *Resolver) forwarded(q []byte, tcp bool) []byte {
+	resp, err := r.forward(q, tcp)
+	if err != nil {
+		r.queries.WithLabelValues("upstream_failed").Inc()
+		return nil
+	}
+	r.queries.WithLabelValues("upstream").Inc()
+	return resp
 }
 
 // forward asks the host's upstream resolver, from the host's namespace.

@@ -3,6 +3,7 @@ package sim
 import (
 	"net/netip"
 	"testing"
+	"time"
 )
 
 func runSeed(t *testing.T, seed uint64) {
@@ -37,16 +38,17 @@ func TestAFailedReleaseIsRetried(t *testing.T) { runSeed(t, 2) }
 // IPv6 first, so every resync rewrote every peer.
 func TestAResyncFindsNoDriftInPrefixOrder(t *testing.T) { runSeed(t, 8) }
 
-// Seeds 55, 235 and 247 on a /28, where IPv4 addresses come back from
-// quarantine: an agent learned of an address's new owner while it still held
-// the previous one as a peer, and waited for the holder to go before
-// installing the new owner. The runs count the waits, so seeds that stop
-// reaching the path fail here rather than pass without testing it.
+// Seeds 8, 43 and 67 on a /28 whose IPv4 addresses leave quarantine just after
+// the drain grace: an agent learned of an address's new owner while it
+// still held the previous one as a peer, and waited for the holder to go
+// before installing the new owner. The runs count the waits, so seeds that
+// stop reaching the path fail here rather than pass without testing it.
 func TestAPeerWaitsForTheHolderOfItsAddress(t *testing.T) {
 	var conflicts uint64
-	for _, seed := range []uint64{55, 235, 247} {
+	for _, seed := range []uint64{8, 43, 67} {
 		o := Swarm(seed)
 		o.Prefix4 = netip.MustParsePrefix("10.42.0.0/28")
+		o.Quarantine4 = 2500 * time.Millisecond
 		s, err := NewWith(seed, o).Run()
 		if err != nil {
 			t.Fatal(err)

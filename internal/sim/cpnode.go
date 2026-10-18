@@ -88,10 +88,14 @@ func simConfig() cp.Config {
 }
 
 func newCP(w *World) *cpNode {
+	cfg := simConfig()
+	if w.opts.Quarantine4 > 0 {
+		cfg.Quarantine4 = w.opts.Quarantine4
+	}
 	c := &cpNode{
 		w:       w,
 		store:   mem.New(),
-		plane:   &cp.Plane{Config: simConfig(), Rand: prng.Stream(w.seed, "cp")},
+		plane:   &cp.Plane{Config: cfg, Rand: prng.Stream(w.seed, "cp")},
 		up:      true,
 		snaps:   map[model.NetworkID]map[uint64][]store.Interface{},
 		ever6:   map[model.NetworkID]map[netip.Addr]model.InterfaceID{},

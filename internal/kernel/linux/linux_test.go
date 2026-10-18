@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -576,7 +577,13 @@ func TestADeletedNamespaceAProcessHoldsIsFoundAndReaped(t *testing.T) {
 
 // internet builds a namespace standing for the internet behind the root
 // namespace: 198.51.100.0/24 links them, and 203.0.113.7 and 2001:db8::7
-// answer inside it.
+// answer inside it. So does every address in reachable, which the root
+// routes there, so a dial that fails shows a filter dropped it.
+var reachable = []string{
+	"10.0.0.1", "168.63.129.16", "169.254.169.254", "192.0.2.1", "fd00:ec2::254",
+	"64:ff9b::cb00:7107", "64:ff9b::c000:201", "64:ff9b::a00:1",
+}
+
 func internet(t *testing.T, k *Kernel) string {
 	t.Helper()
 	name := namespace(t, k, prefix(t)+"inet")
@@ -600,6 +607,22 @@ func internet(t *testing.T, k *Kernel) string {
 			t.Fatalf("%v: %v %s", args, err, out)
 		}
 	}
+	for _, a := range reachable {
+		addr := netip.MustParseAddr(a)
+		family, via := "-4", "198.51.100.2"
+		if addr.Is6() {
+			family, via = "-6", "2001:db8:1::2"
+		}
+		host := netip.PrefixFrom(addr, addr.BitLen()).String()
+		for _, args := range [][]string{
+			{"ip", "-n", name, "addr", "add", host, "dev", "lo"},
+			{"ip", family, "route", "add", host, "via", via},
+		} {
+			if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+				t.Fatalf("%v: %v %s", args, err, out)
+			}
+		}
+	}
 	t.Cleanup(func() { exec.Command("ip", "link", "del", "up0").Run() })
 	return name
 }
@@ -617,11 +640,30 @@ func TestAnEgressGrantReachesWhatItNamesAndNothingElse(t *testing.T) {
 	if err := k.EnsureEgress([]netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}); err != nil {
 		t.Fatal(err)
 	}
+	blocked, err := k.EgressBlocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"192.0.2.0/24", "64:ff9b::c000:200/120", "10.0.0.0/8"} {
+		if !slices.Contains(blocked, netip.MustParsePrefix(want)) {
+			t.Errorf("the filter records %v, which lacks %s", blocked, want)
+		}
+	}
 	r := prng.New(7)
 	a, _ := pair(t, k, r)
 	for _, addr := range []string{"203.0.113.7", "2001:db8::7"} {
 		serve(t, inet, netip.AddrPortFrom(netip.MustParseAddr(addr), 443), "web")
 		serve(t, inet, netip.AddrPortFrom(netip.MustParseAddr(addr), 22), "ssh")
+	}
+	for _, addr := range reachable {
+		ap := netip.AddrPortFrom(netip.MustParseAddr(addr), 443)
+		serve(t, inet, ap, "web")
+		// The host reaches each one, which no filter guards.
+		c, err := net.DialTimeout("tcp", ap.String(), 3*time.Second)
+		if err != nil {
+			t.Fatalf("the host cannot reach %v: %v", ap, err)
+		}
+		c.Close()
 	}
 	// No grant, no path.
 	if c, err := dial(t, a.ns, netip.MustParseAddrPort("203.0.113.7:443"), time.Second); err == nil {
@@ -634,7 +676,8 @@ func TestAnEgressGrantReachesWhatItNamesAndNothingElse(t *testing.T) {
 	if err != nil || !ns.Egress.Equal(grant) {
 		t.Fatalf("observed egress %+v (%v), want %+v", ns.Egress, err, grant)
 	}
-	for _, addr := range []string{"203.0.113.7", "[2001:db8::7]"} {
+	// The NAT64 form of an address no prefix blocks passes too.
+	for _, addr := range []string{"203.0.113.7", "[2001:db8::7]", "[64:ff9b::cb00:7107]"} {
 		c, err := dial(t, a.ns, netip.MustParseAddrPort(addr+":443"), 3*time.Second)
 		if err != nil {
 			t.Fatalf("granted %s:443: %v", addr, err)
@@ -643,19 +686,26 @@ func TestAnEgressGrantReachesWhatItNamesAndNothingElse(t *testing.T) {
 			t.Fatalf("got %q", got)
 		}
 		c.Close()
+		if addr == "[64:ff9b::cb00:7107]" {
+			continue
+		}
 		if c, err := dial(t, a.ns, netip.MustParseAddrPort(addr+":22"), time.Second); err == nil {
 			c.Close()
 			t.Fatalf("reached %s:22, which the grant does not name", addr)
 		}
 	}
-	// The host itself, a private range and a blocked prefix are out of
-	// reach in each family.
-	ln, err := net.Listen("tcp", "198.51.100.1:443")
-	if err != nil {
-		t.Fatal(err)
+	// The host itself, private and metadata ranges, a blocked prefix, and
+	// the NAT64 forms of blocked IPv4 addresses are out of reach, though
+	// each answers.
+	for _, a := range []string{"198.51.100.1:443", "[2001:db8:1::1]:443"} {
+		ln, err := net.Listen("tcp", a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
 	}
-	defer ln.Close()
-	for _, addr := range []string{"198.51.100.1:443", "10.0.0.1:443", "192.0.2.1:443", "169.254.169.254:443", "[fd00:ec2::254]:443", "[2001:db8:1::1]:443"} {
+	for _, addr := range []string{"198.51.100.1:443", "[2001:db8:1::1]:443", "10.0.0.1:443", "192.0.2.1:443", "168.63.129.16:443",
+		"169.254.169.254:443", "[fd00:ec2::254]:443", "[64:ff9b::c000:201]:443", "[64:ff9b::a00:1]:443"} {
 		if c, err := dial(t, a.ns, netip.MustParseAddrPort(addr), 700*time.Millisecond); err == nil {
 			c.Close()
 			t.Errorf("an egress link reached %s", addr)
@@ -714,5 +764,69 @@ func TestTheModelAgreesWithLinuxOnEgress(t *testing.T) {
 		if !lns.Egress.Equal(mns.Egress) {
 			t.Fatalf("round %d after %+v: linux %+v, model %+v", round, cfg, lns.Egress, mns.Egress)
 		}
+	}
+}
+
+// TestADeletedNamespaceADescriptorHoldsIsFoundAndReaped holds a namespace
+// open with a descriptor alone, deletes its name, and checks the device is
+// still found, reaped, and its listen port freed.
+func TestADeletedNamespaceADescriptorHoldsIsFoundAndReaped(t *testing.T) {
+	k := newKernel(t)
+	r := prng.New(8)
+	a, _ := pair(t, k, r)
+	f, err := os.Open(filepath.Join(netnsDir, a.ns))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	run(t, k, kernel.Op{Kind: kernel.DeleteNamespace, Namespace: a.ns})
+	snap, err := k.Snapshot(prefix(t), "sdn:test:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref string
+	for _, ns := range snap.Namespaces {
+		if ns.Name == "" && len(ns.Devices) == 1 && ns.Devices[0].Alias == "sdn:test:a" {
+			ref = ns.Ref
+		}
+	}
+	if ref == "" {
+		t.Fatalf("the namespace a descriptor holds is missing: %+v", snap)
+	}
+	run(t, k, kernel.Op{Kind: kernel.Reap, Ref: ref, AliasPrefix: "sdn:test:"})
+	other := namespace(t, k, prefix(t)+"e")
+	priv, _ := model.NewPrivateKey(r)
+	run(t, k, kernel.Op{Kind: kernel.CreateDevice, Namespace: other, Device: "sdn0",
+		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: a.port, Alias: "sdn:test:e"}})
+}
+
+// TestANameACrashLeftUnmountedIsReplaced leaves a namespace's name as the
+// plain file a crash between creating and mounting it leaves, and checks
+// that creating the namespace mounts a real one and deleting it removes
+// the file.
+func TestANameACrashLeftUnmountedIsReplaced(t *testing.T) {
+	k := newKernel(t)
+	name := prefix(t) + "wedged"
+	path := filepath.Join(netnsDir, name)
+	if err := os.MkdirAll(netnsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	namespace(t, k, name)
+	if mounted, err := isNamespace(path); err != nil || !mounted {
+		t.Fatalf("after creating over a plain file: namespace %v, %v", mounted, err)
+	}
+	if _, err := k.Namespace(name, "sdn:test:"); err != nil {
+		t.Fatalf("observing the replaced namespace: %v", err)
+	}
+	run(t, k, kernel.Op{Kind: kernel.DeleteNamespace, Namespace: name})
+	if err := os.WriteFile(path, nil, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	run(t, k, kernel.Op{Kind: kernel.DeleteNamespace, Namespace: name})
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleting a plain-file name left %s: %v", path, err)
 	}
 }

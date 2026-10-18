@@ -13,11 +13,13 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 
 	agentcore "sdn.sh/internal/agent/core"
 	"sdn.sh/internal/agent/daemon"
@@ -125,8 +127,14 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		blocked = append(blocked, own...)
-		if err := kern.EnsureEgress(blocked); err != nil {
+		// A filter an earlier run installed names relays that desired
+		// state names again only once the control plane answers; until
+		// then it keeps blocking them.
+		kept, err := kern.EgressBlocked()
+		if err != nil {
+			return err
+		}
+		if err := kern.EnsureEgress(slices.Concat(kept, blocked, own)); err != nil {
 			return fmt.Errorf("installing the egress filter: %w", err)
 		}
 	}
@@ -134,7 +142,7 @@ func run() error {
 	core := agentcore.New(cfg.Core, rand.Reader)
 	d := daemon.New(cfg, core, kern, cp, j, raw, prober, daemon.NewMetrics(reg), log)
 	if *egress {
-		d.Egress, d.EgressBase = kern, blocked
+		d.Egress, d.EgressBase, d.HostPrefixes = kern, blocked, hostPrefixes
 	}
 	if *serveDNS {
 		up, err := resolver.Upstream("/etc/resolv.conf")
@@ -196,8 +204,11 @@ func (p *prefixList) Set(s string) error {
 	return nil
 }
 
-// hostPrefixes lists the prefixes of the host's own addresses: the
-// underlay it sits on, which egress links must never reach.
+// hostPrefixes lists the underlay the host sits on, which egress links must
+// never reach: the prefix of each of its own addresses, and each route it
+// reaches without a gateway, such as the /64 an EC2 host learns from router
+// advertisements while its own address is a /128. Egress links' own
+// addresses and routes are left out; the filter blocks them by default.
 func hostPrefixes() ([]netip.Prefix, error) {
 	addrs, err := netlink.AddrList(nil, netlink.FAMILY_ALL)
 	if err != nil {
@@ -206,13 +217,36 @@ func hostPrefixes() ([]netip.Prefix, error) {
 	var out []netip.Prefix
 	for _, a := range addrs {
 		ip, ok := netip.AddrFromSlice(a.IP)
-		if !ok {
+		if !ok || linux.IsEgressAddr(ip.Unmap()) {
 			continue
 		}
 		bits, _ := a.Mask.Size()
 		out = append(out, netip.PrefixFrom(ip.Unmap(), bits).Masked())
 	}
-	return out, nil
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_ALL, &netlink.Route{Table: unix.RT_TABLE_MAIN}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range routes {
+		if r.Dst == nil || r.Gw != nil || len(r.MultiPath) > 0 || r.Type != unix.RTN_UNICAST {
+			continue
+		}
+		ip, ok := netip.AddrFromSlice(r.Dst.IP)
+		if !ok || linux.IsEgressAddr(ip.Unmap()) {
+			continue
+		}
+		bits, _ := r.Dst.Mask.Size()
+		if p := netip.PrefixFrom(ip.Unmap(), bits).Masked(); p.Bits() > 0 {
+			out = append(out, p)
+		}
+	}
+	slices.SortFunc(out, func(a, b netip.Prefix) int {
+		if c := a.Addr().Compare(b.Addr()); c != 0 {
+			return c
+		}
+		return a.Bits() - b.Bits()
+	})
+	return slices.Compact(out), nil
 }
 
 func dirOf(path string) string {
@@ -232,22 +266,52 @@ func watchUnderlay(ctx context.Context, d *daemon.Daemon, log zerolog.Logger) {
 		log.Warn().Err(err).Msg("cannot watch underlay addresses; registrations follow their period alone")
 		return
 	}
+	changes := make(chan struct{})
+	go func() {
+		defer close(changes)
+		for u := range updates {
+			ip, ok := netip.AddrFromSlice(u.LinkAddress.IP)
+			if !ok || ip.IsLinkLocalUnicast() || ip.IsLoopback() || linux.IsEgressAddr(ip.Unmap()) {
+				continue
+			}
+			select {
+			case changes <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	coalesce(ctx, changes, time.Second, d.UnderlayChanged)
+}
+
+// coalesce calls fn on the first event and then at most once per every. An
+// event inside the window runs fn when the window ends, so fn always runs
+// after the last event: an address added and removed within a second
+// registers from the address that remains.
+func coalesce(ctx context.Context, events <-chan struct{}, every time.Duration, fn func()) {
 	var last time.Time
+	var due <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case u, ok := <-updates:
+		case <-due:
+			due = nil
+			last = time.Now()
+			fn()
+		case _, ok := <-events:
 			if !ok {
 				return
 			}
-			if u.LinkAddress.IP.IsLinkLocalUnicast() || u.LinkAddress.IP.IsLoopback() {
+			if due != nil {
 				continue
 			}
-			if time.Since(last) > time.Second {
-				last = time.Now()
-				d.UnderlayChanged()
+			if wait := every - time.Since(last); wait > 0 {
+				due = time.After(wait)
+				continue
 			}
+			last = time.Now()
+			fn()
 		}
 	}
 }

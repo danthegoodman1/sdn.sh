@@ -37,10 +37,19 @@ func (k *Kernel) inNS(ns netns.NsHandle, fn func() error) error {
 	return ferr
 }
 
-// createNamed makes a namespace and bind-mounts it under its name.
+// createNamed makes a namespace and bind-mounts it under its name. A name
+// a crash left between creating its file and mounting the namespace on it
+// is a plain file, which is replaced.
 func (k *Kernel) createNamed(name string) error {
-	if _, err := os.Stat(filepath.Join(netnsDir, name)); err == nil {
+	switch mounted, err := isNamespace(filepath.Join(netnsDir, name)); {
+	case err == nil && mounted:
 		return nil
+	case err == nil:
+		if err := os.Remove(filepath.Join(netnsDir, name)); err != nil {
+			return fmt.Errorf("namespace %s: removing an unmounted name: %w", name, err)
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("namespace %s: %w", name, err)
 	}
 	runtime.LockOSThread()
 	h, err := netns.NewNamed(name)
@@ -77,12 +86,32 @@ func loopbackUp() error {
 	return nil
 }
 
+// isNamespace reports whether path is a mounted namespace rather than a
+// plain file.
+func isNamespace(path string) (bool, error) {
+	var fs unix.Statfs_t
+	if err := unix.Statfs(path, &fs); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, os.ErrNotExist
+		}
+		return false, err
+	}
+	return fs.Type == unix.NSFS_MAGIC, nil
+}
+
 // deleteNamed unmounts and removes a namespace's name. A process still
-// inside keeps the namespace alive without it.
+// inside keeps the namespace alive without it. A name nothing is mounted on
+// is removed as a plain file.
 func deleteNamed(name string) error {
+	path := filepath.Join(netnsDir, name)
 	err := netns.DeleteNamed(name)
+	if errors.Is(err, unix.EINVAL) {
+		if mounted, serr := isNamespace(path); serr == nil && !mounted {
+			err = os.Remove(path)
+		}
+	}
 	if err == nil || errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ENOENT) || errors.Is(err, unix.EINVAL) {
-		if _, statErr := os.Stat(filepath.Join(netnsDir, name)); errors.Is(statErr, os.ErrNotExist) {
+		if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
 			return nil
 		}
 	}
@@ -117,8 +146,10 @@ func nsInode(path string) (uint64, error) {
 	return st.Ino, nil
 }
 
-// heldNamespaces finds namespaces processes hold, keyed by inode, each with
-// one path that opens it. It skips the root namespace and every named one.
+// heldNamespaces finds namespaces something holds, keyed by inode, each
+// with one path that opens it: a thread inside one, a descriptor open on
+// one, or a mount of one outside netnsDir. It skips the root namespace and
+// every named one.
 func (k *Kernel) heldNamespaces() (map[uint64]string, error) {
 	skip := map[uint64]bool{}
 	if ino, err := nsInode("/proc/thread-self/ns/net"); err == nil {
@@ -131,16 +162,12 @@ func (k *Kernel) heldNamespaces() (map[uint64]string, error) {
 			}
 		}
 	}
-	procs, err := os.ReadDir("/proc")
+	paths, err := nsPaths()
 	if err != nil {
 		return nil, err
 	}
 	out := map[uint64]string{}
-	for _, p := range procs {
-		if _, err := strconv.Atoi(p.Name()); err != nil {
-			continue
-		}
-		path := filepath.Join("/proc", p.Name(), "ns", "net")
+	for _, path := range paths {
 		ino, err := nsInode(path)
 		if err != nil || skip[ino] {
 			continue
@@ -150,6 +177,81 @@ func (k *Kernel) heldNamespaces() (map[uint64]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// nsPaths lists every path that opens a network namespace: each thread's
+// ns/net, each descriptor open on a network namespace, and each nsfs mount
+// of one. A descriptor opened through a name reads back as that name's
+// path, so descriptors are matched by the namespace filesystem's device and
+// then by type.
+func nsPaths() ([]string, error) {
+	var self unix.Stat_t
+	if err := unix.Stat("/proc/thread-self/ns/net", &self); err != nil {
+		return nil, err
+	}
+	procs, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, p := range procs {
+		if _, err := strconv.Atoi(p.Name()); err != nil {
+			continue
+		}
+		dir := filepath.Join("/proc", p.Name())
+		out = append(out, filepath.Join(dir, "ns", "net"))
+		if tasks, err := os.ReadDir(filepath.Join(dir, "task")); err == nil {
+			for _, t := range tasks {
+				if t.Name() != p.Name() {
+					out = append(out, filepath.Join(dir, "task", t.Name(), "ns", "net"))
+				}
+			}
+		}
+		fds, err := os.ReadDir(filepath.Join(dir, "fd"))
+		if err != nil {
+			continue
+		}
+		for _, fd := range fds {
+			path := filepath.Join(dir, "fd", fd.Name())
+			var st unix.Stat_t
+			if err := unix.Stat(path, &st); err == nil && st.Dev == self.Dev && isNetNS(path) {
+				out = append(out, path)
+			}
+		}
+	}
+	mounts, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return nil, err
+	}
+	for _, line := range strings.Split(string(mounts), "\n") {
+		// mountinfo(5): ID parent major:minor root mount-point options...
+		// - fstype source super-options.
+		fields := strings.Fields(line)
+		sep := slices.Index(fields, "-")
+		if sep < 5 || sep+1 >= len(fields) || fields[sep+1] != "nsfs" || !strings.HasPrefix(fields[3], "net:[") {
+			continue
+		}
+		out = append(out, unescapeMount(fields[4]))
+	}
+	return out, nil
+}
+
+// isNetNS reports whether path opens a network namespace.
+func isNetNS(path string) bool {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return false
+	}
+	defer unix.Close(fd)
+	typ, err := unix.IoctlRetInt(fd, unix.NS_GET_NSTYPE)
+	return err == nil && typ == unix.CLONE_NEWNET
+}
+
+// unescapeMount undoes mountinfo's octal escapes of space, tab, newline and
+// backslash.
+func unescapeMount(s string) string {
+	r := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
+	return r.Replace(s)
 }
 
 // refFor names a held namespace by inode, which outlives any one process.
@@ -169,5 +271,16 @@ func (k *Kernel) openRef(ref string) (netns.NsHandle, error) {
 	if !ok {
 		return 0, os.ErrNotExist
 	}
-	return netns.GetFromPath(path)
+	h, err := netns.GetFromPath(path)
+	if err != nil {
+		return 0, err
+	}
+	// The process or descriptor the scan found may have gone since, and its
+	// path been reused for another namespace.
+	var st unix.Stat_t
+	if err := unix.Fstat(int(h), &st); err != nil || st.Ino != ino {
+		h.Close()
+		return 0, os.ErrNotExist
+	}
+	return h, nil
 }

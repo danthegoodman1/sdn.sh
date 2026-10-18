@@ -174,3 +174,38 @@ func TestAnActiveRelayThatLeavesTheSetGivesUpThePath(t *testing.T) {
 		t.Fatalf("peer endpoint %v, want r3's %v", got, want)
 	}
 }
+
+func TestAPeerWaitsForTheHolderOfItsAddress(t *testing.T) {
+	c, now := adopted(t)
+	addrs := []netip.Prefix{pfx("fd00::6/128")}
+	holder := api.Peer{Interface: "if-b", Service: "svc-2", PublicKey: peer, Allowed: addrs}
+	if err := c.State(now, state(3, nil, holder)); err != nil {
+		t.Fatal(err)
+	}
+	drive(c, now, succeed)
+	// The holder ended and its address went to a new interface while this
+	// agent lagged, so it learns both at once.
+	next := model.Key{11}
+	claimant := api.Peer{Interface: "if-c", Service: "svc-2", PublicKey: next, Allowed: addrs}
+	if err := c.State(now, state(4, nil, claimant)); err != nil {
+		t.Fatal(err)
+	}
+	var removed bool
+	for _, b := range drive(c, now, succeed) {
+		for _, op := range b.Ops {
+			for _, u := range op.Peers {
+				if u.PublicKey == next {
+					t.Fatalf("the claimant went in while the holder still held %v", addrs)
+				}
+				removed = removed || u.PublicKey == peer && u.Remove
+			}
+		}
+	}
+	if !removed || c.Stats.Conflicts == 0 {
+		t.Fatalf("holder removed %v, conflicts %d; want the holder gone and the claimant deferred", removed, c.Stats.Conflicts)
+	}
+	drive(c, now, succeed)
+	if got := c.ns["sdn-a"].peers[next].Allowed; !slices.Equal(got, addrs) {
+		t.Fatalf("after the holder left the claimant holds %v, want %v", got, addrs)
+	}
+}

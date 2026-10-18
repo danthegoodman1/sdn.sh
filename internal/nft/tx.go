@@ -188,6 +188,13 @@ func Apply(have *Ruleset, t Transaction) (*Ruleset, error) {
 		if !ok {
 			return nil, fmt.Errorf("%w: set %s", ErrMissing, e.Set)
 		}
+		// The kernel fails the whole batch on deleting a missing element
+		// (nft_del_setelem, nf_tables_api.c), unlike adding a present one.
+		for _, a := range e.Addrs {
+			if !slices.Contains(s.Addrs, a) {
+				return nil, fmt.Errorf("%w: set %s element %v", ErrMissing, e.Set, a)
+			}
+		}
 		s.Addrs = slices.DeleteFunc(s.Addrs, func(a netip.Addr) bool { return slices.Contains(e.Addrs, a) })
 	}
 	if t.Rules != nil {

@@ -1370,6 +1370,72 @@
       ]
     },
     {
+      "type": "timeseries",
+      "title": "Interfaces, namespaces and peers",
+      "description": "",
+      "id": 43,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 66
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (node, phase) (sdn_agent_interfaces)",
+          "legendFormat": "{{node}} {{phase}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (node, kind) (sdn_agent_namespaces)",
+          "legendFormat": "{{node}} namespaces {{kind}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (node) (sdn_agent_peers)",
+          "legendFormat": "{{node}} peers",
+          "refId": "C"
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "Relays",
       "id": 26,
@@ -1842,6 +1908,72 @@
       ]
     },
     {
+      "type": "timeseries",
+      "title": "Unbound ports, bind failures and limited probes",
+      "description": "",
+      "id": 44,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 99
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (node) (sdn_relay_unbound_ports)",
+          "legendFormat": "{{node}} unbound",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (node) (rate(sdn_relay_bind_failures_total[$__rate_interval]))",
+          "legendFormat": "{{node}} bind failures",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (node) (rate(sdn_relay_probes_limited_total[$__rate_interval]))",
+          "legendFormat": "{{node}} probes limited",
+          "refId": "C"
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "Machines",
       "id": 36,
@@ -1850,7 +1982,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 99
+        "y": 107
       },
       "panels": []
     },
@@ -1867,7 +1999,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 100
+        "y": 108
       },
       "fieldConfig": {
         "defaults": {
@@ -1915,7 +2047,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 100
+        "y": 108
       },
       "fieldConfig": {
         "defaults": {
@@ -1963,7 +2095,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 100
+        "y": 108
       },
       "fieldConfig": {
         "defaults": {

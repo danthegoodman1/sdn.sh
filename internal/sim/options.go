@@ -53,6 +53,10 @@ type Options struct {
 	// Prefix4 is every network's IPv4 prefix. One small enough to run out
 	// makes the control plane reuse addresses once their quarantine ends.
 	Prefix4 netip.Prefix
+	// Quarantine4, when set, replaces the IPv4 quarantine. One barely past
+	// the drain grace hands an address to a new interface while an agent
+	// that lags still holds its previous owner.
+	Quarantine4 time.Duration
 }
 
 // Swarm draws a run's options from its seed.
@@ -98,8 +102,8 @@ func Swarm(seed uint64) Options {
 }
 
 func (o Options) String() string {
-	return fmt.Sprintf("hosts=%d relays=%d networks=%d services=%d ipv4=%d%% rules=%d%% faults=%v+%v loss=%d%% partition=%d‰ crash=%d‰/op opfail=%d‰ relaycrash=%d‰ cpcrash=%d‰ reboot=%d‰ rebind=%d‰ stray=%d‰ unname=%d‰ foreign=%d attacker=%v prefix4=%v",
+	return fmt.Sprintf("hosts=%d relays=%d networks=%d services=%d ipv4=%d%% rules=%d%% faults=%v+%v loss=%d%% partition=%d‰ crash=%d‰/op opfail=%d‰ relaycrash=%d‰ cpcrash=%d‰ reboot=%d‰ rebind=%d‰ stray=%d‰ unname=%d‰ foreign=%d attacker=%v prefix4=%v quarantine4=%v",
 		o.Hosts, o.Relays, o.Networks, o.Services, o.IPv4Percent, o.RulePercent, o.FaultTime, o.Quiesce,
 		o.LossPercent, o.PartitionPermille, o.AgentCrashPermille, o.OpFailPermille, o.RelayCrashPermille,
-		o.CPCrashPermille, o.RebootPermille, o.NATRebindPermille, o.StrayPermille, o.UnnamePermille, o.ForeignPorts, o.Attacker, o.Prefix4)
+		o.CPCrashPermille, o.RebootPermille, o.NATRebindPermille, o.StrayPermille, o.UnnamePermille, o.ForeignPorts, o.Attacker, o.Prefix4, o.Quarantine4)
 }

@@ -1,0 +1,29 @@
+# Prometheus scrape configuration for an sdn.sh fleet. The targets live in
+# file_sd files under /etc/prometheus/sdn, which `sdn-lab deploy` writes
+# from the Terraform outputs (or `sdn-lab monitoring --out DIR` writes for
+# a Prometheus elsewhere). Each target carries node and role labels.
+# Prometheus itself listens on 127.0.0.1:9099, since sdn-cp holds :9090.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: sdn-cp
+    file_sd_configs:
+      - files: [/etc/prometheus/sdn/sdn-cp.json]
+
+  - job_name: sdn-agent
+    file_sd_configs:
+      - files: [/etc/prometheus/sdn/sdn-agent.json]
+
+  - job_name: sdn-relay
+    file_sd_configs:
+      - files: [/etc/prometheus/sdn/sdn-relay.json]
+
+  - job_name: node
+    file_sd_configs:
+      - files: [/etc/prometheus/sdn/node.json]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9099]

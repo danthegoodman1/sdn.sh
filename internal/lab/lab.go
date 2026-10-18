@@ -52,6 +52,11 @@ type Options struct {
 	Store string
 	// CPArgs are extra sdn-cp flags, such as short lease clocks.
 	CPArgs []string
+	// LogLevel is every daemon's --log-level; debug when empty.
+	LogLevel string
+	// RelayPorts is the range each relay draws edge ports from;
+	// 20000-29999 when zero.
+	RelayPorts model.PortRange
 	// Log receives a line per step.
 	Log io.Writer
 }
@@ -130,6 +135,12 @@ func New(opts Options) (*Lab, error) {
 	}
 	if opts.Store == "" {
 		opts.Store = "memory"
+	}
+	if opts.LogLevel == "" {
+		opts.LogLevel = "debug"
+	}
+	if opts.RelayPorts == (model.PortRange{}) {
+		opts.RelayPorts = model.PortRange{Lo: 20000, Hi: 29999}
 	}
 	// Every lab uses the same underlay addresses, so labs on one machine
 	// take turns.
@@ -284,7 +295,7 @@ func (l *Lab) bin(name string) string { return filepath.Join(l.opts.Bin, name) }
 func (l *Lab) startCP() error {
 	addr := netip.AddrPortFrom(cpRoot, 18443)
 	args := append([]string{l.bin("sdn-cp"), "--listen", addr.String(), "--telemetry", netip.AddrPortFrom(cpRoot, 19090).String(),
-		"--store", l.opts.Store, "--log-format", "json", "--log-level", "debug"}, l.opts.CPArgs...)
+		"--store", l.opts.Store, "--log-format", "json", "--log-level", l.opts.LogLevel}, l.opts.CPArgs...)
 	p, err := l.spawn("cp", "", args...)
 	if err != nil {
 		return err
@@ -372,18 +383,20 @@ type Relay struct {
 	creds     string
 	state     string
 	lab       *Lab
+	args      []string
 }
 
-// AddRelay registers a relay with the control plane and starts it.
-func (l *Lab) AddRelay(ctx context.Context, name string) (*Relay, error) {
+// AddRelay registers a relay with the control plane and starts it. args
+// are extra sdn-relay flags.
+func (l *Lab) AddRelay(ctx context.Context, name string, args ...string) (*Relay, error) {
 	n, err := l.addNode(name)
 	if err != nil {
 		return nil, err
 	}
-	r := &Relay{node: n, Name: name, Probe: netip.AddrPortFrom(n.Addr, 7000), lab: l}
+	r := &Relay{node: n, Name: name, Probe: netip.AddrPortFrom(n.Addr, 7000), lab: l, args: args}
 	creds, err := l.Admin.CreateRelay(ctx, api.CreateRelay{
 		Name: name, Addresses: []api.RelayAddress{{Local: n.Addr, Advertised: n.Addr}},
-		PortLo: 20000, PortHi: 29999, ProbePort: 7000,
+		PortLo: l.opts.RelayPorts.Lo, PortHi: l.opts.RelayPorts.Hi, ProbePort: 7000,
 	})
 	if err != nil {
 		return nil, err
@@ -404,9 +417,10 @@ func (r *Relay) Kill() { r.Proc.Kill() }
 // Start starts the relay's process.
 func (r *Relay) Start() error {
 	r.Telemetry = "http://" + netip.AddrPortFrom(r.Addr, 9092).String()
-	p, err := r.lab.spawn(r.Name, r.NS, r.lab.bin("sdn-relay"), "--cp", r.lab.CPURL, "--credentials", r.creds,
+	args := append([]string{r.lab.bin("sdn-relay"), "--cp", r.lab.CPURL, "--credentials", r.creds,
 		"--state", r.state, "--probe", r.Probe.String(), "--telemetry", netip.AddrPortFrom(r.Addr, 9092).String(),
-		"--log-format", "json", "--log-level", "debug", "--socket-buffer", "0")
+		"--log-format", "json", "--log-level", r.lab.opts.LogLevel, "--socket-buffer", "0"}, r.args...)
+	p, err := r.lab.spawn(r.Name, r.NS, args...)
 	if err != nil {
 		return err
 	}
@@ -469,7 +483,7 @@ func (h *Host) Start() error {
 	h.Telemetry = "http://" + netip.AddrPortFrom(h.Addr, 9091).String()
 	args := append([]string{h.lab.bin("sdn-agent"), "--cp", h.lab.CPURL, "--credentials", h.creds,
 		"--journal", h.journal, "--socket", h.Socket, "--telemetry", netip.AddrPortFrom(h.Addr, 9091).String(),
-		"--prefix", h.Prefix, "--log-format", "json", "--log-level", "debug"}, h.args...)
+		"--prefix", h.Prefix, "--log-format", "json", "--log-level", h.lab.opts.LogLevel}, h.args...)
 	if h.Unit != "" {
 		return h.startUnit(args)
 	}

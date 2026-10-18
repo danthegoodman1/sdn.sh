@@ -1,8 +1,8 @@
 # wirenet
 
-Per-workload WireGuard networking across hosts. Each workload gets its own key and address and reaches a peer on another host 44 ms after it attaches. Services resolve by name with no proxy, and relays carry the traffic without being able to read it.
+Ad-hoc VPCs with built-in service discovery, for high-churn workloads such as sandboxes and ephemeral compute. Each workload gets its own WireGuard key and address, finds services by name, and reaches a peer on another host 44 ms after it attaches.
 
-Workloads keep ordinary interfaces and sockets. Encryption happens at both ends in kernel WireGuard, and each receiver's kernel enforces policy.
+Create a network per tenant, sandbox fleet or job. It costs nothing until a workload attaches, and its addresses may overlap any other network's. Workloads keep ordinary sockets, across hosts and behind NAT. Encryption happens at both ends in kernel WireGuard, and the relays between hosts carry ciphertext they cannot read.
 
 ## Contents
 

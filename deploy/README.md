@@ -21,7 +21,7 @@
 | `converge` | A service change under churn: a cold replacement of a backend, then removal of one of two warm backends, timed until every client's new connections reach the backend that stays. |
 | `failover` | Killing the relay an edge sends through, mid-flow: the established flow's stall and a new connection's wait. |
 | `density` | Interfaces on one host until an attach fails, attach latency degrades tenfold, or `--max-interfaces`. |
-| `spread` | `--edges` edges streaming at once through one relay, then two, then three: aggregate throughput, edges and CPU per relay. Run it with `relay_count = 3` and an even `agent_count`, so clients and servers split the hosts evenly. |
+| `spread` | `--edges` edges streaming at once through one relay, then two, then three: aggregate throughput, edges and CPU per relay, and each host's CPU, which shows when the endpoints rather than the relays bound the aggregate. Run it with `relay_count = 3` and an even `agent_count`, so clients and servers split the hosts evenly. |
 
 Every plan starts from a fresh fleet, measures the plain-TCP underlay ceiling in the same run, and purges the fleet afterwards. `sdn-lab plans` lists them.
 

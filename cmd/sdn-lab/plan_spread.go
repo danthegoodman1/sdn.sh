@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,6 +22,9 @@ type spreadRound struct {
 	BitsPerSecond float64              `json:"bits_per_second"`
 	Forwarded     map[string]float64   `json:"forwarded_bytes"`
 	CPU           map[string]bench.CPU `json:"relay_cpu"`
+	// HostCPU is every endpoint host's, to show when the endpoints'
+	// encryption rather than the relays bounds the aggregate.
+	HostCPU map[string]bench.CPU `json:"host_cpu"`
 }
 
 // spreadEdge is one client streaming to its own server.
@@ -82,7 +87,7 @@ func planSpread(r *run) error {
 				return err
 			}
 		}
-		round := spreadRound{Edges: map[string]int{}, Forwarded: map[string]float64{}, CPU: map[string]bench.CPU{}}
+		round := spreadRound{Edges: map[string]int{}, Forwarded: map[string]float64{}, CPU: map[string]bench.CPU{}, HostCPU: map[string]bench.CPU{}}
 		carrier := make([]string, len(edges))
 		for i, e := range edges {
 			var w uint64
@@ -114,6 +119,10 @@ func planSpread(r *run) error {
 		for i, n := range set {
 			fns = append(fns, func() error { return r.bench(n, &cpus[i], "cpu", "--duration", r.o.Duration.String()) })
 		}
+		hcpus := make([]bench.CPU, len(hs))
+		for i, n := range hs {
+			fns = append(fns, func() error { return r.bench(n, &hcpus[i], "cpu", "--duration", r.o.Duration.String()) })
+		}
 		if err := together(fns...); err != nil {
 			return err
 		}
@@ -121,6 +130,9 @@ func planSpread(r *run) error {
 		for i, s := range round.Streams {
 			round.BitsPerSecond += s.BitsPerSecond
 			carried[carrier[i]] += s.Bytes
+		}
+		for i, n := range hs {
+			round.HostCPU[n.Name] = hcpus[i]
 		}
 		for i, n := range set {
 			round.CPU[n.Name] = cpus[i]
@@ -145,7 +157,7 @@ func (r *run) spreadTable(rounds []spreadRound) {
 	}
 	t := Table{
 		Title:   fmt.Sprintf("Throughput by relay count, %d edges", r.o.Edges),
-		Columns: []string{"Relays", "Edges per relay", "Aggregate", "Gbit per relay CPU-second", "Relay CPU busy"},
+		Columns: []string{"Relays", "Edges per relay", "Aggregate", "Gbit per relay CPU-second", "Relay CPU busy", "Host CPU busy"},
 	}
 	for _, rd := range rounds {
 		var edges, cpu []string
@@ -164,11 +176,15 @@ func (r *run) spreadTable(rounds []spreadRound) {
 		if busy > 0 {
 			perCPU = num(bytes*8/1e9/busy, 2)
 		}
-		t.Rows = append(t.Rows, []string{itoa(len(rd.Relays)), strings.Join(edges, ", "), mbit(rd.BitsPerSecond), perCPU, strings.Join(cpu, ", ")})
+		var hosts []string
+		for _, name := range slices.Sorted(maps.Keys(rd.HostCPU)) {
+			hosts = append(hosts, fmt.Sprintf("%s %ss", name, num(rd.HostCPU[name].Busy, 1)))
+		}
+		t.Rows = append(t.Rows, []string{itoa(len(rd.Relays)), strings.Join(edges, ", "), mbit(rd.BitsPerSecond), perCPU, strings.Join(cpu, ", "), strings.Join(hosts, ", ")})
 	}
 	t.Caption = fmt.Sprintf("Every edge streams one TCP connection for %v at once, clients on the first half of the hosts and servers on the rest. "+
 		"Aggregate is the sum of what every server received. Edges per relay come from the edges' weights with every relay up; "+
-		"relay CPU is busy time from /proc/stat over the same window, and bits per relay CPU-second divide what the relays forwarded by it.", r.o.Duration)
+		"relay and host CPU is busy time from /proc/stat over the same window, so a machine with every CPU busy reads its CPU count times the window, and bits per relay CPU-second divide what the relays forwarded by the relays' busy time.", r.o.Duration)
 	r.rep.table(t)
 	if r.env.Name() == "local" {
 		r.rep.note("Every role shares one kernel in the local environment, so the relays compete with the endpoints' encryption for the same cores, and the aggregate cannot grow with relays.")

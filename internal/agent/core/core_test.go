@@ -741,3 +741,59 @@ func TestAResendScheduleEndsWithItsNamespace(t *testing.T) {
 		t.Fatalf("after the namespace went: resends %d, resendAck %d", len(c.resends), len(c.resendAck))
 	}
 }
+
+// TestADetachTellsTheControlPlaneWhileItsDeviceIsDeleted checks that a
+// detach releases its interface before teardown completes, retries a failed
+// release meanwhile, and still answers its caller and frees its port only
+// once the kernel state is gone.
+func TestADetachTellsTheControlPlaneWhileItsDeviceIsDeleted(t *testing.T) {
+	c, now := adopted(t)
+	if err := c.State(now, state(3, nil)); err != nil {
+		t.Fatal(err)
+	}
+	drive(c, now, succeed)
+	c.Detach(now, 2, "if-a")
+	var held *RunBatch
+	releases := 0
+	collect := func(now time.Time) (replied bool) {
+		for _, a := range c.Actions(now) {
+			switch a := a.(type) {
+			case RunBatch:
+				held = &a
+			case CallRelease:
+				releases++
+			case Reply:
+				replied = true
+			}
+		}
+		return replied
+	}
+	if collect(now) {
+		t.Fatal("the detach answered before its teardown ran")
+	}
+	if held == nil || releases != 1 {
+		t.Fatalf("after the detach: teardown batch %v, releases %d; want both at once", held != nil, releases)
+	}
+	c.ReleaseDone(now, []model.InterfaceID{"if-a"}, fmt.Errorf("control plane unreachable"))
+	now = now.Add(releaseRetry)
+	c.Tick(now)
+	collect(now)
+	if releases != 2 {
+		t.Fatalf("a failed release was sent %d times while teardown ran, want 2", releases)
+	}
+	c.ReleaseDone(now, []model.InterfaceID{"if-a"}, nil)
+	if _, ok := c.ifaces["if-a"]; !ok {
+		t.Fatal("the released interface was forgotten, and its port freed, before its device was deleted")
+	}
+	c.BatchDone(now, held.Namespace, held.ID, len(held.Ops), nil)
+	replied := false
+	for range 4 {
+		replied = collect(now) || replied
+	}
+	if !replied || releases != 2 {
+		t.Fatalf("after teardown: replied %v, releases %d; want a reply and no further release", replied, releases)
+	}
+	if _, ok := c.ifaces["if-a"]; ok {
+		t.Fatal("the interface outlived its teardown and its release")
+	}
+}

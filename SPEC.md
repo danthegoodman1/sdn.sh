@@ -213,7 +213,7 @@ An interface reaches a peer by one of three paths, chosen by setting the peer's 
 | **Relay** | `relay:<this direction's port>` | The default. No inbound reachability required at either end, so NAT traversal is unnecessary. |
 | **Direct** | the peer's host endpoint | Both ends are reachable, directly or after hole punching. Zero added hops. |
 
-**Every relay in a network's set carries traffic, each edge through one of them.** Kernel WireGuard holds exactly one endpoint per peer, so an edge sends through one relay at a time, and the agent chooses it: of the relays its probes find up, the one of highest weight by `model.RelayWeight`, which hashes the edge's two interfaces with the relay (rendezvous hashing), or the heaviest of all when none answers. Both ends compute the same weights, so they choose the same relay while their probes agree, and a network's edges spread over its relays in proportion: sixteen edges over two relays split between them in every run of the end-to-end suite. A network's throughput grows with its relays; one edge's stays bounded by one relay port and by encryption at its ends.
+**Every relay in a network's set carries traffic, each edge through one of them.** Kernel WireGuard holds exactly one endpoint per peer, so an edge sends through one relay at a time, and the agent chooses it: of the relays its probes find up, the one of highest weight by `model.RelayWeight`, which hashes the edge's two interfaces with the relay (rendezvous hashing), or the heaviest of all when none answers. Both ends compute the same weights, so they choose the same relay while their probes agree, and a network's edges spread over its relays in proportion: sixteen edges over two relays split between them in every run of the end-to-end suite. A network's throughput grows with its relays; one edge's stays bounded by one relay port and by encryption at its ends. On EC2, two relays doubled what one carried, and with three the receiving hosts' encryption became the limit; see [The fleet on EC2](#the-fleet-on-ec2).
 
 Failover is the agent's job too. It probes every relay of its networks every 200 ms, and when one misses three in a row, the edges that relay carried move, each to its own next relay, so a dead relay's load spreads over the survivors. When the relay answers again, they move back. Edges hold ports on every relay in the set, so any relay can take any edge at once.
 
@@ -532,9 +532,11 @@ On the 8-vCPU guest run-to-run variance swamped the effect. On the c6i.xlarge cr
 | One peer per call | 60µs | 90–100µs | 43µs |
 | Flush every peer (`ReplacePeers`) | 8µs | 27–31µs | 26µs |
 
-How removal compares with addition depends on the substrate. On the 8-vCPU guest a single-peer removal cost about a quarter of an addition. On the c6i.xlarge it cost about the same as a single-peer addition, roughly 100µs each, so a detach has to be budgeted like an attach. `wg_peer_remove` waits a grace period per peer and `wg_peer_remove_all` waits one in total — but `synchronize_net()` calls `synchronize_rcu_expedited()` when RTNL is held (`net/core/dev.c`), and `wg_set_device` holds it, so that wait is microseconds rather than the milliseconds an unexpedited grace period costs. This is also independent evidence that RTNL really is held: without it, removal would be millisecond-scale.
+How removal compares with addition depends on the substrate. On the 8-vCPU guest a single-peer removal cost about a quarter of an addition. On the c6i.xlarge it cost about the same as a single-peer addition, roughly 100µs each, so a detach has to be budgeted like an attach. `wg_peer_remove` waits two grace periods per peer, its own and one in `netif_napi_del`, while `wg_peer_remove_all` shares the first across every peer and still pays the second per peer (`drivers/net/wireguard/peer.c`, `include/linux/netdevice.h`). `synchronize_net()` calls `synchronize_rcu_expedited()` when RTNL is held (`net/core/dev.c`), and `wg_set_device` holds it, so each wait is microseconds rather than the milliseconds an unexpedited grace period costs. This is also independent evidence that RTNL really is held: without it, removal would be millisecond-scale.
 
-**The single-peer row is the figure for a detach.** A detach removes one peer from each of D neighbours' devices, and a removal flagged in a set-device call goes through `wg_peer_remove` (`netlink.c`), so each pays its own grace period even when several share a call. The flush row applies only when a device loses every peer. An expedited grace period also interrupts every CPU that is not idle (`kernel/rcu/tree_exp.h`), so removal churn costs the whole host a little, workload cores included — at 100 detaches a second and degree 20, about 2,000 interrupts a second on each busy core. That cost is unmeasured, and the grace periods were sized only on virtualized hosts, where an interrupt is a VM exit.
+**The single-peer row is the figure for a detach.** A detach removes one peer from each of D neighbours' devices, and a removal flagged in a set-device call goes through `wg_peer_remove` (`netlink.c`), so each pays its own two grace periods even when several share a call. The flush row applies only when a device loses every peer. An expedited grace period also interrupts every CPU that is not idle (`kernel/rcu/tree_exp.h`), so removal churn costs the whole host a little, workload cores included — at 100 detaches a second and degree 20, about 2,000 interrupts a second on each busy core. That cost is unmeasured, and the grace periods were sized only on virtualized hosts, where an interrupt is a VM exit.
+
+**Deleting a device pays an unexpedited grace period per peer.** `wg_destruct` drops RTNL before it removes the device's peers (`drivers/net/wireguard/device.c`), so each peer's `netif_napi_del` waits a full grace period. On an idle c6i.xlarge a device holding 30 peers took 274ms to delete against 57ms for one holding none, and under churn about a second. A detach therefore releases its interface before it deletes the device; see [The fleet on EC2](#the-fleet-on-ec2).
 
 ### The convergence batch
 
@@ -569,6 +571,8 @@ An earlier run of the same comparison, with a build whose forwarding path is ide
 
 At 1307 Mbit/s with 1380-byte payloads the relay forwarded about 118,000 packets per second in the data direction on 1.2 cores. It dropped 16 packets before the far side registered, which is the bootstrap cost of learning endpoints.
 
+On EC2, with `sdn-relay` and an underlay five times as fast as either path, the relay carried 2.22× the gateway's traffic per CPU-second; see [The fleet on EC2](#the-fleet-on-ec2).
+
 ### Encryption at the edge
 
 Two namespaces on one 4-vCPU host, devices peering over loopback, against a plain-loopback baseline so the difference is encryption.
@@ -600,8 +604,8 @@ Separate namespaces, separate relay ports, no translation and no tenant tag. Han
 |---|--:|
 | Attach, the local API call returning, degree 20 | p50 18.6ms, p90 21.3ms, max 51.1ms |
 | Attach to first connection to a remote peer, degree 20 | p50 21.4ms, p90 24.2ms, max 54ms |
-| Service change to settled, 30 clients on 3 hosts, under churn: cold replacement | p50 145–158ms, max 164–178ms |
-| The same, warm removal, half the slots rewritten in every client | p50 160–189ms, max 171–210ms |
+| Service change to settled, 30 clients on 3 hosts, under churn: cold replacement | p50 6.9–9.1ms, max 7.2–9.4ms |
+| The same, warm removal, half the slots rewritten in every client | p50 1.8–7.8ms, max 12.5–40.5ms |
 | An edge's relay killed: a new connection through the other relay | 0.46–0.54s |
 | An edge's relay killed: an established flow's stall | 0.82–0.83s |
 | Relay restart to forwarding again, no registration sent | 2–4ms |
@@ -610,27 +614,66 @@ Separate namespaces, separate relay ports, no translation and no tenant tag. Han
 | Interfaces on one host, degree 1, until attach p50 rose tenfold | 920, rising linearly from 4.2ms to 33.9ms |
 | Attach-and-detach pairs, 32 loops on each of 3 hosts, degree 20 | 38 a second on the memory store, attach p50 1.2–1.5s; 24 on Postgres |
 
-Attach figures come from 30 rounds, the service changes from two runs, failover from three rounds and the end-to-end suite. Three of these changed the design. Before registrations were resent, one attach in five at degree 20 waited 5–25 seconds for its first connection, because its first registration reached the relay before the relay bound the port. Before a co-located client's slots waited for the backend's device, a cold replacement settled at a p99 of 4.3 seconds. And before an attach waited for the relay's acknowledgment, the attach call returned at a p50 of 7.6ms but a workload that dialed at once could still lose its first initiation to an unbound port: the first connection's p90 was 46ms, and one end-to-end run in three waited 5.27 seconds. Waiting raised the call to 18.6ms and brought the first connection's p90 to 24ms.
+Attach figures come from 30 rounds, the service changes from two runs, failover from three rounds and the end-to-end suite. Four of these changed the design. Before registrations were resent, one attach in five at degree 20 waited 5–25 seconds for its first connection, because its first registration reached the relay before the relay bound the port. Before a co-located client's slots waited for the backend's device, a cold replacement settled at a p99 of 4.3 seconds. And before an attach waited for the relay's acknowledgment, the attach call returned at a p50 of 7.6ms but a workload that dialed at once could still lose its first initiation to an unbound port: the first connection's p90 was 46ms, and one end-to-end run in three waited 5.27 seconds. Waiting raised the call to 18.6ms and brought the first connection's p90 to 24ms. Finally, before a detach released its interface ahead of deleting its device, the service changes settled at p50 145–189ms, most of it the departing device's deletion.
 
 On this substrate the relay path carried 3.65 Gbit/s on one stream and 3.77 Gbit/s on eight, against 6.1 and 6.15 Gbit/s through a WireGuard gateway on the same middle box. One directed port is one socket read by one goroutine, so a single edge gets one core's worth of relay. Idle round trips through the relay were 0.25ms against 0.007ms for plain TCP; loaded, 7.5ms against 1.8ms through the gateway. Every host shares the machine's CPUs here, so the CPU-per-byte comparison that decides the thesis needs separate machines.
 
-A configured device takes 160–245ms to delete, against 39ms for a bare one in `hostbench`; `ip link del` on a configured device took 223ms against 51ms bare. That sets a detach near 130–180ms.
+A configured device takes 160–245ms to delete, against 39ms for a bare one in `hostbench`; `ip link del` on a configured device took 223ms against 51ms bare. The detach call waits that out and its clients do not, since the agent releases the interface first; see [Peer removal](#peer-removal).
+
+### The fleet on EC2
+
+Nine c6i.xlarge instances (4 vCPU, Xeon Platinum 8375C) in one cluster placement group in us-east-1, on Ubuntu 24.04 with kernel 7.0.0-1014-aws and `rmem_max` at 256 MiB: a control plane with Postgres 16 on its own machine, three relays, a middle box for the gateway comparison, and four hosts. Plain TCP between two hosts carried 9,530 Mbit/s on one stream and 12,410 Mbit/s on eight, with no retransmits. A c6i.xlarge's network bandwidth bursts to 12.5 Gbit/s above a lower baseline, so every throughput window is 10 seconds. `sdn-lab --env aws` produced every figure here, with the plain-TCP ceiling measured at the start of each run.
+
+| Path, one edge | 1 stream | 8 streams | Middle-box CPU, 8 streams over 10s | Carried per CPU-second | Round trip p50, idle | Round trip p50, loaded |
+|---|--:|--:|--:|--:|--:|--:|
+| Plain TCP, no middle box | 9,530 Mbit/s | 12,410 Mbit/s | — | — | 0.071ms | 0.201ms |
+| **Ciphertext relay**, `sdn-relay` | 2,407 Mbit/s | 2,394 Mbit/s | **11.5s** | **2.09 Gbit** | 0.224ms | 4.8ms |
+| WireGuard-terminating gateway | 2,810 Mbit/s | 2,805 Mbit/s | 29.9s | 0.94 Gbit | 0.255ms | 3.3ms |
+
+**The relay carried 2.22× the gateway's traffic per CPU-second**, in line with [the earlier substrate](#the-relay-against-a-terminating-hub). The gateway carried 17% more on one edge, by spreading its crypto over three cores, where the relay reads one edge's port with one goroutine. Neither came near the underlay. A network's throughput comes from spreading edges over relays:
+
+| Edges | Relays | Edges per relay | Aggregate | Relay CPU busy, of 40s each | Receiving hosts' CPU busy, of 40s each |
+|--:|--:|---|--:|---|---|
+| 12 | 1 | 12 | 5,740 Mbit/s | 37.7s | 24.9s, 25.4s |
+| 12 | 2 | 4, 8 | 11,766 Mbit/s | 32.5s, 37.2s | 38.2s, 37.4s |
+| 12 | 3 | 4, 4, 4 | 12,524 Mbit/s | 23.9s, 24.4s, 22.9s | 39.2s, 38.0s |
+| 24 | 1 | 24 | 6,208 Mbit/s | 37.7s | 26.7s, 23.2s |
+| 24 | 2 | 8, 16 | 14,084 Mbit/s | 34.4s, 37.4s | 37.2s, 37.5s |
+| 24 | 3 | 7, 9, 8 | 14,471 Mbit/s | 23.1s, 28.6s, 27.3s | 39.7s, 39.7s |
+
+Each edge streams one TCP connection from one of two sending hosts to one of two receiving hosts, every edge at once; aggregate is what the receivers took in, and each relay forwarded at least what its edges carried. **One relay runs out of CPU at about 6 Gbit/s; two double it; with three, the relays leave 28–43% of their CPU idle while every CPU on the receiving hosts is busy decrypting.** Past two relays the endpoints' encryption bounds the network, rather than the relays or the underlay, and at 24 edges the aggregate passed what plain TCP carries between one pair of hosts, since two receivers share it. A third run at 12 edges, with a split of 12, then 6 and 6, then 5, 2 and 5, read 5,743, 12,103 and 12,147 Mbit/s. Rendezvous hashing splits a dozen or two edges unevenly, as the 4-and-8 and 8-and-16 rounds show; over 3,000 edges each of three relays takes about a third (`TestEdgesSpreadOverRelaysInProportion`).
+
+| Quantity | Result |
+|---|--:|
+| Attach, the local API call returning, degree 20 | p50 42.6ms, p90 50.3ms, max 52.7ms |
+| Attach to first connection to a remote peer, degree 20 | p50 44.0ms, p90 51.7ms, max 54.2ms |
+| Service change to settled, 30 clients, under churn: cold replacement | p50 33.8–40.6ms, max 44.8–52.5ms |
+| The same, warm removal, half the slots rewritten in every client | p50 111–144ms, max 152–175ms |
+| An edge's relay killed: an established flow's stall | 0.82–0.83s |
+| An edge's relay killed: a new connection through another relay, from the kill command's return | 0.22–0.26s |
+| Attach-and-detach pairs, 4 workers on each of 4 hosts, degree 4 | 47 a second in each of two runs, no failures; attach p50 157–208ms, p99 0.93–1.53s; detach p50 60–66ms |
+| Interfaces on one host, degree 1, to a cap of 1000 | 1000 held at 841 KiB each; attach p50 rose from 24ms to 134ms |
+
+Attach and failover figures come from 30 and 3 rounds, the service changes and churn from two runs. Chrony held every clock within a few microseconds of Amazon's time service, which the convergence figures need, since they run from the backend's detach on one machine to each client's settling on another. **Releasing before teardown took a cold replacement from a second to 34–41ms.** When a detach told the control plane only after it had deleted the device, the same plan read p50 1,037ms cold and 1,372ms warm, max 1,921ms: the departing backend's device held 30 peers, and clients kept routing to it until it was gone.
+
+The attach figures match Postgres on the bare-metal desktop rather than its memory store. Churn reached the same 47 pairs a second before the release moved ahead of teardown.
 
 ## Targets
 
-Each target still needs its fleet figure from EC2. The lab column is the whole system on one machine, from [The whole system on one machine](#the-whole-system-on-one-machine), where every host shares one kernel.
+The EC2 column is the fleet in [The fleet on EC2](#the-fleet-on-ec2). The lab column is the whole system on one machine, from [The whole system on one machine](#the-whole-system-on-one-machine), where every host shares one kernel.
 
-| Quantity | Target | Lab | Why |
-|---|--:|--:|---|
-| Relay forwarding, XDP or TC | 1M+ pps per core, 100k+ edges | — | Required for the stated edge capacity, not merely faster. Batched userspace Go carried ~118k pps on a hot edge; `sk_lookup` alone fixes only the receive side. |
-| Service change to converged, p99 in one region | < 250 ms | 164–210ms | The cost of a change, and the number the product is judged on. |
-| Attach to first packet, peer already converged, degree ≤ 20 | < 100 ms | max 54ms | Device work is ~5ms and the interface's own peer table is ~3ms at degree 20. The figure is a latency, which the 64-way throughput numbers do not measure. |
-| Relay failover | < 1 s | 0.46–0.83s | A 200 ms probe interval plus an endpoint rewrite on both sides. |
-| Round-trip time added by a relay, p50 and p99, idle and under load | — | p50 0.25ms idle, 7.5ms loaded | Idle, the detour through the relay sets it. Under load, a relay that falls behind queues in its socket buffers before it drops. |
-| Interfaces per host | 1000+ | 920 before attach p50 rose tenfold | A netdev and a peer table each. |
-| Attaches per second, one network, degree ≤ 20 | 100+ | 24–38 pairs a second across 3 hosts | Device work allows 621/s. Every control-plane write takes the next revision from one row, which bounds the whole control plane; see [Open questions](#open-questions). Peer work shares one RTNL lane of ~10,000–19,000 operations a second per host, so the target depends on degree and on how many hosts the network spreads across. |
-| Slot-map rewrite across many namespaces | — | 30 namespaces within the change figures | A 1024-entry map in each of 400 namespaces could take most of the convergence budget. |
-| Softirq CPU attribution | — | — | Unmeasured, and the standing risk to the density thesis. |
+| Quantity | Target | EC2 | Lab | Why |
+|---|--:|--:|--:|---|
+| Relay forwarding, XDP or TC | 1M+ pps per core, 100k+ edges | 2.1 Gbit per busy relay core | — | Required for the stated edge capacity, not merely faster. Batched userspace Go carried ~118k pps on a hot edge; `sk_lookup` alone fixes only the receive side. |
+| A network's throughput across its relays | — | 14.5 Gbit/s over three relays, bounded by the receivers' CPU | — | One edge gets one relay core, so a network's throughput is its edges spread over its relays. |
+| Service change to converged, p99 in one region | < 250 ms | 45–175ms | 7–41ms | The cost of a change, and the number the product is judged on. |
+| Attach to first packet, peer already converged, degree ≤ 20 | < 100 ms | max 54ms | max 54ms | Device work is ~5ms and the interface's own peer table is ~3ms at degree 20. The figure is a latency, which the 64-way throughput numbers do not measure. |
+| Relay failover | < 1 s | 0.22–0.83s | 0.46–0.83s | A 200 ms probe interval plus an endpoint rewrite on both sides. |
+| Round-trip time added by a relay, p50 and p99, idle and under load | — | p50 0.22ms idle, 4.8ms loaded | p50 0.25ms idle, 7.5ms loaded | Idle, the detour through the relay sets it. Under load, a relay that falls behind queues in its socket buffers before it drops. |
+| Interfaces per host | 1000+ | 1000, attach p50 rising from 24ms to 134ms | 920 before attach p50 rose tenfold | A netdev and a peer table each. |
+| Attaches per second, one network, degree ≤ 20 | 100+ | 47 pairs a second across 4 hosts | 24–38 pairs a second across 3 hosts | Device work allows 621/s. Every control-plane write takes the next revision from one row, which bounds the whole control plane; see [Open questions](#open-questions). Peer work shares one RTNL lane of ~10,000–19,000 operations a second per host, so the target depends on degree and on how many hosts the network spreads across. |
+| Slot-map rewrite across many namespaces | — | 30 namespaces within the change figures | 30 namespaces within the change figures | A 1024-entry map in each of 400 namespaces could take most of the convergence budget. |
+| Softirq CPU attribution | — | — | — | Unmeasured, and the standing risk to the density thesis. |
 
 Semantics are verifiable inside one Linux kernel, with namespaces standing in for hosts: a relay in one, several hosts in others, each host handing a workload a namespace of its own, and veth pairs for the underlay. That covers the namespace placement, the slot table, convergence ordering, roaming on the return path, policy enforcement, and revocation, and it runs in CI. Every performance figure needs real hardware with the plain-TCP underlay ceiling measured in the same run, since a relay comparison without it measures the network.
 

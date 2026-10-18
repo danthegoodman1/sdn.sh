@@ -353,10 +353,7 @@ func (c *Core) settled(now time.Time, st *nsState, i *iface) {
 			c.emit(Reply{Request: req, Interface: c.describe(i)})
 		}
 		i.waiting, i.detachers = nil, nil
-		if i.attachSent && !i.released && !i.releasing {
-			i.releasing = true
-			c.emit(CallRelease{Interfaces: []model.InterfaceID{i.id}})
-		}
+		c.release(i)
 		c.finish(i)
 	}
 }

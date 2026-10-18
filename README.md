@@ -4,10 +4,11 @@ Per-workload network identity for short-lived workloads, across hosts in differe
 
 Each workload gets an ordinary interface and ordinary sockets, its own key, and its own address for as long as it runs. Encryption happens at both edges in kernel WireGuard; the relays between hosts forward ciphertext and hold no key that can read or forge it.
 
-**Status:** built — control plane, host agent, relay and CLI — and tested end to end on one machine, with the fleet benchmarks ready to run on EC2. [SPEC.md](SPEC.md) is the design and holds every measurement, [PLAN.md](PLAN.md) the phased build and what each phase has proven, [AGENTS.md](AGENTS.md) the working rules.
+**Status:** built — control plane, host agent, relay and CLI — tested end to end on one machine and benchmarked on an EC2 fleet. [SPEC.md](SPEC.md) is the design and holds every measurement, [PLAN.md](PLAN.md) the phased build and what each phase has proven, [AGENTS.md](AGENTS.md) the working rules.
 
 ## Contents
 
+- [On a real fleet](#on-a-real-fleet)
 - [In use](#in-use)
 - [What sets it apart](#what-sets-it-apart)
 - [What it doesn't](#what-it-doesnt)
@@ -23,6 +24,17 @@ Each workload gets an ordinary interface and ordinary sockets, its own key, and 
 - [Measured](#measured)
 - [Known limits](#known-limits)
 - [Development](#development)
+
+## On a real fleet
+
+Measured on 4-vCPU EC2 instances in one placement group; the figures, the method and the substrate are in [SPEC.md](SPEC.md#the-fleet-on-ec2).
+
+- **A dead relay costs under a second.** Kill the relay an edge sends through, and its established TCP connections stall for less than a second and carry on, with no reconnect; new connections get through sooner still. Each edge the relay carried moves to its own next relay, so the load spreads over the survivors.
+- **Relays add throughput until the hosts run out of encryption.** Every edge sends through one relay of its network's set, chosen by hashing the edge, so a network's edges spread over all its relays. Two relays carried twice what one did; with three, the relays had CPU to spare while every core on the receiving hosts was busy decrypting, and the network carried more than plain TCP between one pair of hosts.
+- **A relay forwards for less than half a gateway's CPU.** It moves ciphertext without decrypting it, where a gateway that terminates WireGuard does two crypto operations per byte.
+- **A service change reaches every client within a quarter of a second**, under attach churn, and replacing a backend takes tens of milliseconds. Each client moves in a single nftables transaction while its established connections drain.
+- **A workload's first connection lands in under 100 milliseconds** from its attach, with its own key, device, peers and nftables table built for it.
+- **A thousand interfaces fit on one 4-vCPU host**, each a WireGuard device with its own key.
 
 ## In use
 
@@ -149,7 +161,8 @@ Every figure, its methodology, and the substrate that produced it live in [SPEC.
 - **A device created directly into the workload namespace keeps its socket on the host**, verified by traffic rather than inspection: two devices created into two namespaces handshook through the host's loopback, and neither namespace has a path to the other. That removes the namespace move from the attach path, which is worth several times the attach rate.
 - **Netdev concurrency depends on the operation.** Destroys overlap almost perfectly; namespace moves barely overlap at all, because a destroy defers its grace period past `rtnl_unlock` while a move holds RTNL across its own.
 - **Peer installation runs under RTNL**, so it is one lane per host that does not widen with cores, and it serializes against device, address and route work. Removal costs from a quarter of an addition to about the same, depending on the host, so a detach is budgeted like an attach. That ceiling, not the device work, is what bounds attach rate.
-- **Relaying ciphertext costs the middle box 2–3× less CPU per byte than terminating WireGuard** on the same machine against the same hosts. The throughput difference is small and noisy on the hardware tested, so the CPU cost is the result rather than the bandwidth.
+- **Relaying ciphertext costs the middle box 2–3× less CPU per byte than terminating WireGuard** on the same machine against the same hosts. On one edge the gateway carries a little more by spending more cores, so the CPU cost is the result, and a network gets its throughput by spreading edges over relays.
+- **A detach tells the control plane before it deletes the device.** Deleting a WireGuard device waits a grace period for each peer it holds, so a backend that released itself only after teardown kept its clients for about a second; releasing first brought a replacement down to tens of milliseconds.
 - **Two networks on one address space** each reached their own peer at the same address, across NAT that gave the hosts different public addresses, and with two senders sharing one address.
 
 ## Known limits

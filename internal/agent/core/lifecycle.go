@@ -250,6 +250,19 @@ func (c *Core) Detach(now time.Time, req RequestID, id model.InterfaceID) {
 	i.phase = detaching
 	c.emit(WriteJournal{Entry: c.entry(i)})
 	c.ns[i.ns].dirty = true
+	// Peers stop routing to the interface as soon as the control plane
+	// knows, so it learns while the device is deleted rather than after:
+	// deleting a device waits a grace period per peer it holds.
+	c.release(i)
+}
+
+// release tells the control plane an interface is ending, unless it knows
+// or is being told.
+func (c *Core) release(i *iface) {
+	if i.attachSent && !i.released && !i.releasing {
+		i.releasing = true
+		c.emit(CallRelease{Interfaces: []model.InterfaceID{i.id}})
+	}
 }
 
 func (c *Core) entry(i *iface) JournalEntry {
@@ -339,7 +352,7 @@ func (c *Core) retryReleases(now time.Time) {
 	var ids []model.InterfaceID
 	for _, id := range slices.Sorted(maps.Keys(c.ifaces)) {
 		i := c.ifaces[id]
-		if i.tornDown && i.attachSent && !i.released && !i.releasing {
+		if (i.tornDown || i.phase == detaching) && i.attachSent && !i.released && !i.releasing {
 			i.releasing = true
 			ids = append(ids, id)
 		}

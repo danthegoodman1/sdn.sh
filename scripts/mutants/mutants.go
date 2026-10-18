@@ -679,6 +679,18 @@ var Mutants = []Mutant{
 		Catch:  []string{"agent-core"},
 	},
 	{
+		ID:     "detach-releases-after-teardown",
+		Breaks: "a detach tells the control plane while its device is deleted, so peers stop routing to it without waiting out the deletion",
+		Edits:  []Edit{{agentLife, "\t// deleting a device waits a grace period per peer it holds.\n\tc.release(i)\n", "\t// deleting a device waits a grace period per peer it holds.\n"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "release-retry-waits-for-teardown",
+		Breaks: "a detach's failed release is sent again while its teardown runs",
+		Edits:  []Edit{{agentLife, "if (i.tornDown || i.phase == detaching) && i.attachSent", "if i.tornDown && i.attachSent"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
 		ID:     "stored-socket-made-blocking",
 		Breaks: "a resolver socket handed to the descriptor store stays non-blocking, so closing it on detach returns",
 		Edits: []Edit{{agentFDStore, "\tif err := rc.Control(func(fd uintptr) {\n\t\tserr = unix.Sendmsg(s.fd, []byte(msg), unix.UnixRights(int(fd)), s.addr, 0)\n\t}); err != nil {\n\t\treturn err\n\t}\n",

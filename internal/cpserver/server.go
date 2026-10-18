@@ -53,8 +53,18 @@ func DefaultConfig(adminToken string) Config {
 	}
 }
 
+// Watcher is a store that reports commits made through any handle, so
+// every replica wakes its long polls for the others' writes. pgstore is
+// one.
+type Watcher interface {
+	// Watch delivers each commit's change until ctx ends or the feed
+	// breaks, then closes the channel. Changes may go unseen across a
+	// break, so a caller that watches again re-reads what it serves.
+	Watch(ctx context.Context) (<-chan store.Change, error)
+}
+
 // Server is one control-plane replica. Replicas share a store; a store
-// that implements store.Watcher wakes each replica's polls for the others'
+// that implements Watcher wakes each replica's polls for the others'
 // commits.
 type Server struct {
 	cfg   Config
@@ -107,19 +117,8 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("boot: %w", err)
 	}
 	s.log.Info().Dur("down", down).Msg("control plane booted; lease expiry held for at least one term")
-	if w, ok := s.store.(store.Watcher); ok {
-		go func() {
-			for ctx.Err() == nil {
-				err := w.Watch(ctx, func(c store.Change) { s.hub.publish(c, s.now()) })
-				if ctx.Err() == nil {
-					s.log.Warn().Err(err).Msg("store change feed ended; reconnecting")
-					select {
-					case <-ctx.Done():
-					case <-time.After(time.Second):
-					}
-				}
-			}
-		}()
+	if w, ok := s.store.(Watcher); ok {
+		go s.watch(ctx, w)
 	}
 	t := time.NewTicker(s.cfg.SweepEvery)
 	defer t.Stop()
@@ -129,6 +128,28 @@ func (s *Server) Run(ctx context.Context) error {
 			return nil
 		case <-t.C:
 			s.sweep(ctx)
+		}
+	}
+}
+
+// watch wakes polls for commits other replicas make. A break in the feed
+// may hide changes, so every parked poll re-reads when the feed returns.
+func (s *Server) watch(ctx context.Context, w Watcher) {
+	for ctx.Err() == nil {
+		ch, err := w.Watch(ctx)
+		if err == nil {
+			s.hub.wakeAll(s.now())
+			for c := range ch {
+				s.hub.publish(c, s.now())
+			}
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		s.log.Warn().Err(err).Msg("store change feed broke; reconnecting")
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Second):
 		}
 	}
 }

@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
-	"errors"
 
 	"github.com/rs/zerolog"
 
 	"sdn.sh/internal/store"
+	"sdn.sh/internal/store/pgstore"
 )
 
 func openPostgres(ctx context.Context, url string, log zerolog.Logger) (store.Store, func(), error) {
-	return nil, nil, errors.New("postgres store not built yet")
+	st, err := pgstore.Open(ctx, url)
+	if err != nil {
+		return nil, nil, err
+	}
+	log.Info().Msg("connected to postgres; schema migrated")
+	return st, st.Close, nil
 }

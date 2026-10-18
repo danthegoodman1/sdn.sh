@@ -314,7 +314,8 @@ func (s *Server) hostPoll(r *http.Request, p principal) (any, error) {
 			if err != nil {
 				return err
 			}
-			nets = nets[:0]
+			// A fresh slice: the hub holds the previous one.
+			nets = make([]model.NetworkID, 0, len(held))
 			for _, n := range held {
 				nets = append(nets, n.ID)
 			}

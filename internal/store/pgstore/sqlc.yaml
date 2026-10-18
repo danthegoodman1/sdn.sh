@@ -1,0 +1,30 @@
+version: "2"
+sql:
+  - engine: postgresql
+    schema: schema
+    queries: queries
+    gen:
+      go:
+        package: db
+        out: db
+        sql_package: pgx/v5
+        emit_pointers_for_null_types: true
+        overrides:
+          - db_type: inet
+            go_type: net/netip.Addr
+          - db_type: inet
+            go_type: net/netip.Addr
+            nullable: true
+          - column: networks.prefix6
+            go_type: net/netip.Prefix
+            nullable: true
+          - column: networks.prefix4
+            go_type: net/netip.Prefix
+            nullable: true
+          - db_type: timestamptz
+            go_type: time.Time
+          - db_type: timestamptz
+            nullable: true
+            go_type:
+              type: time.Time
+              pointer: true

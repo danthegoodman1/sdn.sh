@@ -112,14 +112,38 @@ func (h *hub) publish(c store.Change, now time.Time) {
 		}
 	}
 	for _, w := range woken {
-		select {
-		case <-w.ch:
-		default:
-			w.at = now
-			close(w.ch)
-		}
-		h.drop(w)
+		h.wake(w, now)
 	}
+}
+
+// wakeAll wakes every parked poll, as after a gap in the change feed.
+func (h *hub) wakeAll(now time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var woken []*waiter
+	for _, ws := range h.hosts {
+		for w := range ws {
+			woken = append(woken, w)
+		}
+	}
+	for _, ws := range h.relays {
+		for w := range ws {
+			woken = append(woken, w)
+		}
+	}
+	for _, w := range woken {
+		h.wake(w, now)
+	}
+}
+
+func (h *hub) wake(w *waiter, now time.Time) {
+	select {
+	case <-w.ch:
+	default:
+		w.at = now
+		close(w.ch)
+	}
+	h.drop(w)
 }
 
 // open counts parked polls, for metrics.

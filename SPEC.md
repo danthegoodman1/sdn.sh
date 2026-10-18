@@ -590,23 +590,23 @@ Separate namespaces, separate relay ports, no translation and no tenant tag. Han
 
 ### The whole system on one machine
 
-`sdn-lab --env local` and the end-to-end suite run the real daemons — control plane, relays and agents — with a network namespace standing in for each host and a veth bridge for the underlay, on the bare-metal Core Ultra 9 above. Every host shares one kernel, and so one RTNL lock, and the underlay carries 200–226 Gbit/s of plain TCP, so these figures show what the software adds and how each mechanism behaves rather than what a fleet does. The control plane used the memory store; Postgres 18 on the same machine put attach p50 at 21ms against 6ms.
+`sdn-lab --env local` and the end-to-end suite run the real daemons — control plane, relays and agents — with a network namespace standing in for each host and a veth bridge for the underlay, on the bare-metal Core Ultra 9 above. Every host shares one kernel, and so one RTNL lock, and the underlay carries 200–226 Gbit/s of plain TCP, so these figures show what the software adds and how each mechanism behaves rather than what a fleet does. The control plane used the memory store; Postgres 18 on the same machine put the attach call's p50 at 39.1ms and the first connection's at 39.8ms, both with a maximum under 56ms, against 18.6ms and 21.4ms.
 
 | Quantity | Result |
 |---|--:|
-| Attach, the local API call returning, degree 20 | p50 7.6ms, p90 9.3ms, max 11.7ms |
-| Attach to first connection to a remote peer, degree 20 | p50 12.2ms, p90 46ms, max 61ms |
-| Service change to settled, 30 clients on 3 hosts, under churn: cold replacement | p50 194–255ms, max 205–265ms |
-| The same, warm removal, half the slots rewritten in every client | p50 161–200ms, max 191–221ms |
-| Active relay killed: a new connection through the standby | 0.42–0.70s |
-| Active relay killed: an established flow's stall | 0.82s |
+| Attach, the local API call returning, degree 20 | p50 18.6ms, p90 21.3ms, max 51.1ms |
+| Attach to first connection to a remote peer, degree 20 | p50 21.4ms, p90 24.2ms, max 54ms |
+| Service change to settled, 30 clients on 3 hosts, under churn: cold replacement | p50 145–158ms, max 164–178ms |
+| The same, warm removal, half the slots rewritten in every client | p50 160–189ms, max 171–210ms |
+| Active relay killed: a new connection through the standby | 0.46–0.54s |
+| Active relay killed: an established flow's stall | 0.82–0.83s |
 | Relay restart to forwarding again, no registration sent | 2–4ms |
-| NAT rebinding to traffic resumed, 1-second registration period | 0.35–0.70s |
+| NAT rebinding to traffic resumed, 1-second registration period | within one period: 0.35–1.06s on the test's 350ms dial grid |
 | A query sent as the agent dies, answered | 379–584ms |
 | Interfaces on one host, degree 1, until attach p50 rose tenfold | 920, rising linearly from 4.2ms to 33.9ms |
-| Attach-and-detach pairs, 32 loops on each of 3 hosts, degree 20 | 42 a second on the memory store, attach p50 1.5–1.7s; 36 on Postgres |
+| Attach-and-detach pairs, 32 loops on each of 3 hosts, degree 20 | 38 a second on the memory store, attach p50 1.2–1.5s; 24 on Postgres |
 
-Attach figures come from 30 rounds, the service changes from two runs, failover from three rounds and the end-to-end suite. Two of these changed the design. Before registrations were resent, one attach in five at degree 20 waited 5–25 seconds for its first connection, because its first registration reached the relay before the relay bound the port. And before a co-located client's slots waited for the backend's device, a cold replacement settled at a p99 of 4.3 seconds.
+Attach figures come from 30 rounds, the service changes from two runs, failover from three rounds and the end-to-end suite. Three of these changed the design. Before registrations were resent, one attach in five at degree 20 waited 5–25 seconds for its first connection, because its first registration reached the relay before the relay bound the port. Before a co-located client's slots waited for the backend's device, a cold replacement settled at a p99 of 4.3 seconds. And before an attach waited for the relay's acknowledgment, the attach call returned at a p50 of 7.6ms but a workload that dialed at once could still lose its first initiation to an unbound port: the first connection's p90 was 46ms, and one end-to-end run in three waited 5.27 seconds. Waiting raised the call to 18.6ms and brought the first connection's p90 to 24ms.
 
 On this substrate the relay path carried 3.65 Gbit/s on one stream and 3.77 Gbit/s on eight, against 6.1 and 6.15 Gbit/s through a WireGuard gateway on the same middle box. One directed port is one socket read by one goroutine, so a single edge gets one core's worth of relay. Idle round trips through the relay were 0.25ms against 0.007ms for plain TCP; loaded, 7.5ms against 1.8ms through the gateway. Every host shares the machine's CPUs here, so the CPU-per-byte comparison that decides the thesis needs separate machines.
 
@@ -619,12 +619,12 @@ Each target still needs its fleet figure from EC2. The lab column is the whole s
 | Quantity | Target | Lab | Why |
 |---|--:|--:|---|
 | Relay forwarding, XDP or TC | 1M+ pps per core, 100k+ edges | — | Required for the stated edge capacity, not merely faster. Batched userspace Go carried ~118k pps on a hot edge; `sk_lookup` alone fixes only the receive side. |
-| Service change to converged, p99 in one region | < 250 ms | 205–265ms | The cost of a change, and the number the product is judged on. |
-| Attach to first packet, peer already converged, degree ≤ 20 | < 100 ms | max 61ms | Device work is ~5ms and the interface's own peer table is ~3ms at degree 20. The figure is a latency, which the 64-way throughput numbers do not measure. |
-| Relay failover | < 1 s | 0.42–0.82s | A 200 ms probe interval plus an endpoint rewrite on both sides. |
+| Service change to converged, p99 in one region | < 250 ms | 164–210ms | The cost of a change, and the number the product is judged on. |
+| Attach to first packet, peer already converged, degree ≤ 20 | < 100 ms | max 54ms | Device work is ~5ms and the interface's own peer table is ~3ms at degree 20. The figure is a latency, which the 64-way throughput numbers do not measure. |
+| Relay failover | < 1 s | 0.46–0.83s | A 200 ms probe interval plus an endpoint rewrite on both sides. |
 | Round-trip time added by a relay, p50 and p99, idle and under load | — | p50 0.25ms idle, 7.5ms loaded | Idle, the detour through the relay sets it. Under load, a relay that falls behind queues in its socket buffers before it drops. |
 | Interfaces per host | 1000+ | 920 before attach p50 rose tenfold | A netdev and a peer table each. |
-| Attaches per second, one network, degree ≤ 20 | 100+ | 36–42 pairs a second across 3 hosts | Device work allows 621/s. Every control-plane write takes the next revision from one row, which bounds the whole control plane; see [Open questions](#open-questions). Peer work shares one RTNL lane of ~10,000–19,000 operations a second per host, so the target depends on degree and on how many hosts the network spreads across. |
+| Attaches per second, one network, degree ≤ 20 | 100+ | 24–38 pairs a second across 3 hosts | Device work allows 621/s. Every control-plane write takes the next revision from one row, which bounds the whole control plane; see [Open questions](#open-questions). Peer work shares one RTNL lane of ~10,000–19,000 operations a second per host, so the target depends on degree and on how many hosts the network spreads across. |
 | Slot-map rewrite across many namespaces | — | 30 namespaces within the change figures | A 1024-entry map in each of 400 namespaces could take most of the convergence budget. |
 | Softirq CPU attribution | — | — | Unmeasured, and the standing risk to the density thesis. |
 
@@ -648,7 +648,7 @@ Out of scope for now:
 - **The relay's socket model.** One socket per directed port caps a userspace process far below the port space, and one goroutine per socket gives a single edge one core: 3.7 Gbit/s in the lab at one stream or eight. `sk_lookup` fixes only receiving — sending from the peer direction's port needs a bound socket or a raw socket. XDP or TC handles both in one place, which is likely the answer.
 - **Relay port pressure under churn.** Ports must outlast stale senders, which at 100 attaches a second and degree 10 means hundreds of thousands live at once; the lab's churn plan used 19,040 ports in 11 seconds. Either the relay address space is IPv6, or the quarantine shrinks: a stale sender's registrations already fail their MAC on a reallocated port, and its data packets, from an endpoint nobody registered, wait and drop.
 - **Whether the peer ceiling can be raised at all.** What contends is RTNL, so raising it needs a kernel change. From userspace the lever is grouping every pending change for a device into one call, which reaches the ceiling with fewer writers rather than moving it.
-- **What bounds attach throughput.** Every write transaction takes the next revision from one row (`Bump` in `pgstore/tx.go`), which orders every attach, release and policy change in the control plane, across networks: under `SERIALIZABLE`, two writers whose transactions overlap conflict and one runs again. In the lab, 32 attach-and-detach loops on each of three hosts sustained 36 pairs a second on Postgres, where 8 of 367 attaches outlasted the agent's 10-second wait, and 42 on the memory store, which runs every transaction, reads included, under one mutex. The agents, sharing one kernel, saw kernel operations average 200–535ms under that load. Shorter write transactions raise the ceiling in proportion; removing it needs revisions that no longer share one row, without letting a poll skip a change that commits late.
+- **What bounds attach throughput.** Every write transaction takes the next revision from one row (`Bump` in `pgstore/tx.go`), which orders every attach, release and policy change in the control plane, across networks: under `SERIALIZABLE`, two writers whose transactions overlap conflict and one runs again. In the lab, 32 attach-and-detach loops on each of three hosts sustained 24 pairs a second on Postgres, where 11 of 370 attaches outlasted the agent's 10-second wait after 20 serialization failures, and 38 on the memory store, which runs every transaction, reads included, under one mutex. The agents, sharing one kernel, saw kernel operations average 200–535ms under that load. Shorter write transactions raise the ceiling in proportion; removing it needs revisions that no longer share one row, without letting a poll skip a change that commits late.
 - **Slot-map rewrite cost under churn.** Rewriting a 1024-entry map in each of hundreds of namespaces is unmeasured and may dominate the convergence window.
 - **Softirq CPU attribution on a loaded multi-tenant host.** WireGuard crypto for a container runs in softirq context, which cgroups account for poorly, so a chatty tenant can burn host CPU that is hard to bill. This is the standing risk to the density thesis.
 - **Which networks a host may join.** A host token authorizes attaches into every network today. Scoping it, by network, by service, or by an attestation of what the host runs, is a product decision as much as a mechanism, and until it lands a compromised host reaches whatever policy grants any service it chooses to join.

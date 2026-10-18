@@ -515,29 +515,42 @@ func TestABatchReplansOnlyTheNamespacesItCanRelease(t *testing.T) {
 	}
 }
 
-func TestABackendHandsOverWithoutWaitingOnItsClientsRelay(t *testing.T) {
+// TestABackendHandsOverOnceItsRelayHoldsItsEdges attaches a backend whose
+// one peer is a client no slot of its own names. Its answer waits for the
+// relay's acknowledgment all the same: an orchestrator that removes the
+// old backend once the new one answers must find every client able to
+// reach it.
+func TestABackendHandsOverOnceItsRelayHoldsItsEdges(t *testing.T) {
 	c, now := New(DefaultConfig("h1"), prng.New(1)), time.Unix(1000, 0)
 	c.Start(now, nil, kernel.Snapshot{})
 	c.Attach(now, 1, api.LocalAttach{Name: "db", Network: "n", Service: "db"})
-	var replies []Reply
-	for range 8 {
-		for _, a := range c.Actions(now) {
-			switch a := a.(type) {
-			case RunBatch:
-				c.BatchDone(now, a.Namespace, a.ID, len(a.Ops), nil)
-			case CallAttach:
-				// The new interface backs db, and its one peer is a client
-				// no slot of its own names.
-				n := client(3, a.Request.Interface, a.Request.PublicKey, backend("if-web", peer, "fd00::6"))
-				n.Interfaces[0].Reach = nil
-				c.AttachDone(now, a.Request.Interface, &api.AttachResponse{Interface: a.Request.Interface, State: n}, nil)
-			case Reply:
-				replies = append(replies, a)
+	var port uint16
+	run := func(now time.Time) []Reply {
+		var replies []Reply
+		for range 8 {
+			for _, a := range c.Actions(now) {
+				switch a := a.(type) {
+				case RunBatch:
+					c.BatchDone(now, a.Namespace, a.ID, len(a.Ops), nil)
+				case CallAttach:
+					port = a.Request.ListenPort
+					n := client(3, a.Request.Interface, a.Request.PublicKey, backend("if-web", peer, "fd00::6"))
+					n.Interfaces[0].Reach = nil
+					c.AttachDone(now, a.Request.Interface, &api.AttachResponse{Interface: a.Request.Interface, State: n}, nil)
+				case Reply:
+					replies = append(replies, a)
+				}
 			}
 		}
+		return replies
 	}
-	if len(replies) != 1 || replies[0].Err != nil {
-		t.Fatalf("replies %+v before any ack; want the attach answered at once", replies)
+	if replies := run(now); len(replies) > 0 {
+		t.Fatalf("answered %+v before the relay acknowledged", replies)
+	}
+	now = now.Add(10 * time.Millisecond)
+	c.RegistrationAcked(now, port, relayAt)
+	if replies := run(now); len(replies) != 1 || replies[0].Err != nil {
+		t.Fatalf("after the ack: replies %+v, want one answer", replies)
 	}
 }
 

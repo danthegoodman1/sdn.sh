@@ -38,17 +38,19 @@ func TestAFailedReleaseIsRetried(t *testing.T) { runSeed(t, 2) }
 // IPv6 first, so every resync rewrote every peer.
 func TestAResyncFindsNoDriftInPrefixOrder(t *testing.T) { runSeed(t, 8) }
 
-// Seeds 8, 43 and 67 on a /28 whose IPv4 addresses leave quarantine just after
-// the drain grace: an agent learned of an address's new owner while it
-// still held the previous one as a peer, and waited for the holder to go
-// before installing the new owner. The runs count the waits, so seeds that
-// stop reaching the path fail here rather than pass without testing it.
+// Seeds 45, 67 and 115 on a /28 whose IPv4 addresses leave quarantine
+// 500ms after their holders drain: an agent learned of an address's new
+// owner while it still held the previous one as a peer, and waited for the
+// holder to go before installing the new owner. The runs count the waits,
+// so seeds that stop reaching the path fail here rather than pass without
+// testing it. On these options seed 234 once found an address held by two
+// connected interfaces, when its quarantine ran from the release.
 func TestAPeerWaitsForTheHolderOfItsAddress(t *testing.T) {
 	var conflicts uint64
-	for _, seed := range []uint64{8, 43, 67} {
+	for _, seed := range []uint64{45, 67, 115, 234} {
 		o := Swarm(seed)
 		o.Prefix4 = netip.MustParsePrefix("10.42.0.0/28")
-		o.Quarantine4 = 2500 * time.Millisecond
+		o.Quarantine4 = 500 * time.Millisecond
 		s, err := NewWith(seed, o).Run()
 		if err != nil {
 			t.Fatal(err)

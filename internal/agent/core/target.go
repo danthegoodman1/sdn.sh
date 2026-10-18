@@ -78,16 +78,6 @@ func (c *Core) target(now time.Time, st *nsState, n *api.NetworkState, x *api.In
 	if i, ok := c.ifaces[st.iface]; ok {
 		port = i.port
 	}
-	// A relay peer no slot names carries nothing until its peer sends,
-	// which the relay can forward only once it holds the port.
-	slotted := map[model.InterfaceID]bool{}
-	for _, r := range x.Reach {
-		if svc, ok := n.Service(r.Service); ok {
-			for _, b := range svc.Backends {
-				slotted[b.Interface] = true
-			}
-		}
-	}
 	st.awaiting = nil
 	var reverse []model.InterfaceID
 	if x.State == api.Live {
@@ -123,7 +113,12 @@ func (c *Core) target(now time.Time, st *nsState, n *api.NetworkState, x *api.In
 				if tp.awaiting {
 					reverse = append(reverse, p.Interface)
 				}
-			case slotted[p.Interface]:
+			default:
+				// A peer no slot names holds nothing back, but its wait
+				// still delays the handover: a backend's attach answers
+				// once the relay holds its edges' ports, so an
+				// orchestrator that removes the old backend then strands
+				// no client.
 				tp.awaiting = c.awaitsAck(now, st, port, p, tp)
 				acking[p.PublicKey] = tp.awaiting
 			}

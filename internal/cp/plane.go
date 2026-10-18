@@ -29,8 +29,10 @@ type Config struct {
 	// DrainGrace is how long peers keep a released interface installed, so
 	// its established connections finish.
 	DrainGrace time.Duration
-	// Quarantine4 is how long a released IPv4 address waits before reuse.
-	// It covers the grace period plus convergence.
+	// Quarantine4 is how long an IPv4 address waits for reuse once its
+	// interface drains, so agents converge on its departure first. It runs
+	// from the drain rather than the release: a control plane that was
+	// down drains late, and peers route the address until it does.
 	Quarantine4 time.Duration
 	// PortQuarantine is how long a released relay port waits before reuse,
 	// so a stale sender's packets stop arriving first.
@@ -61,8 +63,8 @@ func (c Config) Validate() error {
 		return errors.New("lease TTL and drain grace must be positive")
 	case c.PortQuarantine <= 0:
 		return errors.New("port quarantine must be positive, or a stale sender reaches the next edge on its port")
-	case c.Quarantine4 <= c.DrainGrace:
-		return errors.New("IPv4 quarantine must outlast the drain grace period")
+	case c.Quarantine4 <= 0:
+		return errors.New("IPv4 quarantine must be positive, or an address reaches a new owner before agents drop the old")
 	case c.Retention < c.DrainGrace:
 		return errors.New("retention must cover the drain grace period")
 	case c.MTU < 1280:
@@ -788,7 +790,7 @@ func (p *Plane) Release(tx store.Tx, now time.Time, host model.HostID, ids []mod
 			continue
 		}
 		i.State, i.Ended = api.Released, now
-		if err := p.end(tx, now, i, true); err != nil {
+		if err := p.end(tx, now, i, false); err != nil {
 			return err
 		}
 	}
@@ -804,14 +806,14 @@ func (p *Plane) Revoke(tx store.Tx, now time.Time, id model.InterfaceID) error {
 	if i.State == api.Revoked {
 		return nil
 	}
-	wasLive := i.State == api.Live
-	if wasLive {
+	if i.State == api.Live {
 		i.Ended = now
 	}
+	// An address enters quarantine as its interface drains, which a
+	// revocation does at once.
+	quarantine := !i.Drained
 	i.State, i.Drained = api.Revoked, true
-	// A released interface's IPv4 address went into quarantine when it was
-	// released.
-	return p.end(tx, now, i, wasLive)
+	return p.end(tx, now, i, quarantine)
 }
 
 // end writes an interface that just left the live state, quarantines its
@@ -921,6 +923,11 @@ func (p *Plane) Sweep(tx store.Tx, now time.Time) (int, error) {
 		i.Drained = true
 		if err := tx.PutInterface(i); err != nil {
 			return 0, err
+		}
+		if i.Addr4.IsValid() {
+			if err := tx.PutReleased4(store.Released4{Network: i.Network, Addr: i.Addr4, At: now}); err != nil {
+				return 0, err
+			}
 		}
 		n, err := tx.Network(i.Network)
 		if err != nil {

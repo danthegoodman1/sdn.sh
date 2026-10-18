@@ -53,9 +53,9 @@ type Options struct {
 	// Prefix4 is every network's IPv4 prefix. One small enough to run out
 	// makes the control plane reuse addresses once their quarantine ends.
 	Prefix4 netip.Prefix
-	// Quarantine4, when set, replaces the IPv4 quarantine. One barely past
-	// the drain grace hands an address to a new interface while an agent
-	// that lags still holds its previous owner.
+	// Quarantine4, when set, replaces the IPv4 quarantine. A short one
+	// hands an address to a new interface while an agent that lags still
+	// holds its previous owner.
 	Quarantine4 time.Duration
 }
 

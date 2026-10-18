@@ -271,12 +271,12 @@ type nsState struct {
 	// accounts for, after a restart lost track.
 	unflushed []netip.Addr
 	sweep     bool
-	// awaiting names the interfaces slots wait for: co-located ones whose
-	// devices have yet to hold this namespace's interface as a peer, and
-	// relay peers a slot names, new to the namespace, whose active relay
-	// has yet to acknowledge its registration. Keepalive toward a
-	// co-located one waits too. reverse holds the co-located ones, which
-	// only their own namespaces' batches release.
+	// awaiting names the interfaces the namespace waits on: co-located
+	// ones whose devices have yet to hold this namespace's interface as a
+	// peer, and relay peers new to the namespace whose active relay has yet
+	// to acknowledge its registration. Slots and keepalive toward them
+	// wait, and so does the handover. reverse holds the co-located ones,
+	// which only their own namespaces' batches release.
 	awaiting []model.InterfaceID
 	reverse  []model.InterfaceID
 	// acks holds each relay peer new to the namespace until the active

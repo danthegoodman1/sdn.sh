@@ -208,6 +208,15 @@ var Mutants = []Mutant{
 		Catch:  []string{"agent-core", "sim"},
 	},
 	{
+		ID:     "ipv4-quarantine-from-release",
+		Breaks: "an IPv4 address waits out its quarantine from its holder's drain, so a late drain never frees an address peers still route",
+		Edits: []Edit{
+			{cpPlane, "\t\ti.State, i.Ended = api.Released, now\n\t\tif err := p.end(tx, now, i, false); err != nil {", "\t\ti.State, i.Ended = api.Released, now\n\t\tif err := p.end(tx, now, i, true); err != nil {"},
+			{cpPlane, "\t\tif i.Addr4.IsValid() {\n\t\t\tif err := tx.PutReleased4(store.Released4{Network: i.Network, Addr: i.Addr4, At: now}); err != nil {\n\t\t\t\treturn 0, err\n\t\t\t}\n\t\t}\n", ""},
+		},
+		Catch: []string{"cp"},
+	},
+	{
 		ID:     "ipv4-quarantine-zero",
 		Breaks: "a released IPv4 address waits out its quarantine before reuse",
 		Edits:  []Edit{{cpAlloc, "free, err := tx.Released4(n.ID, now.Add(-p.Config.Quarantine4), 1)", "free, err := tx.Released4(n.ID, now, 1)"}},
@@ -583,9 +592,9 @@ var Mutants = []Mutant{
 		Catch: []string{"agent-core"},
 	},
 	{
-		ID:     "client-ack-holds-handover",
-		Breaks: "only a relay peer a slot names waits for its acknowledgment, so a backend hands over without waiting on its clients",
-		Edits:  []Edit{{agentTarget, "\t\t\tcase slotted[p.Interface]:\n", "\t\t\tdefault:\n"}},
+		ID:     "backend-hands-over-before-relay",
+		Breaks: "a backend's attach answers once the relay holds its edges' ports, though no slot of its own names its clients",
+		Edits:  []Edit{{agentTarget, "\t\t\tdefault:\n\t\t\t\t// A peer no slot names holds nothing back", "\t\t\tcase len(x.Reach) > 0:\n\t\t\t\t// A peer no slot names holds nothing back"}},
 		Catch:  []string{"agent-core"},
 	},
 	{

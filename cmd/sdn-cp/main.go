@@ -42,7 +42,7 @@ func run() error {
 	logFormat := flag.String("log-format", "", "json or console (default: console on a terminal)")
 	flag.DurationVar(&cfg.Plane.LeaseTTL, "lease-ttl", cfg.Plane.LeaseTTL, "lease term")
 	flag.DurationVar(&cfg.Plane.DrainGrace, "drain-grace", cfg.Plane.DrainGrace, "how long peers keep a released interface")
-	flag.DurationVar(&cfg.Plane.Quarantine4, "quarantine4", cfg.Plane.Quarantine4, "how long a released IPv4 address waits")
+	flag.DurationVar(&cfg.Plane.Quarantine4, "quarantine4", cfg.Plane.Quarantine4, "how long an IPv4 address waits for reuse once its interface drains")
 	flag.DurationVar(&cfg.Plane.PortQuarantine, "port-quarantine", cfg.Plane.PortQuarantine, "how long a released relay port waits")
 	flag.DurationVar(&cfg.Plane.Retention, "retention", cfg.Plane.Retention, "how long an ended interface stays visible to its host")
 	flag.IntVar(&cfg.Plane.MTU, "mtu", cfg.Plane.MTU, "overlay MTU for networks that name none")

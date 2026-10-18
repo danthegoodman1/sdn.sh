@@ -358,10 +358,14 @@ func TestIPv6AddressesAreNeverReused(t *testing.T) {
 	})
 }
 
-// TestAReleasedIPv4AddressWaitsOutItsQuarantine is Phase 2's quarantine
-// gate.
-func TestAReleasedIPv4AddressWaitsOutItsQuarantine(t *testing.T) {
+// TestAnIPv4AddressWaitsOutItsQuarantineFromItsHoldersDrain, Phase 2's
+// quarantine gate, releases an
+// interface on a full prefix and drains it late, as a control plane that
+// was down does, and checks its address stays with it until the drain and
+// then waits out the quarantine.
+func TestAnIPv4AddressWaitsOutItsQuarantineFromItsHoldersDrain(t *testing.T) {
 	eachStore(t, func(t *testing.T, f *fixture) {
+		f.p.Config.LeaseTTL = time.Hour
 		f.network(api.CreateNetwork{Name: "n", Prefix4: netip.MustParsePrefix("10.9.0.0/29")})
 		f.service("n", "a", true)
 		// A /29 holds six usable addresses: one for the service, five for
@@ -385,10 +389,20 @@ func TestAReleasedIPv4AddressWaitsOutItsQuarantine(t *testing.T) {
 			})
 			return i, err
 		}
-		if _, err := attachAt(f.now.Add(f.p.Config.Quarantine4 - time.Second)); err == nil {
+		// Peers route a released address until its interface drains, however
+		// long past the grace period that takes.
+		late := f.now.Add(f.p.Config.DrainGrace + 2*f.p.Config.Quarantine4)
+		if _, err := attachAt(late); err == nil {
+			t.Fatal("reallocated the address of an interface that has yet to drain")
+		}
+		f.update(func(tx store.Tx) error {
+			_, err := f.p.Sweep(tx, late)
+			return err
+		})
+		if _, err := attachAt(late.Add(f.p.Config.Quarantine4 - time.Second)); err == nil {
 			t.Fatal("reallocated an address inside its quarantine")
 		}
-		i, err := attachAt(f.now.Add(f.p.Config.Quarantine4 + time.Second))
+		i, err := attachAt(late.Add(f.p.Config.Quarantine4 + time.Second))
 		if err != nil {
 			t.Fatal(err)
 		}

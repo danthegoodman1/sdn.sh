@@ -555,7 +555,7 @@
     {
       "type": "timeseries",
       "title": "IPv4 addresses in quarantine",
-      "description": "Released IPv4 addresses waiting out their quarantine, across every network, at the last census.",
+      "description": "IPv4 addresses of drained interfaces waiting out their quarantine, across every network, at the last census.",
       "id": 41,
       "datasource": {
         "type": "prometheus",

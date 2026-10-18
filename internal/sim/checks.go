@@ -716,7 +716,6 @@ func (w *World) heldByAnother(net model.NetworkID, rev uint64, id model.Interfac
 	return false
 }
 
-
 // compiledPeers describes what the agent's desired state lists for an
 // interface, for a failure report.
 func (w *World) compiledPeers(h *hostNode, net model.NetworkID, id model.InterfaceID) string {

@@ -236,6 +236,7 @@ func dial(args []string) error {
 	target := fs.String("target", "", "server address:port")
 	nss := fs.String("netns", "", "comma-separated namespaces to dial from, one loop each")
 	want := fs.String("want", "", "the server name that counts as reached; any answer counts when empty")
+	refused := fs.Bool("refused", false, "count a connection that fails as reached, and any answer as another server's")
 	streak := fs.Int("streak", 1, "consecutive wanted answers that end a loop")
 	until := fs.Duration("until", 10*time.Second, "how long a loop tries")
 	interval := fs.Duration("interval", 20*time.Millisecond, "pause between attempts")
@@ -251,7 +252,7 @@ func dial(args []string) error {
 	var wg sync.WaitGroup
 	for i, ns := range names {
 		wg.Go(func() {
-			out.Results[i] = dialLoop(ns, *target, *want, *streak, *until, *interval, *timeout)
+			out.Results[i] = dialLoop(ns, *target, *want, *refused, *streak, *until, *interval, *timeout)
 		})
 	}
 	wg.Wait()
@@ -263,8 +264,8 @@ func dial(args []string) error {
 // all got the wanted answer and every attempt before them has finished;
 // or until passes. Attempts overlap, so one that times out delays no
 // other, and the loop places a switch of servers within one interval.
-func dialLoop(ns, target, want string, streak int, until, interval, timeout time.Duration) bench.Dial {
-	d := bench.Dial{Namespace: ns, Target: target, Want: want, Answers: map[string]int{}}
+func dialLoop(ns, target, want string, refused bool, streak int, until, interval, timeout time.Duration) bench.Dial {
+	d := bench.Dial{Namespace: ns, Target: target, Want: want, Refused: refused, Answers: map[string]int{}}
 	var mu sync.Mutex
 	var attempts []*dialAttempt // by launch order; nil until finished
 	finished := make(chan struct{}, 1)
@@ -285,7 +286,7 @@ func dialLoop(ns, target, want string, streak int, until, interval, timeout time
 			}
 		}()
 	}
-	wanted := func(a *dialAttempt) bool { return a.err == nil && (want == "" || a.name == want) }
+	wanted := func(a *dialAttempt) bool { return a.wanted(want, refused) }
 	start := time.Now()
 	d.Start = start.UnixNano()
 	ticker := time.NewTicker(interval)
@@ -330,6 +331,15 @@ type dialAttempt struct {
 	err            error
 }
 
+// wanted reports whether an attempt got the outcome its loop waits for: the
+// wanted server's answer, or with refused a failure.
+func (a *dialAttempt) wanted(want string, refused bool) bool {
+	if refused {
+		return a.err != nil
+	}
+	return a.err == nil && (want == "" || a.name == want)
+}
+
 // tally counts a dial loop's finished attempts into d.
 func tally(d *bench.Dial, attempts []*dialAttempt) {
 	for _, a := range attempts {
@@ -338,20 +348,23 @@ func tally(d *bench.Dial, attempts []*dialAttempt) {
 		}
 		launched, done := a.launched.UnixNano(), a.done.UnixNano()
 		d.Attempts++
-		switch {
-		case a.err != nil:
+		if a.err != nil {
 			d.Failures++
-			d.Error = a.err.Error()
-		case d.Want == "" || a.name == d.Want:
+			if !d.Refused {
+				d.Error = a.err.Error()
+			}
+		} else {
 			d.Answers[a.name]++
+		}
+		switch {
+		case a.wanted(d.Want, d.Refused):
 			if d.First == 0 || launched < d.First {
 				d.First = launched
 			}
 			if d.FirstDone == 0 || done < d.FirstDone {
 				d.FirstDone = done
 			}
-		default:
-			d.Answers[a.name]++
+		case a.err == nil:
 			if !d.Reached || launched < d.Converged {
 				d.Other = max(d.Other, launched)
 			}

@@ -50,6 +50,9 @@ type Network struct {
 	MTU      int             `json:"mtu"`
 	Relays   []model.RelayID `json:"relays,omitempty"`
 	Revision uint64          `json:"revision"`
+	// Changed is when the revision was committed, which agents measure
+	// convergence from.
+	Changed time.Time `json:"changed"`
 }
 
 // CreateService declares a service.

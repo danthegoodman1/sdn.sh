@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -189,6 +190,105 @@ func TestTwoHostsReachEachOtherThroughARelayAndNothingElse(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	mustNotReach(t, webIf.Namespace, netip.AddrPortFrom(db.Addr4, 5432), "a revoked interface, IPv4 service")
+}
+
+// TestAWildcardOpensAServiceAndADenyClosesItAgain opens db to every other
+// service, takes the sandboxes back out with a deny, lets the sandboxes reach
+// every other service, and lets web reach the sandboxes on everything but
+// TCP 22. Each claim is asserted in both families, including that two
+// sandboxes cannot reach each other and that ICMP passes where the deny
+// took TCP 22 out of an allow for any protocol; then removing the deny
+// opens db to the sandboxes without a restart.
+func TestAWildcardOpensAServiceAndADenyClosesItAgain(t *testing.T) {
+	l := newLab(t, "e2eo", fastClocks...)
+	ctx := context.Background()
+	relay := must(l.AddRelay(ctx, "r1"))
+	h1 := must(l.AddHost(ctx, "h1"))
+	h2 := must(l.AddHost(ctx, "h2"))
+	h3 := must(l.AddHost(ctx, "h3"))
+	must(l.Admin.CreateNetwork(ctx, api.CreateNetwork{Name: "prod", Prefix4: netip.MustParsePrefix("10.101.0.0/16"), Relays: []model.RelayID{relay.ID}}))
+	db := must(l.Admin.CreateService(ctx, "prod", api.CreateService{Name: "db", IPv4: true}))
+	web := must(l.Admin.CreateService(ctx, "prod", api.CreateService{Name: "web", IPv4: true}))
+	box := must(l.Admin.CreateService(ctx, "prod", api.CreateService{Name: "box", IPv4: true}))
+	rule := func(from, to string, proto model.Proto, ports model.PortRange, action api.Action) api.Rule {
+		return must(l.Admin.CreateRule(ctx, "prod", api.CreateRule{From: from, To: to, Proto: proto, Ports: ports, Action: action}))
+	}
+	rule(api.Wildcard, "db", model.TCP, model.PortRange{Lo: 5432, Hi: 5432}, api.Allow)
+	boxOut := rule("box", "db", model.AnyProto, model.PortRange{}, api.Deny)
+	rule("box", api.Wildcard, model.TCP, model.PortRange{Lo: 8080, Hi: 8080}, api.Allow)
+	rule("web", "box", model.AnyProto, model.PortRange{}, api.Allow)
+	rule("web", "box", model.TCP, model.PortRange{Lo: 22, Hi: 22}, api.Deny)
+
+	dbIf := must(h2.Attach(ctx, "db-1", "prod", "db"))
+	webIf := must(h1.Attach(ctx, "web-1", "prod", "web"))
+	box1 := must(h1.Attach(ctx, "box-1", "prod", "box"))
+	box2 := must(h3.Attach(ctx, "box-2", "prod", "box"))
+	for _, a := range []netip.Addr{dbIf.Addr6, dbIf.Addr4} {
+		must(lab.Serve(dbIf.Namespace, netip.AddrPortFrom(a, 5432), "db"))
+	}
+	for _, a := range []netip.Addr{webIf.Addr6, webIf.Addr4} {
+		must(lab.Serve(webIf.Namespace, netip.AddrPortFrom(a, 8080), "web"))
+	}
+	for _, b := range []api.LocalInterface{box1, box2} {
+		for _, a := range []netip.Addr{b.Addr6, b.Addr4} {
+			for _, port := range []uint16{22, 8080, 8081} {
+				must(lab.Serve(b.Namespace, netip.AddrPortFrom(a, port), b.Name))
+			}
+		}
+	}
+	reach := func(ns string, to netip.AddrPort, want string) {
+		t.Helper()
+		if _, got, err := timeToReach(ns, to, 20*time.Second); err != nil || got != want {
+			t.Fatalf("to %v: %q %v, want %q", to, got, err, want)
+		}
+	}
+	for _, a := range []netip.Addr{db.Addr6, db.Addr4} {
+		reach(webIf.Namespace, netip.AddrPortFrom(a, 5432), "db")
+	}
+	for _, a := range []netip.Addr{web.Addr6, web.Addr4} {
+		reach(box1.Namespace, netip.AddrPortFrom(a, 8080), "web")
+		reach(box2.Namespace, netip.AddrPortFrom(a, 8080), "web")
+	}
+	for _, a := range []netip.Addr{box2.Addr6, box2.Addr4} {
+		reach(webIf.Namespace, netip.AddrPortFrom(a, 8081), "box-2")
+		if out, err := exec.Command("ip", "netns", "exec", webIf.Namespace, "ping", "-c", "1", "-W", "5", a.String()).CombinedOutput(); err != nil {
+			t.Fatalf("web pinging box-2 at %v, which the deny on TCP 22 leaves open: %v\n%s", a, err, out)
+		}
+	}
+
+	for _, a := range []netip.Addr{db.Addr6, db.Addr4, dbIf.Addr6, dbIf.Addr4} {
+		mustNotReach(t, box1.Namespace, netip.AddrPortFrom(a, 5432), "a sandbox the deny takes out of db's wildcard")
+	}
+	for _, a := range []netip.Addr{box2.Addr6, box2.Addr4} {
+		mustNotReach(t, box1.Namespace, netip.AddrPortFrom(a, 8080), "a sandbox reaching another through its own wildcard")
+		mustNotReach(t, webIf.Namespace, netip.AddrPortFrom(a, 22), "a port denied out of an allow for any protocol")
+	}
+	for _, a := range []netip.Addr{box.Addr6, box.Addr4} {
+		mustNotReach(t, box1.Namespace, netip.AddrPortFrom(a, 8080), "a sandbox reaching its own service")
+	}
+
+	var grants []string
+	for _, g := range must(l.Admin.Policy(ctx, "prod")) {
+		grants = append(grants, fmt.Sprintf("%s>%s %s/%s", g.FromName, g.ToName, g.Proto, g.Ports))
+	}
+	for _, want := range []string{"web>db tcp/5432", "box>web tcp/8080", "web>box tcp/1-21", "web>box tcp/23-65535", "web>box udp/*", "web>box other/*"} {
+		if !slices.Contains(grants, want) {
+			t.Errorf("policy lacks %s: %v", want, grants)
+		}
+	}
+	for _, g := range grants {
+		if strings.HasPrefix(g, "box>db") || strings.HasPrefix(g, "box>box") {
+			t.Errorf("policy grants %s: %v", g, grants)
+		}
+	}
+
+	if err := l.Admin.DeleteRule(ctx, "prod", boxOut.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []netip.Addr{db.Addr6, db.Addr4} {
+		reach(box1.Namespace, netip.AddrPortFrom(a, 5432), "db")
+		reach(box2.Namespace, netip.AddrPortFrom(a, 5432), "db")
+	}
 }
 
 // metric returns a sample's value from metrics text, summing every series

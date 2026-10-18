@@ -281,14 +281,22 @@ A namespace holding a forwarding workload, such as a microVM behind a TAP, gets 
 Policy is written against services and compiled per interface:
 
 ```text
-allow api -> db     tcp/5432
-allow web -> api    tcp/8080
+allow api -> db       tcp/5432
+allow web -> api      tcp/8080
 allow api -> internet tcp/443
+allow *   -> mirror   tcp/443
+deny  box -> billing  any
 ```
+
+**A rule allows or denies, and either side may be `*`.** `*` stands for every service in the network but the one on the rule's other side, so `allow * -> mirror` opens the mirror to every other service and `allow box -> *` lets the sandboxes reach every other service, and neither lets a service reach its own members. Traffic within a service takes a rule naming it on both sides, `allow box -> box`, because a service connected to itself peers every two of its members, a cost that grows with the square of its size, and opens lateral movement between them. `internet` is a destination only. A wildcard applies to services created after it.
+
+**A deny takes the flows it names out of every allow, whatever the order.** For each directed pair of services, and for each service's egress, the control plane resolves the rules into grants when it compiles a network: what some allow names less what any deny names, exact over TCP ports, UDP ports and every other IP protocol. `allow a -> b any` with `deny a -> b tcp/22` leaves TCP but port 22, all of UDP, and every protocol but TCP and UDP, which nftables matches as `meta l4proto != { tcp, udp }`. Grants are disjoint, and a pair whose flows add up to everything compiles to one grant for any protocol, as before. A pair allowed in one direction keeps its peers, and the denied direction loses only the receiver's accept; a pair with no grant either way loses its peers, and its edge waits out the port quarantine like any disconnected pair's. `GET /v1/networks/{net}/policy` and `wirenetctl policy NET` list the grants.
+
+A wildcard is a fan-in: `allow * -> db` peers every interface of the network with every db backend, so a db backend's peer count, and the relay ports its edges hold, grow with the network.
 
 Compilation produces two things, and default is deny:
 
-- **A peer set.** An interface receives a peer only where policy permits a flow. **The policy graph is the peer graph**, so an interface's peer count is its policy degree rather than the network's size. Peer count costs memory always, and handshakes only where traffic flows. A relay peer carries no keepalive, so an idle one sends nothing and never rekeys; a busy one rekeys about every two minutes, so 2,000 busy peers cost about 17 handshakes a second. Each co-located pair adds one rekey every two minutes from its keepalive side.
+- **A peer set.** An interface receives a peer only where some grant permits a flow in either direction. **The policy graph is the peer graph**, so an interface's peer count is its policy degree rather than the network's size. Peer count costs memory always, and handshakes only where traffic flows. A relay peer carries no keepalive, so an idle one sends nothing and never rekeys; a busy one rekeys about every two minutes, so 2,000 busy peers cost about 17 handshakes a second. Each co-located pair adds one rekey every two minutes from its keepalive side.
 - **nftables sets in the receiving namespace.** Which flows are permitted, by service-grouped address set and port. A set holds one family, so the compiler emits each in every family the two services share, and a rule permits the same flows in both. Installed before handover and unreachable from inside, so the workload cannot remove them.
 
 `AllowedIPs` answers "may this peer speak as this address." nftables answers "may this flow happen." Both run in the kernel at the receiver, so removing the relay from the trust path costs no enforcement.
@@ -426,7 +434,7 @@ Every namespace clamps TCP MSS, and ICMP and ICMPv6 `Packet Too Big` are permitt
 - **Workloads do not trust the control plane with data.** It distributes public keys, addresses, and policy, and carries no packet and no private key.
 - **Hosts do not vouch for each other.** Authorization to speak is per interface and per lease, so a compromised host speaks as the interfaces it holds and as no other host's.
 - **A host's token admits it to every network.** Any registered host may attach an interface to any service of any network, so a compromised host can mint interfaces, and reach whatever policy grants those services, anywhere. Scoping hosts to networks is an open question.
-- **Every decision is enforced at the receiver.** `AllowedIPs` and nftables both run in the destination's kernel, so a sender cannot widen what it may do by changing its own configuration.
+- **Every decision is enforced at the receiver.** `AllowedIPs` and nftables both run in the destination's kernel, so a sender cannot widen what it may do by changing its own configuration. A deny is enforced the same way: it removes the receiver's accept, and the pair's peers when no grant is left in either direction.
 - **Withholding `CAP_NET_ADMIN` is defense in depth.** A workload that had it could delete its own device, drop its own egress rules, or widen its own `AllowedIPs`. It holds no other interface's private key, so it still cannot forge an identity and every flow it attempts still dies at the receiver. Egress stays gated because the grant is a veth that does not exist without it.
 
 ## Failure

@@ -85,6 +85,8 @@ var plans = []plan{
 		true, []string{"max-interfaces"}, planDensity},
 	{"spread", "many edges streaming at once through one relay, then two, then three: aggregate throughput and relay CPU by relay count",
 		true, []string{"duration", "edges"}, planSpread},
+	{"policy", "open a service to every other with a wildcard, then time a deny closing it to one service's clients, and the deny's removal",
+		true, []string{"clients"}, planPolicy},
 }
 
 func findPlans(spec string) ([]plan, error) {

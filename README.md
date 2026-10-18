@@ -216,7 +216,18 @@ The slot count stays fixed, so a backend change rewrites only the slots whose ba
 
 ### Policy
 
-Policy names services, and denies every flow it does not name: `wirenetctl rule create shop web db --proto tcp --ports 5432` lets `web` reach `db` on one port. An interface gets a peer only where policy permits a flow, so its peer count is its policy degree, whatever the network's size. `AllowedIPs` decides whether a peer may speak as an address, and nftables decides whether a flow may happen. Both run in the receiver's kernel.
+Policy names services, and denies every flow it does not name. A rule allows or denies, and either side may be `*`, every service but the one on the rule's other side:
+
+```console
+wirenetctl rule create shop web db --proto tcp --ports 5432        # web reaches db on one port
+wirenetctl rule create shop '*' mirror --proto tcp --ports 443     # every other service reaches the mirror
+wirenetctl rule create shop box mirror --deny --proto tcp --ports 443   # except the sandboxes
+wirenetctl policy shop                                             # the flows the rules leave open
+```
+
+A deny takes its flows out of every allow, whatever the order, exactly down to the port. `*` never matches a service's own members: sandboxes in one service reach each other only through a rule naming the service on both sides, since a service connected to itself peers every two of its members.
+
+An interface gets a peer only where policy permits a flow, so its peer count is its policy degree, whatever the network's size; `allow * -> mirror` makes the mirror's degree the network's. `AllowedIPs` decides whether a peer may speak as an address, and nftables decides whether a flow may happen. Both run in the receiver's kernel.
 
 ### Leases and keys
 
@@ -312,6 +323,7 @@ Relaying ciphertext is common: Tailscale's DERP, Nebula's relays and NetBird all
 ## Known limits
 
 - **Not a lock.** A service that needs a single writer fences in its storage layer.
+- **Rules name one service or every service.** Selecting services by label is planned, and would follow the same rule for a service's own members.
 - **Relays are trusted for availability.** A relay can drop or misdeliver packets, though it can never read or forge them.
 - **A host's token admits it to every network.** A compromised host speaks only as the interfaces it holds, but can attach new ones to any service.
 - **One control plane orders every change.** Every write takes the next revision from one row, so attaches, releases and policy changes serialize across networks.

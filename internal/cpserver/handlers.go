@@ -512,7 +512,7 @@ func ids(in []model.InterfaceID) []string {
 }
 
 func networkInfo(n store.Network) api.Network {
-	return api.Network{ID: n.ID, Name: n.Name, Prefix6: n.Prefix6, Prefix4: n.Prefix4, MTU: n.MTU, Relays: n.Relays, Revision: n.Revision}
+	return api.Network{ID: n.ID, Name: n.Name, Prefix6: n.Prefix6, Prefix4: n.Prefix4, MTU: n.MTU, Relays: n.Relays, Revision: n.Revision, Changed: n.Changed}
 }
 
 func serviceInfo(s store.Service) api.ServiceInfo {

@@ -46,16 +46,18 @@ type change struct {
 	relay    [2]map[string]float64
 }
 
-// dialAll runs a dial loop in every client, one wirenet-bench per host.
-func (r *run) dialAll(s convergeSetup, want string, streak int, interval time.Duration, out []bench.Dials) []func() error {
+// dialAll runs a dial loop in every client, one wirenet-bench per host, with
+// extra passed to each.
+func (r *run) dialAll(s convergeSetup, want string, streak int, interval time.Duration, out []bench.Dials, extra ...string) []func() error {
 	var fns []func() error
 	for i, h := range s.hosts {
 		if len(s.byHost[i]) == 0 {
 			continue
 		}
 		fns = append(fns, func() error {
-			return r.bench(h, &out[i], "dial", "--target", s.to, "--netns", strings.Join(s.byHost[i], ","), "--want", want,
-				"--streak", itoa(streak), "--interval", interval.String(), "--timeout", "300ms", "--until", "60s")
+			args := append([]string{"dial", "--target", s.to, "--netns", strings.Join(s.byHost[i], ","), "--want", want,
+				"--streak", itoa(streak), "--interval", interval.String(), "--timeout", "300ms", "--until", "60s"}, extra...)
+			return r.bench(h, &out[i], args...)
 		})
 	}
 	return fns

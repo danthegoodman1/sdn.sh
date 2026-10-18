@@ -33,6 +33,8 @@ const (
 	simCP        = "internal/sim/cpnode.go"
 	kmodelGo     = "internal/kernel/kmodel/kmodel.go"
 	modelWeight  = "internal/model/relayweight.go"
+	modelGo      = "internal/model/model.go"
+	policyGo     = "internal/compile/policy.go"
 	agentFDStore = "internal/agent/resolver/fdstore.go"
 )
 
@@ -696,5 +698,83 @@ var Mutants = []Mutant{
 		Edits: []Edit{{agentFDStore, "\tif err := rc.Control(func(fd uintptr) {\n\t\tserr = unix.Sendmsg(s.fd, []byte(msg), unix.UnixRights(int(fd)), s.addr, 0)\n\t}); err != nil {\n\t\treturn err\n\t}\n",
 			"\tif f, ok := c.(interface{ File() (*os.File, error) }); ok {\n\t\tif file, err := f.File(); err == nil {\n\t\t\tdefer file.Close()\n\t\t\tserr = unix.Sendmsg(s.fd, []byte(msg), unix.UnixRights(int(file.Fd())), s.addr, 0)\n\t\t}\n\t}\n\t_ = rc\n"}},
 		Catch: []string{"agent-resolver", "e2e"},
+	},
+	{
+		ID:     "wildcard-reaches-its-own-service",
+		Breaks: "a wildcard destination never matches the service on the rule's other side",
+		Edits:  []Edit{{policyGo, "\t\t\t\tif to != from {\n", "\t\t\t\tif true {\n"}},
+		Catch:  []string{"compile", "cp", "sim", "e2e"},
+	},
+	{
+		ID:     "wildcard-source-reaches-its-own-service",
+		Breaks: "a wildcard source never matches the service on the rule's other side",
+		Edits:  []Edit{{policyGo, "case has(r.To) && (r.From != model.AnyService || r.To != from):", "case has(r.To):"}},
+		Catch:  []string{"compile", "sim"},
+	},
+	{
+		ID:     "deny-ignored",
+		Breaks: "a deny takes the flows it names out of every allow",
+		Edits:  []Edit{{policyGo, "\t\t\tif r.Deny && names(r, p.from, p.to) {", "\t\t\tif false && names(r, p.from, p.to) {"}},
+		Catch:  []string{"compile", "cp", "cpserver", "sim", "e2e"},
+	},
+	{
+		ID:     "wildcard-deny-matches-its-own-service",
+		Breaks: "a wildcard deny spares a service's rule naming itself on both sides",
+		Edits:  []Edit{{policyGo, "return s == self || s == model.AnyService && self != other }", "return s == self || s == model.AnyService }"}},
+		Catch:  []string{"compile", "sim"},
+	},
+	{
+		ID:     "egress-deny-ignored",
+		Breaks: "a deny toward the internet takes egress back",
+		Edits:  []Edit{{policyGo, "\t\treturn r.To == \"\" && (r.From == from || r.From == model.AnyService)\n", "\t\treturn false\n"}},
+		Catch:  []string{"compile", "sim"},
+	},
+	{
+		ID:     "port-deny-takes-the-protocol",
+		Breaks: "a deny of some TCP ports leaves the allow's other TCP ports",
+		Edits:  []Edit{{policyGo, "\t\tf.tcp = f.tcp.remove(spanOf(ports))", "\t\tf.tcp = nil"}},
+		Catch:  []string{"compile", "sim", "e2e"},
+	},
+	{
+		ID:     "adjacent-ranges-kept-apart",
+		Breaks: "allows whose port ranges touch merge into one grant",
+		Edits:  []Edit{{policyGo, "case x.hi+1 < n.lo || n.hi+1 < x.lo:", "case x.hi < n.lo || n.hi < x.lo:"}},
+		Catch:  []string{"compile"},
+	},
+	{
+		ID:     "other-protocols-dropped",
+		Breaks: "a deny that takes TCP or UDP out of an allow for any protocol leaves every other protocol open",
+		Edits:  []Edit{{policyGo, "\tif f.other {\n\t\tout = append(out, Grant{From: from, To: to, Proto: model.OtherProto})\n\t}\n", ""}},
+		Catch:  []string{"compile", "sim", "e2e"},
+	},
+	{
+		ID:     "other-protocols-admit-tcp",
+		Breaks: "a grant for other protocols admits neither TCP nor UDP",
+		Edits:  []Edit{{modelGo, "\t\treturn proto != TCP && proto != UDP\n", "\t\treturn true\n"}},
+		Catch:  []string{"model", "compile", "sim"},
+	},
+	{
+		ID:     "linux-other-protocols-admit-everything",
+		Breaks: "nftables matches the other-protocols grant as anything but TCP and UDP",
+		Edits:  []Edit{{linuxNFT, "\tcase model.AnyProto:\n\t\treturn nil\n\tcase model.OtherProto:", "\tcase model.AnyProto, model.OtherProto:\n\t\treturn nil\n\tcase \"none\":"}},
+		Catch:  []string{"kernel", "e2e"},
+	},
+	{
+		ID:     "wildcard-rule-reconciles-one-pair",
+		Breaks: "a rule whose source is every service reconciles the edges of every pair with its destination",
+		Edits:  []Edit{{cpEdges, "\t\treturn serviceScope(r.To)\n", "\t\treturn servicesScope(r.From, r.To)\n"}},
+		Catch:  []string{"cp", "sim"},
+	},
+	{
+		ID:     "rule-deduplicated-across-actions",
+		Breaks: "an allow and a deny of the same flows are two rules",
+		Edits:  []Edit{{cpPlane, " && r.Ports == req.Ports && r.Deny == deny {", " && r.Ports == req.Ports {"}},
+		Catch:  []string{"cp", "cpserver"},
+	},
+	{
+		ID:     "pgstore-forgets-deny",
+		Breaks: "Postgres keeps whether a rule denies",
+		Edits:  []Edit{{pgTx, "Created: r.Created,\n\t\tDeny: r.Deny,\n\t}))", "Created: r.Created,\n\t}))"}},
+		Catch:  []string{"pgstore"},
 	},
 }

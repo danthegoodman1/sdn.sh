@@ -60,15 +60,18 @@ func TestAWildcardPeersEveryOtherServiceAndADenyCutsOneOut(t *testing.T) {
 		for _, s := range []string{"db", "web", "box"} {
 			f.service("n", s, false)
 		}
-		f.rule("n", api.Wildcard, "db", model.TCP, 5432)
-		boxOut, err := f.createRule("n", api.CreateRule{From: "box", To: "db", Proto: model.AnyProto, Action: api.Deny})
-		if err != nil {
-			t.Fatal(err)
-		}
 		db, _ := f.attach("h1", "n", "db")
 		web, _ := f.attach("h2", "n", "web")
 		box1, _ := f.attach("h2", "n", "box")
 		box2, _ := f.attach("h3", "n", "box")
+		// The rules come after the interfaces, so their edges come from the
+		// wildcard's own reconciliation. The deny comes first: a pair a
+		// rule disconnects keeps its edge through the port quarantine.
+		boxOut, err := f.createRule("n", api.CreateRule{From: "box", To: "db", Proto: model.AnyProto, Action: api.Deny})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.rule("n", api.Wildcard, "db", model.TCP, 5432)
 		check := func(step string, want map[model.InterfaceID][]model.InterfaceID, edges [][2]model.InterfaceID) {
 			t.Helper()
 			for id, peers := range want {

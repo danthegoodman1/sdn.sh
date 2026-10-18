@@ -120,8 +120,10 @@ type Dial struct {
 	Namespace string `json:"namespace"`
 	Target    string `json:"target"`
 	Want      string `json:"want,omitempty"`
-	Reached   bool   `json:"reached"`
-	Start     int64  `json:"start_unix_ns"`
+	// Refused counts a failed connection as the wanted outcome.
+	Refused bool  `json:"refused,omitempty"`
+	Reached bool  `json:"reached"`
+	Start   int64 `json:"start_unix_ns"`
 	// Times are attempts' launches, except FirstDone. First is the first
 	// wanted answer, and FirstDone when the earliest one completed.
 	// Converged begins the final run of wanted answers, and Other is the

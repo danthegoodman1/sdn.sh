@@ -129,7 +129,7 @@ func agentAttach(args []string) error {
 		}
 		attachT = append(attachT, time.Since(start))
 		if *target != "" {
-			d := dialLoop(li.Namespace, *target, "", 1, *until, *interval, 500*time.Millisecond)
+			d := dialLoop(li.Namespace, *target, "", false, 1, *until, *interval, 500*time.Millisecond)
 			took := time.Duration(d.FirstDone - start.UnixNano())
 			round.Reached = d.Reached
 			if d.Reached {
@@ -299,7 +299,7 @@ func agentDensity(args []string) error {
 		var wg sync.WaitGroup
 		for _, i := range picks {
 			wg.Go(func() {
-				if dialLoop(held[i].Namespace, *target, "", 1, *until, 20*time.Millisecond, 500*time.Millisecond).Reached {
+				if dialLoop(held[i].Namespace, *target, "", false, 1, *until, 20*time.Millisecond, 500*time.Millisecond).Reached {
 					reached.Add(1)
 				}
 			})

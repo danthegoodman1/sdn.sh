@@ -350,8 +350,9 @@ type Core struct {
 	nextRelease  time.Time
 	lastRegister time.Time
 	// resends holds each namespace's fresh directions awaiting another
-	// registration.
-	resends map[string]*resend
+	// registration, and resendAck finds the one an acknowledgment ends.
+	resends   map[string]map[model.Key]*resend
+	resendAck map[ackKey]resendRef
 	// awaitingAck finds the namespace a relay's acknowledgment is for,
 	// holding only directions a peer waits on, so acknowledgments nobody
 	// awaits cost nothing to ignore.
@@ -418,9 +419,10 @@ func New(cfg Config, rand io.Reader) *Core {
 		relays:  map[model.RelayID]*relayHealth{},
 		active:  map[model.NetworkID]model.RelayID{},
 		badPort: map[uint16]bool{},
-		resends: map[string]*resend{},
+		resends: map[string]map[model.Key]*resend{},
 
 		awaitingAck: map[ackKey]string{},
+		resendAck:   map[ackKey]resendRef{},
 	}
 }
 

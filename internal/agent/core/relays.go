@@ -135,72 +135,135 @@ func (c *Core) reselect() {
 // Active returns each network's active relay, for metrics and tests.
 func (c *Core) Active() map[model.NetworkID]model.RelayID { return maps.Clone(c.active) }
 
-// registerFresh registers every relay peer a batch just installed or moved.
+// registerFresh registers every relay peer a batch just installed or moved,
+// and schedules each direction's registration again at every relay that has
+// yet to acknowledge it, the first after RegisterRetry and each gap three
+// times the last. Each direction keeps its own schedule, so a namespace
+// gaining peers resends only the new ones.
 func (c *Core) registerFresh(now time.Time, st *nsState) {
 	if len(st.fresh) == 0 {
 		return
 	}
-	keys := slices.SortedFunc(maps.Keys(st.fresh), compareKey)
+	fresh := st.fresh
 	st.fresh = map[model.Key]bool{}
-	c.register(now, st, keys)
-	if c.cfg.RegisterRetries <= 0 {
+	sent := c.register(now, st, func(key model.Key, _ netip.AddrPort) bool { return fresh[key] })
+	if c.cfg.RegisterRetries <= 0 || len(sent) == 0 {
 		return
 	}
-	r, ok := c.resends[st.name]
-	if !ok {
-		r = &resend{}
-		c.resends[st.name] = r
+	port := c.ifaces[st.iface].port
+	sched := c.resends[st.name]
+	if sched == nil {
+		sched = map[model.Key]*resend{}
+		c.resends[st.name] = sched
 	}
-	r.keys = slices.Compact(slices.SortedFunc(slices.Values(append(r.keys, keys...)), compareKey))
-	r.left, r.gap = c.cfg.RegisterRetries, c.cfg.RegisterRetry
-	r.at = now.Add(r.gap)
+	for _, d := range sent {
+		r := sched[d.key]
+		if r == nil {
+			r = &resend{paths: map[netip.AddrPort]bool{}}
+			sched[d.key] = r
+		}
+		r.left, r.gap = c.cfg.RegisterRetries, c.cfg.RegisterRetry
+		r.at = now.Add(r.gap)
+		r.paths[d.path] = true
+		c.resendAck[ackKey{port, d.path}] = resendRef{st.name, d.key}
+	}
 }
 
-// resend is a namespace's fresh directions awaiting another registration.
+// resend is one direction's schedule of further registrations, to the
+// relay ports that have yet to acknowledge it.
 type resend struct {
-	keys []model.Key
-	at   time.Time
-	gap  time.Duration
-	left int
+	at    time.Time
+	gap   time.Duration
+	left  int
+	paths map[netip.AddrPort]bool
+}
+
+// resendRef names the direction an acknowledgment ends a schedule for.
+type resendRef struct {
+	ns  string
+	key model.Key
 }
 
 // resendDue sends the registrations whose retry is due.
 func (c *Core) resendDue(now time.Time) {
 	for _, name := range slices.Sorted(maps.Keys(c.resends)) {
-		r := c.resends[name]
-		if now.Before(r.at) {
-			continue
-		}
+		sched := c.resends[name]
 		st, ok := c.ns[name]
 		if !ok {
-			delete(c.resends, name)
+			c.endResends(name, nil)
 			continue
 		}
-		c.register(now, st, r.keys)
-		r.left--
-		r.gap *= 3
-		r.at = now.Add(r.gap)
-		if r.left <= 0 {
-			delete(c.resends, name)
+		due := map[model.Key]bool{}
+		for _, key := range slices.SortedFunc(maps.Keys(sched), compareKey) {
+			if !now.Before(sched[key].at) {
+				due[key] = true
+			}
+		}
+		if len(due) == 0 {
+			continue
+		}
+		c.register(now, st, func(key model.Key, path netip.AddrPort) bool { return due[key] && sched[key].paths[path] })
+		for _, key := range slices.SortedFunc(maps.Keys(due), compareKey) {
+			r := sched[key]
+			r.left--
+			r.gap *= 3
+			r.at = now.Add(r.gap)
+			if r.left <= 0 {
+				c.endResends(name, []model.Key{key})
+			}
 		}
 	}
 }
 
-// register sends a registration for each relay peer named, to every relay of
-// its set, or for every relay peer when keys is nil.
-func (c *Core) register(now time.Time, st *nsState, keys []model.Key) {
+// endResends drops a namespace's schedules for keys, or every schedule it
+// has when keys is nil.
+func (c *Core) endResends(name string, keys []model.Key) {
+	sched := c.resends[name]
+	if keys == nil {
+		keys = slices.SortedFunc(maps.Keys(sched), compareKey)
+	}
+	var port uint16
+	if st, ok := c.ns[name]; ok {
+		if i, ok := c.ifaces[st.iface]; ok {
+			port = i.port
+		}
+	}
+	for _, key := range keys {
+		if r, ok := sched[key]; ok {
+			for _, path := range slices.SortedFunc(maps.Keys(r.paths), netip.AddrPort.Compare) {
+				delete(c.resendAck, ackKey{port, path})
+			}
+			delete(sched, key)
+		}
+	}
+	if len(sched) == 0 {
+		delete(c.resends, name)
+	}
+}
+
+// sentTo is one registration register sent: a direction, by its peer's key,
+// and the relay port it went to.
+type sentTo struct {
+	key  model.Key
+	path netip.AddrPort
+}
+
+// register sends a registration for each relay peer and relay port want
+// accepts, or for every one when want is nil, and returns what it sent.
+func (c *Core) register(now time.Time, st *nsState, want func(model.Key, netip.AddrPort) bool) []sentTo {
 	i, ok := c.ifaces[st.iface]
 	if !ok || i.phase != ready && i.phase != configuring {
-		return
+		return nil
 	}
 	n, ok := c.desired.Networks[i.network]
 	if !ok {
-		return
+		return nil
 	}
 	x, ok := n.Interface(i.id)
 	if !ok || x.State != api.Live {
-		return
+		return nil
 	}
+	var sent []sentTo
 	for _, p := range x.Peers {
 		if len(p.Relays) == 0 {
 			continue
@@ -208,16 +271,21 @@ func (c *Core) register(now time.Time, st *nsState, keys []model.Key) {
 		if _, installed := st.peers[p.PublicKey]; !installed {
 			continue
 		}
-		if keys != nil && !slices.Contains(keys, p.PublicKey) {
-			continue
-		}
-		counter := c.nextCounter(now)
+		var counter uint64
 		for _, rp := range p.Relays {
+			if want != nil && !want(p.PublicKey, rp.Send) {
+				continue
+			}
+			if counter == 0 {
+				counter = c.nextCounter(now)
+			}
 			key := regproto.RelayKey(p.Registration, rp.Relay)
 			c.emit(SendRegistration{From: i.port, To: rp.Send, Payload: regproto.Encode(key, rp.Send, counter)})
 			c.Stats.Registrations++
+			sent = append(sent, sentTo{p.PublicKey, rp.Send})
 		}
 	}
+	return sent
 }
 
 // nextCounter derives a registration counter from the clock, so it survives
@@ -298,7 +366,10 @@ func (c *Core) NextWake(now time.Time) time.Time {
 	soonest(c.lastResync.Add(c.cfg.ResyncEvery))
 	soonest(c.nextRelease)
 	for _, name := range slices.Sorted(maps.Keys(c.resends)) {
-		soonest(c.resends[name].at)
+		sched := c.resends[name]
+		for _, key := range slices.SortedFunc(maps.Keys(sched), compareKey) {
+			soonest(sched[key].at)
+		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(c.ifaces)) {
 		i := c.ifaces[id]
@@ -332,10 +403,19 @@ func (c *Core) NextWake(now time.Time) time.Time {
 var errAttachTimeout = errors.New("the control plane did not answer in time")
 
 // RegistrationAcked takes a relay's acknowledgment, from the relay port
-// from, of a registration sent from a device's listen port. Only a
-// direction a new peer waits on has any effect.
+// from, of a registration sent from a device's listen port. It ends that
+// direction's resends to the relay, and releases a new peer waiting on it.
 func (c *Core) RegistrationAcked(now time.Time, port uint16, from netip.AddrPort) {
 	key := ackKey{port, from}
+	if ref, ok := c.resendAck[key]; ok {
+		delete(c.resendAck, key)
+		if r, ok := c.resends[ref.ns][ref.key]; ok {
+			delete(r.paths, from)
+			if len(r.paths) == 0 {
+				c.endResends(ref.ns, []model.Key{ref.key})
+			}
+		}
+	}
 	name, ok := c.awaitingAck[key]
 	if c.Debug != nil {
 		c.Debug(fmt.Sprintf("ack from %v for port %d awaited by %q", from, port, name))

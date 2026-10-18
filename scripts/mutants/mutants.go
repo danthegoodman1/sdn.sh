@@ -568,4 +568,10 @@ var Mutants = []Mutant{
 		Edits:  []Edit{{relayCore, "if ok && t.wait(now, d, src, len(b)) {", "if false && t.wait(now, d, src, len(b)) {"}},
 		Catch:  []string{"relay-core"},
 	},
+	{
+		ID:     "acked-direction-resent",
+		Breaks: "a relay's acknowledgment ends that direction's resends to it, so registrations stay bounded under churn",
+		Edits:  []Edit{{agentRelays, "\t\t\tdelete(r.paths, from)\n", ""}},
+		Catch:  []string{"agent-core"},
+	},
 }

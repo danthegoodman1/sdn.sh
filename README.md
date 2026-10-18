@@ -102,7 +102,7 @@ Creating into the namespace rather than creating and moving matters because the 
 
 ### The relay
 
-One port per **directed** policy edge, so the port a packet arrives on names its sender. Each direction's endpoint is set only by an authenticated registration datagram, which the agent sends from the interface's own listen port, so it also holds the NAT mapping WireGuard uses. A data packet from the registered endpoint is forwarded to the peer direction's endpoint, sent from the peer direction's port — which is exactly where the receiver addresses the sender, so WireGuard's roaming keeps both sides pointing at the relay. A data packet never moves an endpoint.
+One port per **directed** policy edge, so the port a packet arrives on names its sender. Each direction's endpoint is set only by an authenticated registration datagram, which the agent sends from the interface's own listen port, so it also holds the NAT mapping WireGuard uses. A data packet from the registered endpoint is forwarded to the peer direction's endpoint, sent from the peer direction's port — which is exactly where the receiver addresses the sender, so WireGuard's roaming keeps both sides pointing at the relay. A data packet never moves an endpoint. The relay acknowledges each registration it commits, and the agent lets a workload send toward a new peer only once the active relay has, so a first packet never meets a port the relay has yet to bind.
 
 Directed ports exist so the relay never has to recognise a sender by address. A host behind NAT has no outbound address the control plane can know in advance, many have none that is stable, and two interfaces can share one NAT address — which an address-based scheme cannot disambiguate at all.
 
@@ -156,6 +156,7 @@ Every figure, its methodology, and the substrate that produced it live in [SPEC.
 
 - **Not a lock.** Address exclusivity and data exclusivity are different problems. A service needing a single writer fences in its storage layer.
 - **A relay is trusted for availability.** It holds a per-direction secret to verify the agent's registration datagram, and nothing that decrypts or forges traffic, but it can still drop or misdeliver. Verifying a WireGuard handshake's `mac1` instead was considered and rejected, because a captured handshake replays from any address and at any relay.
+- **A host's token admits it to every network.** Identity stays per interface, so a compromised host speaks only as the interfaces it holds, but it can attach new ones to any service and reach whatever policy grants that service. Scoping hosts to networks is open.
 - **One control plane orders every change.** Every write takes the next revision from one row, so attaches, releases and policy changes serialize across networks. Shorter transactions raise that ceiling; removing it is open.
 - **The relay's socket model caps its edge count.** One socket per directed port puts a userspace process far below the port space. `sk_lookup` fixes only the receive side, so the real answer is XDP or TC.
 - **A partition keeps an island alive.** A partition isolating a revoked interface together with some of its clients serves stale state until it reconnects.

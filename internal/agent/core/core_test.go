@@ -390,3 +390,53 @@ func TestAFreshDirectionIsRegisteredAgainOnASchedule(t *testing.T) {
 		t.Fatalf("the first resend came %v after the first send, want about %v", gap, c.cfg.RegisterRetry)
 	}
 }
+
+func TestAnAcknowledgedDirectionIsNotResentAndANewPeerResendsAlone(t *testing.T) {
+	c, now := adopted(t)
+	c.cfg.RegisterEvery = time.Hour
+	other := backend("if-c", model.Key{12}, "fd00::7")
+	other.Relays = []api.RelayPath{{Relay: "r1", Send: ap("192.0.2.1:7002")}}
+	update := func(rev uint64, peers ...api.Peer) {
+		t.Helper()
+		if err := c.State(now, api.StateUpdate{Host: "h1", Generation: rev, Networks: []api.NetworkState{client(rev, "if-a", self, peers...)},
+			Present: []api.NetworkRef{{Network: "net-1", Revision: rev}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// sends carries out actions until none remain, counting registrations
+	// by the relay port they went to.
+	sends := func(at time.Time) map[netip.AddrPort]int {
+		out := map[netip.AddrPort]int{}
+		for acts := c.Actions(at); len(acts) > 0; acts = c.Actions(at) {
+			for _, a := range acts {
+				switch a := a.(type) {
+				case RunBatch:
+					c.BatchDone(at, a.Namespace, a.ID, len(a.Ops), nil)
+				case SendRegistration:
+					out[a.To]++
+				}
+			}
+		}
+		return out
+	}
+	update(3, backend("if-b", peer, "fd00::6"))
+	if n := sends(now)[relayAt]; n != 1 {
+		t.Fatalf("registered %d times on install, want once", n)
+	}
+	c.RegistrationAcked(now, 40000, relayAt)
+	// A second peer arrives; only its direction is resent.
+	update(4, backend("if-b", peer, "fd00::6"), other)
+	total := map[netip.AddrPort]int{}
+	for at := now; at.Before(now.Add(2 * time.Second)); at = at.Add(5 * time.Millisecond) {
+		c.Tick(at)
+		for to, n := range sends(at) {
+			total[to] += n
+		}
+	}
+	if total[relayAt] != 0 {
+		t.Fatalf("the acknowledged direction was registered %d more times", total[relayAt])
+	}
+	if got := total[other.Relays[0].Send]; got != 1+c.cfg.RegisterRetries {
+		t.Fatalf("the new direction was registered %d times, want %d", got, 1+c.cfg.RegisterRetries)
+	}
+}

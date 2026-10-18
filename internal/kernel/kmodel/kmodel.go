@@ -41,6 +41,12 @@ type Kernel struct {
 	Moves []Move
 	// Ran counts operations carried out.
 	Ran uint64
+	// EgressChains are the host's per-link egress filters, by index. One
+	// outlives a namespace destroyed without SetEgress removing it first,
+	// as on Linux, where it filters a link that no longer exists.
+	EgressChains map[uint16][]kernel.EgressRule
+	// egressLinks names which namespace holds each index's link.
+	egressLinks map[uint16]*Netns
 }
 
 // Move is an allowed IP that changed peers on one device.
@@ -61,6 +67,8 @@ type Netns struct {
 	// Flows are the connections conntrack and sockets hold, keyed by an
 	// identifier the simulator assigns.
 	Flows map[uint64]*Flow
+	// Egress is the namespace's link to the host's egress NAT.
+	Egress *kernel.EgressConfig
 }
 
 // Flow is one connection a namespace's conntrack and sockets hold.
@@ -97,8 +105,10 @@ func New() *Kernel {
 	return &Kernel{
 		named:   map[string]*Netns{},
 		anon:    map[string]*Netns{},
-		ports:   map[uint16]*Device{},
-		Foreign: map[uint16]bool{},
+		ports:        map[uint16]*Device{},
+		Foreign:      map[uint16]bool{},
+		EgressChains: map[uint16][]kernel.EgressRule{},
+		egressLinks:  map[uint16]*Netns{},
 	}
 }
 
@@ -245,6 +255,9 @@ func observe(ns *Netns, aliasPrefix string) kernel.Namespace {
 		}
 		out.Devices = append(out.Devices, dev)
 	}
+	if ns.Name != "" {
+		out.Egress = ns.Egress.Clone()
+	}
 	return out
 }
 
@@ -302,6 +315,9 @@ func (k *Kernel) Run(op kernel.Op) (kernel.Result, error) {
 		if d, ok := ns.Devices[op.Device]; ok {
 			k.deleteDevice(d)
 		}
+		return kernel.Result{}, nil
+	case kernel.SetEgress:
+		k.setEgress(ns, op.Egress)
 		return kernel.Result{}, nil
 	case kernel.ApplyRules:
 		rs, err := nft.Apply(ns.Rules, *op.Rules)
@@ -379,6 +395,31 @@ func (k *Kernel) destroy(ns *Netns) {
 	for _, d := range ns.DeviceList() {
 		k.deleteDevice(d)
 	}
+	// The link goes with the namespace; its host filter stays.
+	if ns.Egress != nil && k.egressLinks[ns.Egress.Index] == ns {
+		delete(k.egressLinks, ns.Egress.Index)
+	}
+	ns.Egress = nil
+}
+
+// setEgress installs, changes or removes a namespace's egress link and its
+// host filter. A link left at the same index by another namespace is
+// replaced, as the Linux implementation deletes a stale host side.
+func (k *Kernel) setEgress(ns *Netns, cfg *kernel.EgressConfig) {
+	if ns.Egress != nil && (cfg == nil || ns.Egress.Index != cfg.Index) {
+		delete(k.EgressChains, ns.Egress.Index)
+		delete(k.egressLinks, ns.Egress.Index)
+		ns.Egress = nil
+	}
+	if cfg == nil {
+		return
+	}
+	if other, ok := k.egressLinks[cfg.Index]; ok && other != ns {
+		other.Egress = nil
+	}
+	ns.Egress = cfg.Clone()
+	k.egressLinks[cfg.Index] = ns
+	k.EgressChains[cfg.Index] = slices.Clone(cfg.Rules)
 }
 
 func (k *Kernel) setPeers(d *Device, updates []kernel.PeerUpdate) {

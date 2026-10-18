@@ -12,6 +12,7 @@ import (
 
 	"sdn.sh/internal/api"
 	"sdn.sh/internal/cp"
+	"sdn.sh/internal/kernel"
 	"sdn.sh/internal/kernel/kmodel"
 	"sdn.sh/internal/model"
 	"sdn.sh/internal/nft"
@@ -32,6 +33,7 @@ func (w *World) checkMoves(h *hostNode) {
 // orchestrator's rules applied to the interfaces the control plane held.
 type expected struct {
 	live     bool
+	egress   *kernel.EgressConfig
 	peers    map[model.Key]expPeer
 	draining map[model.Key][]netip.Prefix
 	maps     map[string][]netip.Addr
@@ -90,6 +92,20 @@ func (w *World) expect(net model.NetworkID, rev uint64, id model.InterfaceID) (e
 			continue
 		}
 		e.peers[y.PublicKey] = expPeer{allowed: allowed, keepalive: y.Host == x.Host && x.ID < y.ID}
+	}
+	for _, r := range rules {
+		if r.From == x.Service && r.To == "" {
+			if e.egress == nil {
+				e.egress = &kernel.EgressConfig{Index: x.ListenPort}
+			}
+			e.egress.Rules = append(e.egress.Rules, kernel.EgressRule{Proto: r.Proto, Ports: r.Ports})
+		}
+	}
+	if e.egress != nil {
+		slices.SortFunc(e.egress.Rules, func(a, b kernel.EgressRule) int {
+			return cmp.Or(cmp.Compare(a.Proto, b.Proto), cmp.Compare(a.Ports.Lo, b.Ports.Lo), cmp.Compare(a.Ports.Hi, b.Ports.Hi))
+		})
+		e.egress.Rules = slices.Compact(e.egress.Rules)
 	}
 	families := []nft.Family{nft.IPv6}
 	if x.Addr4.IsValid() {
@@ -213,6 +229,9 @@ func (w *World) compare(ns *kmodel.Netns, dev *kmodel.Device, e expected, strict
 	}
 	if !slices.Equal(names, slices.Sorted(maps.Keys(e.sets))) {
 		return fmt.Errorf("source sets %v, want %v", names, slices.Sorted(maps.Keys(e.sets)))
+	}
+	if !ns.Egress.Equal(e.egress) {
+		return fmt.Errorf("egress %+v, want %+v", ns.Egress, e.egress)
 	}
 	return nil
 }

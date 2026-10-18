@@ -12,12 +12,15 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
 
 	"sdn.sh/internal/api"
 	"sdn.sh/internal/lab"
@@ -469,4 +472,171 @@ func TestARelayPeerWithoutKeepaliveHoldsItsNATMappingByRegistering(t *testing.T)
 		t.Fatalf("after the NAT rebound: %v", err)
 	}
 	t.Logf("after the NAT rebound: reached db in %v", took)
+}
+
+func TestWorkloadsResolveTheServicesTheyMayReach(t *testing.T) {
+	l := newLab(t, "e2eh", fastClocks...)
+	ctx := context.Background()
+	relay := must(l.AddRelay(ctx, "r1"))
+	h1 := must(l.AddHost(ctx, "h1"))
+	h2 := must(l.AddHost(ctx, "h2"))
+	must(l.Admin.CreateNetwork(ctx, api.CreateNetwork{Name: "shop", Prefix4: netip.MustParsePrefix("10.101.0.0/16"), Relays: []model.RelayID{relay.ID}}))
+	must(l.Admin.CreateService(ctx, "shop", api.CreateService{Name: "web", IPv4: true}))
+	must(l.Admin.CreateService(ctx, "shop", api.CreateService{Name: "edge"}))
+	db := must(l.Admin.CreateService(ctx, "shop", api.CreateService{Name: "db", IPv4: true}))
+	must(l.Admin.CreateService(ctx, "shop", api.CreateService{Name: "admin"}))
+	for _, from := range []string{"web", "edge"} {
+		must(l.Admin.CreateRule(ctx, "shop", api.CreateRule{From: from, To: "db", Proto: model.TCP, Ports: model.PortRange{Lo: 5432, Hi: 5432}}))
+	}
+	dbIf := must(h2.Attach(ctx, "db-1", "shop", "db"))
+	must(lab.Serve(dbIf.Namespace, netip.AddrPortFrom(dbIf.Addr6, 5432), "db"))
+	web := must(h1.Attach(ctx, "web-1", "shop", "web"))
+	edge := must(h1.Attach(ctx, "edge-1", "shop", "edge"))
+	if web.Resolver.String() != "127.0.0.53" || web.Search != "shop.internal" {
+		t.Fatalf("the agent told the runtime resolver %v, search %q", web.Resolver, web.Search)
+	}
+	name := "db.shop.internal."
+	var got []netip.Addr
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var err error
+		got, _, err = lab.Lookup(web.Namespace, name, dnsmessage.TypeAAAA)
+		if err == nil && len(got) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("AAAA %s from web: %v %v", name, got, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if got[0] != db.Addr6 {
+		t.Fatalf("AAAA %s = %v, want %v", name, got, db.Addr6)
+	}
+	if a, _, err := lab.Lookup(web.Namespace, name, dnsmessage.TypeA); err != nil || len(a) != 1 || a[0] != db.Addr4 {
+		t.Fatalf("A %s from an IPv4 client: %v %v", name, a, err)
+	}
+	// edge's service has no IPv4, so it gets no A record.
+	if a, rc, err := lab.Lookup(edge.Namespace, name, dnsmessage.TypeA); err != nil || len(a) != 0 || rc != dnsmessage.RCodeSuccess {
+		t.Fatalf("A %s from an IPv6-only client: %v %v %v", name, a, rc, err)
+	}
+	// No rule names admin, so it does not exist for web.
+	if _, rc, err := lab.Lookup(web.Namespace, "admin.shop.internal.", dnsmessage.TypeAAAA); err != nil || rc != dnsmessage.RCodeNameError {
+		t.Fatalf("admin from web: %v %v", rc, err)
+	}
+	// The resolved address carries traffic.
+	if got, err := lab.DialUntil(web.Namespace, netip.AddrPortFrom(got[0], 5432), 10*time.Second); err != nil || got != "db" {
+		t.Fatalf("dialing the resolved address: %q %v", got, err)
+	}
+	// A restarted agent serves names again.
+	if err := h1.Restart(); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		a, _, err := lab.Lookup(web.Namespace, name, dnsmessage.TypeAAAA)
+		if err == nil && len(a) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after the agent restarted: %v %v", a, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// TestAQuerySentWhileTheAgentRestartsWaitsAndIsAnswered runs the agent
+// under systemd with a descriptor store: the resolver's sockets outlive the
+// agent, so a query sent while it is down waits in the socket's buffer.
+func TestAQuerySentWhileTheAgentRestartsWaitsAndIsAnswered(t *testing.T) {
+	l := newLab(t, "e2ei", fastClocks...)
+	ctx := context.Background()
+	relay := must(l.AddRelay(ctx, "r1"))
+	h1 := must(l.AddSystemdHost(ctx, "h1"))
+	svc := webDB(t, l, relay)
+	attachDB(t, h1, "db-1")
+	web := must(h1.Attach(ctx, "web-1", "prod", "web"))
+	name := "db.prod.internal."
+	lookup := func() ([]netip.Addr, error) {
+		a, _, err := lab.Lookup(web.Namespace, name, dnsmessage.TypeAAAA)
+		return a, err
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if a, err := lookup(); err == nil && len(a) == 1 && a[0] == svc.Addr6 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the resolver never answered")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err := sh("systemctl", "kill", "--signal=KILL", "--kill-whom=main", h1.Unit); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	a, _, err := lab.LookupWithin(web.Namespace, name, dnsmessage.TypeAAAA, 10*time.Second)
+	if err != nil || len(a) != 1 || a[0] != svc.Addr6 {
+		t.Fatalf("a query sent during the restart: %v %v", a, err)
+	}
+	t.Logf("a query sent as the agent died was answered after %v", time.Since(start))
+}
+
+func sh(args ...string) error {
+	out, err := exec.Command(args[0], args[1:]...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %v: %s", args, err, out)
+	}
+	return nil
+}
+
+func TestAnEgressGrantReachesTheInternetOnItsPortsAlone(t *testing.T) {
+	l := newLab(t, "e2ej", fastClocks...)
+	ctx := context.Background()
+	relay := must(l.AddRelay(ctx, "r1"))
+	h1 := must(l.AddHost(ctx, "h1"))
+	h2 := must(l.AddHost(ctx, "h2"))
+	must(l.Admin.CreateNetwork(ctx, api.CreateNetwork{Name: "prod", Relays: []model.RelayID{relay.ID}}))
+	must(l.Admin.CreateService(ctx, "prod", api.CreateService{Name: "web"}))
+	must(l.Admin.CreateService(ctx, "prod", api.CreateService{Name: "batch"}))
+	grant := must(l.Admin.CreateRule(ctx, "prod", api.CreateRule{From: "web", To: api.Internet, Proto: model.TCP, Ports: model.PortRange{Lo: 80, Hi: 80}}))
+	web := must(h1.Attach(ctx, "web-1", "prod", "web"))
+	batch := must(h1.Attach(ctx, "batch-1", "prod", "batch"))
+	for _, a := range []netip.Addr{lab.Internet4, lab.Internet6, netip.MustParseAddr("169.254.169.254"), netip.MustParseAddr("fd00:ec2::254")} {
+		must(lab.Serve(l.Underlay(), netip.AddrPortFrom(a, 80), "internet"))
+		must(lab.Serve(l.Underlay(), netip.AddrPortFrom(a, 22), "ssh"))
+	}
+	for _, a := range []netip.Addr{lab.Internet4, lab.Internet6} {
+		got, err := lab.DialUntil(web.Namespace, netip.AddrPortFrom(a, 80), 10*time.Second)
+		if err != nil || got != "internet" {
+			t.Fatalf("web to %v:80: %q %v", a, got, err)
+		}
+		mustNotReach(t, web.Namespace, netip.AddrPortFrom(a, 22), "a port the grant does not name")
+		mustNotReach(t, batch.Namespace, netip.AddrPortFrom(a, 80), "a workload with no grant")
+	}
+	for _, addr := range []netip.AddrPort{
+		netip.MustParseAddrPort("169.254.169.254:80"),
+		netip.MustParseAddrPort("[fd00:ec2::254]:80"),
+		netip.AddrPortFrom(relay.Addr, 9092),
+		netip.AddrPortFrom(relay.Addr6, 9092),
+		netip.AddrPortFrom(h1.Addr, 9091),
+		netip.AddrPortFrom(h2.Addr, 9091),
+		netip.AddrPortFrom(h1.Addr6, 9091),
+		netip.MustParseAddrPort("10.213.255.1:18443"),
+	} {
+		mustNotReach(t, web.Namespace, addr, "an egress link to what it must never reach")
+	}
+	// Taking the grant away closes the path.
+	if err := l.Admin.DeleteRule(ctx, "prod", grant.ID); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := lab.Dial(web.Namespace, netip.AddrPortFrom(lab.Internet4, 80), time.Second); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the internet stayed reachable after the grant went")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }

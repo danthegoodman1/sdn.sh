@@ -539,3 +539,146 @@ func TestADeletedNamespaceAProcessHoldsIsFoundAndReaped(t *testing.T) {
 	run(t, k, kernel.Op{Kind: kernel.CreateDevice, Namespace: other, Device: "sdn0",
 		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: a.port, Alias: "sdn:test:d"}})
 }
+
+// internet builds a namespace standing for the internet behind the root
+// namespace: 198.51.100.0/24 links them, and 203.0.113.7 and 2001:db8::7
+// answer inside it.
+func internet(t *testing.T, k *Kernel) string {
+	t.Helper()
+	name := namespace(t, k, prefix(t)+"inet")
+	for _, args := range [][]string{
+		{"ip", "link", "add", "up0", "type", "veth", "peer", "name", "eth0", "netns", name},
+		{"ip", "addr", "add", "198.51.100.1/24", "dev", "up0"},
+		{"ip", "addr", "add", "2001:db8:1::1/64", "dev", "up0", "nodad"},
+		{"ip", "link", "set", "up0", "up"},
+		{"ip", "-n", name, "addr", "add", "198.51.100.2/24", "dev", "eth0"},
+		{"ip", "-n", name, "addr", "add", "2001:db8:1::2/64", "dev", "eth0", "nodad"},
+		{"ip", "-n", name, "link", "set", "eth0", "up"},
+		{"ip", "-n", name, "addr", "add", "203.0.113.7/32", "dev", "lo"},
+		{"ip", "-n", name, "addr", "add", "2001:db8::7/128", "dev", "lo"},
+		{"ip", "-n", name, "route", "add", "default", "via", "198.51.100.1"},
+		{"ip", "-n", name, "-6", "route", "add", "default", "via", "2001:db8:1::1"},
+		{"ip", "route", "add", "203.0.113.0/24", "via", "198.51.100.2"},
+		{"ip", "-6", "route", "add", "2001:db8::/64", "via", "2001:db8:1::2"},
+		{"sysctl", "-qw", "net.ipv6.conf.all.forwarding=1"},
+	} {
+		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v %s", args, err, out)
+		}
+	}
+	t.Cleanup(func() { exec.Command("ip", "link", "del", "up0").Run() })
+	return name
+}
+
+func TestAnEgressGrantReachesWhatItNamesAndNothingElse(t *testing.T) {
+	k := newKernel(t)
+	inet := internet(t, k)
+	ipv6, err := EnableForwarding()
+	if err != nil || !ipv6 {
+		t.Fatalf("forwarding: %v %v", ipv6, err)
+	}
+	k.SetEgressIPv6(true)
+	// The root's own link to the internet counts as the host's underlay
+	// prefix; the internet namespace's far side stays reachable through it.
+	if err := k.EnsureEgress([]netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}); err != nil {
+		t.Fatal(err)
+	}
+	r := prng.New(7)
+	a, _ := pair(t, k, r)
+	for _, addr := range []string{"203.0.113.7", "2001:db8::7"} {
+		serve(t, inet, netip.AddrPortFrom(netip.MustParseAddr(addr), 443), "web")
+		serve(t, inet, netip.AddrPortFrom(netip.MustParseAddr(addr), 22), "ssh")
+	}
+	// No grant, no path.
+	if c, err := dial(t, a.ns, netip.MustParseAddrPort("203.0.113.7:443"), time.Second); err == nil {
+		c.Close()
+		t.Fatal("reached the internet with no grant")
+	}
+	grant := &kernel.EgressConfig{Index: a.port, Rules: []kernel.EgressRule{{Proto: model.TCP, Ports: model.PortRange{Lo: 443, Hi: 443}}}}
+	run(t, k, kernel.Op{Kind: kernel.SetEgress, Namespace: a.ns, Egress: grant})
+	ns, err := k.Namespace(a.ns, "")
+	if err != nil || !ns.Egress.Equal(grant) {
+		t.Fatalf("observed egress %+v (%v), want %+v", ns.Egress, err, grant)
+	}
+	for _, addr := range []string{"203.0.113.7", "[2001:db8::7]"} {
+		c, err := dial(t, a.ns, netip.MustParseAddrPort(addr+":443"), 3*time.Second)
+		if err != nil {
+			t.Fatalf("granted %s:443: %v", addr, err)
+		}
+		if got := readReply(t, c); got != "web" {
+			t.Fatalf("got %q", got)
+		}
+		c.Close()
+		if c, err := dial(t, a.ns, netip.MustParseAddrPort(addr+":22"), time.Second); err == nil {
+			c.Close()
+			t.Fatalf("reached %s:22, which the grant does not name", addr)
+		}
+	}
+	// The host itself, a private range and a blocked prefix are out of
+	// reach in each family.
+	ln, err := net.Listen("tcp", "198.51.100.1:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	for _, addr := range []string{"198.51.100.1:443", "10.0.0.1:443", "192.0.2.1:443", "169.254.169.254:443", "[fd00:ec2::254]:443", "[2001:db8:1::1]:443"} {
+		if c, err := dial(t, a.ns, netip.MustParseAddrPort(addr), 700*time.Millisecond); err == nil {
+			c.Close()
+			t.Errorf("an egress link reached %s", addr)
+		}
+	}
+	// Removing the grant removes the link and its filter.
+	run(t, k, kernel.Op{Kind: kernel.SetEgress, Namespace: a.ns})
+	if ns, _ := k.Namespace(a.ns, ""); ns.Egress != nil {
+		t.Fatalf("egress after removal: %+v", ns.Egress)
+	}
+	if _, err := netlink.LinkByName(egressLink(a.port)); err == nil {
+		t.Fatal("the host side outlived the grant")
+	}
+	if c, err := dial(t, a.ns, netip.MustParseAddrPort("203.0.113.7:443"), time.Second); err == nil {
+		c.Close()
+		t.Fatal("reached the internet after the grant went")
+	}
+}
+
+// TestTheModelAgreesWithLinuxOnEgress plays random grants, changes and
+// removals through both and compares what each observes.
+func TestTheModelAgreesWithLinuxOnEgress(t *testing.T) {
+	k := newKernel(t)
+	if err := k.EnsureEgress(nil); err != nil {
+		t.Fatal(err)
+	}
+	m := kmodel.New()
+	r := prng.New(8)
+	name := namespace(t, k, prefix(t)+"x")
+	m.Run(kernel.Op{Kind: kernel.CreateNamespace, Namespace: name})
+	rules := []kernel.EgressRule{
+		{Proto: model.TCP, Ports: model.PortRange{Lo: 443, Hi: 443}},
+		{Proto: model.UDP, Ports: model.PortRange{Lo: 53, Hi: 53}},
+		{Proto: model.AnyProto},
+	}
+	for round := range 30 {
+		var cfg *kernel.EgressConfig
+		if !r.Percent(25) {
+			cfg = &kernel.EgressConfig{Index: uint16(41000 + r.Below(2))}
+			for _, rule := range rules {
+				if r.Percent(50) {
+					cfg.Rules = append(cfg.Rules, rule)
+				}
+			}
+		}
+		op := kernel.Op{Kind: kernel.SetEgress, Namespace: name, Egress: cfg}
+		if _, err := k.Run(op); err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		m.Run(op)
+		lns, err := k.Namespace(name, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		mns, _ := m.Namespace(name, "")
+		if !lns.Egress.Equal(mns.Egress) {
+			t.Fatalf("round %d after %+v: linux %+v, model %+v", round, cfg, lns.Egress, mns.Egress)
+		}
+	}
+}

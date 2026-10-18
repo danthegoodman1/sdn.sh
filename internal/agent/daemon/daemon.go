@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 
 	agentcore "sdn.sh/internal/agent/core"
 	"sdn.sh/internal/api"
+	"sdn.sh/internal/dns"
 	"sdn.sh/internal/kernel"
 	"sdn.sh/internal/model"
 	"sdn.sh/internal/regproto"
@@ -51,6 +53,17 @@ type Prober interface {
 	Close() error
 }
 
+// Resolver serves each namespace's stub resolver.
+type Resolver interface {
+	Sync(zones map[string]dns.Zone, settled bool)
+}
+
+// EgressHost keeps the host's egress filter blocking what no egress link
+// may reach.
+type EgressHost interface {
+	EnsureEgress(blocked []netip.Prefix) error
+}
+
 // Config holds the daemon's settings beyond the core's.
 type Config struct {
 	Core agentcore.Config
@@ -78,8 +91,14 @@ type Daemon struct {
 	journal Journal
 	raw     Sender
 	prober  Prober
-	m       *Metrics
-	now     func() time.Time
+	// Resolver, when set, serves workloads' names.
+	Resolver Resolver
+	// Egress, when set, has its blocked prefixes refreshed with every relay
+	// address desired state names, on top of EgressBase.
+	Egress     EgressHost
+	EgressBase []netip.Prefix
+	m          *Metrics
+	now        func() time.Time
 
 	events chan func()
 	sem    chan struct{}
@@ -91,6 +110,14 @@ type Daemon struct {
 	nextReq  agentcore.RequestID
 	probes   map[uint64]probe
 	stats    agentcore.Stats
+
+	// resolverDirty marks zones that need recomputing; syncs carries the
+	// latest set to the goroutine applying them.
+	resolverDirty bool
+	resolverGen   uint64
+	syncs         chan resolverSync
+	egressGen     uint64
+	egressRelays  []netip.Prefix
 
 	ready sync.Once
 	up    chan struct{}
@@ -112,13 +139,20 @@ type probe struct {
 func New(cfg Config, core *agentcore.Core, kern kernel.Kernel, cp ControlPlane, j Journal, raw Sender, prober Prober, m *Metrics, log zerolog.Logger) *Daemon {
 	return &Daemon{
 		cfg: cfg, log: log, core: core, kern: kern, cp: cp, journal: j, raw: raw, prober: prober, m: m,
-		now:      time.Now,
-		events:   make(chan func(), 4096),
-		sem:      make(chan struct{}, max(cfg.Workers, 1)),
-		requests: map[agentcore.RequestID]*request{},
-		probes:   map[uint64]probe{},
-		up:       make(chan struct{}),
+		now:           time.Now,
+		events:        make(chan func(), 4096),
+		sem:           make(chan struct{}, max(cfg.Workers, 1)),
+		requests:      map[agentcore.RequestID]*request{},
+		probes:        map[uint64]probe{},
+		up:            make(chan struct{}),
+		syncs:         make(chan resolverSync, 1),
+		resolverDirty: true,
 	}
+}
+
+type resolverSync struct {
+	zones   map[string]dns.Zone
+	settled bool
 }
 
 // Up closes once the daemon has adopted what the journal and kernel hold.
@@ -143,6 +177,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	go d.pollLoop(ctx)
 	go d.renewLoop(ctx)
+	if d.Resolver != nil {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case s := <-d.syncs:
+					d.Resolver.Sync(s.zones, s.settled)
+				}
+			}
+		}()
+	}
 	if d.prober != nil {
 		go d.prober.Receive(d.probeReply)
 		defer d.prober.Close()
@@ -197,6 +243,76 @@ func (d *Daemon) drive() {
 		d.carry(a)
 	}
 	d.noteStats()
+	d.syncResolver()
+	d.syncEgress()
+}
+
+// syncEgress blocks every relay address desired state names from egress
+// links, refreshing the host's filter when the set changes. A workload that
+// could reach a relay could attack endpoint registration.
+func (d *Daemon) syncEgress() {
+	gen := d.core.Generation()
+	if d.Egress == nil || gen == d.egressGen {
+		return
+	}
+	d.egressGen = gen
+	var relays []netip.Prefix
+	desired := d.core.Desired()
+	for _, id := range desired.NetworkIDs() {
+		n := desired.Networks[id]
+		for _, r := range n.Relays {
+			relays = append(relays, netip.PrefixFrom(r.Probe.Addr(), r.Probe.Addr().BitLen()))
+		}
+		for _, x := range n.Interfaces {
+			for _, p := range x.Peers {
+				for _, rp := range p.Relays {
+					relays = append(relays, netip.PrefixFrom(rp.Send.Addr(), rp.Send.Addr().BitLen()))
+				}
+			}
+		}
+	}
+	slices.SortFunc(relays, func(a, b netip.Prefix) int { return a.Addr().Compare(b.Addr()) })
+	relays = slices.Compact(relays)
+	if slices.Equal(relays, d.egressRelays) {
+		return
+	}
+	d.egressRelays = relays
+	blocked := append(slices.Clone(d.EgressBase), relays...)
+	go func() {
+		if err := d.Egress.EnsureEgress(blocked); err != nil {
+			d.log.Error().Err(err).Msg("refreshing the egress filter")
+			return
+		}
+		d.log.Info().Int("relays", len(relays)).Msg("egress filter blocks every relay")
+	}()
+}
+
+// syncResolver recomputes every ready namespace's zone after desired state
+// changes or an attach or detach finishes, and hands the set over.
+func (d *Daemon) syncResolver() {
+	if d.Resolver == nil {
+		return
+	}
+	gen := d.core.Generation()
+	if !d.resolverDirty && gen == d.resolverGen {
+		return
+	}
+	d.resolverDirty, d.resolverGen = false, gen
+	zones := map[string]dns.Zone{}
+	desired := d.core.Desired()
+	for _, li := range d.core.Interfaces() {
+		if !li.Ready {
+			continue
+		}
+		if n, x, ok := desired.Interface(li.Interface); ok {
+			zones[li.Namespace] = dns.ZoneFor(n, x)
+		}
+	}
+	select {
+	case <-d.syncs:
+	default:
+	}
+	d.syncs <- resolverSync{zones: zones, settled: gen > 0}
 }
 
 func (d *Daemon) carry(a agentcore.Action) {
@@ -219,6 +335,7 @@ func (d *Daemon) carry(a agentcore.Action) {
 		}
 	case agentcore.Reply:
 		d.reply(a)
+		d.resolverDirty = true
 	case agentcore.SendRegistration:
 		if err := d.raw.Send(a.From, a.To, a.Payload[:]); err != nil {
 			d.m.registrations.WithLabelValues("error").Inc()

@@ -1,0 +1,372 @@
+//go:build linux
+
+package linux
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"net/netip"
+	"os"
+	"strconv"
+	"strings"
+
+	"github.com/google/nftables"
+	"github.com/google/nftables/expr"
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
+
+	"sdn.sh/internal/kernel"
+	"sdn.sh/internal/model"
+)
+
+// Egress: a workload granted the internet gets a veth pair, eg0 in its
+// namespace and sdne<index> on the host. The host's table sdn_egress drops
+// what the link must never reach — link-local and metadata addresses,
+// private ranges, the host's own prefixes, every relay, and the host
+// itself — then applies the link's own grant, reached through a verdict
+// map keyed by the link's name, and masquerades what leaves.
+const (
+	egressTable  = "sdn_egress"
+	egressPrefix = "sdne"
+	egressNSLink = "eg0"
+	egressAlias  = "sdn-egress:"
+)
+
+func egressLink(idx uint16) string { return egressPrefix + strconv.Itoa(int(idx)) }
+
+// egressAddrs derives a link's addresses from its index: a /31 in
+// 100.64.0.0/10 and a /127 in fdff:e9e5::/64, the host side first. They
+// never leave the host, since everything the link sends is masqueraded.
+func egressAddrs(idx uint16) (host4, ns4, host6, ns6 netip.Addr) {
+	v := uint32(100)<<24 | uint32(64)<<16 + uint32(idx)*2
+	host4 = netip.AddrFrom4([4]byte(binary.BigEndian.AppendUint32(nil, v)))
+	ns4 = netip.AddrFrom4([4]byte(binary.BigEndian.AppendUint32(nil, v+1)))
+	b := [16]byte{0xfd, 0xff, 0xe9, 0xe5, 12: byte(idx >> 8), 13: byte(idx)}
+	host6 = netip.AddrFrom16(b)
+	b[15] = 1
+	ns6 = netip.AddrFrom16(b)
+	return
+}
+
+// DefaultEgressBlocked is what no egress link may reach whatever the
+// host: loopback, link-local and metadata addresses, private and shared
+// ranges, multicast and reserved space, in both families.
+func DefaultEgressBlocked() []netip.Prefix {
+	var out []netip.Prefix
+	for _, s := range []string{
+		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+		"192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
+		"::/127", "::ffff:0:0/96", "64:ff9b:1::/48", "fc00::/7", "fe80::/10", "ff00::/8",
+	} {
+		out = append(out, netip.MustParsePrefix(s))
+	}
+	return out
+}
+
+// EnsureEgress installs the host's egress table, or refreshes the
+// prefixes it blocks, in one transaction that leaves every link's grant in
+// place. blocked adds to DefaultEgressBlocked: the host's own prefixes and
+// every relay address.
+func (k *Kernel) EnsureEgress(blocked []netip.Prefix) error {
+	k.egressMu.Lock()
+	defer k.egressMu.Unlock()
+	c, err := nftables.New(nftables.WithNetNSFd(int(k.root)))
+	if err != nil {
+		return err
+	}
+	defer c.CloseLasting()
+	t := c.AddTable(&nftables.Table{Name: egressTable, Family: nftables.TableFamilyINet})
+	if err := c.AddSet(egressMap(t), nil); err != nil {
+		return err
+	}
+	policy := nftables.ChainPolicyAccept
+	fwd := c.AddChain(&nftables.Chain{Name: "forward", Table: t, Type: nftables.ChainTypeFilter,
+		Hooknum: nftables.ChainHookForward, Priority: nftables.ChainPriorityFilter, Policy: &policy})
+	in := c.AddChain(&nftables.Chain{Name: "input", Table: t, Type: nftables.ChainTypeFilter,
+		Hooknum: nftables.ChainHookInput, Priority: nftables.ChainPriorityFilter, Policy: &policy})
+	post := c.AddChain(&nftables.Chain{Name: "postrouting", Table: t, Type: nftables.ChainTypeNAT,
+		Hooknum: nftables.ChainHookPostrouting, Priority: nftables.ChainPriorityNATSource, Policy: &policy})
+	c.FlushChain(fwd)
+	c.FlushChain(in)
+	c.FlushChain(post)
+	add := func(ch *nftables.Chain, exprs ...expr.Any) {
+		c.AddRule(&nftables.Rule{Table: t, Chain: ch, Exprs: exprs})
+	}
+	fromLink := ifnamePrefix(expr.MetaKeyIIFNAME, egressPrefix)
+	toLink := ifnamePrefix(expr.MetaKeyOIFNAME, egressPrefix)
+	for _, p := range append(DefaultEgressBlocked(), blocked...) {
+		p = p.Masked()
+		add(fwd, concat(fromLink, prefixMatch(p), []expr.Any{drop()})...)
+	}
+	add(fwd, concat(fromLink, []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
+		&expr.Lookup{SourceRegister: 1, SetName: "links", IsDestRegSet: true, DestRegister: 0},
+	})...)
+	add(fwd, concat(fromLink, []expr.Any{drop()})...)
+	add(fwd, concat(toLink, ctState(expr.CtStateBitESTABLISHED|expr.CtStateBitRELATED), []expr.Any{accept()})...)
+	add(fwd, concat(toLink, []expr.Any{drop()})...)
+	// The host itself is out of reach, but for the neighbour discovery an
+	// IPv6 link needs.
+	for _, typ := range []byte{135, 136} {
+		add(in, concat(fromLink, l4(unix.IPPROTO_ICMPV6),
+			[]expr.Any{&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 0, Len: 1}, eq([]byte{typ}), accept()})...)
+	}
+	add(in, concat(fromLink, []expr.Any{drop()})...)
+	add(post, concat(fromLink, []expr.Any{&expr.Masq{}})...)
+	return c.Flush()
+}
+
+func egressMap(t *nftables.Table) *nftables.Set {
+	return &nftables.Set{Table: t, Name: "links", IsMap: true, KeyType: nftables.TypeIFName, DataType: nftables.TypeVerdict}
+}
+
+func concat(parts ...[]expr.Any) []expr.Any {
+	var out []expr.Any
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
+}
+
+// ifnamePrefix matches an interface name by its first bytes, as nft's
+// "iifname sdne*" does.
+func ifnamePrefix(key expr.MetaKey, prefix string) []expr.Any {
+	return []expr.Any{&expr.Meta{Key: key, Register: 1}, eq([]byte(prefix))}
+}
+
+// prefixMatch matches a destination inside a prefix.
+func prefixMatch(p netip.Prefix) []expr.Any {
+	f, off, n := byte(unix.NFPROTO_IPV6), uint32(24), uint32(16)
+	if p.Addr().Is4() {
+		f, off, n = unix.NFPROTO_IPV4, 16, 4
+	}
+	mask := make([]byte, n)
+	for i := range p.Bits() {
+		mask[i/8] |= 0x80 >> (i % 8)
+	}
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1}, eq([]byte{f}),
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: off, Len: n},
+		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: n, Mask: mask, Xor: make([]byte, n)},
+		eq(p.Addr().AsSlice()),
+	}
+}
+
+// setEgress installs, changes or removes a namespace's egress link.
+func (k *Kernel) setEgress(h *nsHandles, cfg *kernel.EgressConfig) error {
+	k.egressMu.Lock()
+	defer k.egressMu.Unlock()
+	cur, _ := k.observeEgress(h)
+	if cur != nil && (cfg == nil || cur.Index != cfg.Index) {
+		if err := k.removeEgress(cur.Index); err != nil {
+			return err
+		}
+	}
+	if cfg == nil {
+		// A link left behind with no host side is gone with it; the name
+		// may still hold the namespace's end alone after a crash.
+		if l, err := h.nl.LinkByName(egressNSLink); err == nil {
+			return h.nl.LinkDel(l)
+		}
+		return nil
+	}
+	if cur == nil || cur.Index != cfg.Index {
+		if err := k.createEgressLink(h, cfg.Index); err != nil {
+			return err
+		}
+	}
+	return k.grantEgress(cfg)
+}
+
+// createEgressLink makes the veth pair, addresses it and routes the
+// namespace's default through it.
+func (k *Kernel) createEgressLink(h *nsHandles, idx uint16) error {
+	name := egressLink(idx)
+	if l, err := k.rootNL.LinkByName(name); err == nil {
+		// A stale host side, from a namespace a process still holds.
+		if err := k.rootNL.LinkDel(l); err != nil {
+			return fmt.Errorf("deleting stale %s: %w", name, err)
+		}
+	}
+	if l, err := h.nl.LinkByName(egressNSLink); err == nil {
+		if err := h.nl.LinkDel(l); err != nil {
+			return err
+		}
+	}
+	veth := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: name}, PeerName: egressNSLink, PeerNamespace: netlink.NsFd(int(h.fd))}
+	if err := k.rootNL.LinkAdd(veth); err != nil {
+		return fmt.Errorf("veth %s: %w", name, err)
+	}
+	host4, ns4, host6, ns6 := egressAddrs(idx)
+	hostLink, err := k.rootNL.LinkByName(name)
+	if err != nil {
+		return err
+	}
+	nsLink, err := h.nl.LinkByName(egressNSLink)
+	if err != nil {
+		return err
+	}
+	if err := h.nl.LinkSetAlias(nsLink, egressAlias+strconv.Itoa(int(idx))); err != nil {
+		return err
+	}
+	for _, a := range []struct {
+		nl   *netlink.Handle
+		link netlink.Link
+		addr netip.Prefix
+	}{
+		{k.rootNL, hostLink, netip.PrefixFrom(host4, 31)},
+		{k.rootNL, hostLink, netip.PrefixFrom(host6, 127)},
+		{h.nl, nsLink, netip.PrefixFrom(ns4, 31)},
+		{h.nl, nsLink, netip.PrefixFrom(ns6, 127)},
+	} {
+		addr := &netlink.Addr{IPNet: ipNet(a.addr)}
+		if a.addr.Addr().Is6() {
+			addr.Flags = unix.IFA_F_NODAD
+		}
+		if err := a.nl.AddrReplace(a.link, addr); err != nil {
+			return fmt.Errorf("address %v: %w", a.addr, err)
+		}
+	}
+	if err := k.rootNL.LinkSetUp(hostLink); err != nil {
+		return err
+	}
+	if err := h.nl.LinkSetUp(nsLink); err != nil {
+		return err
+	}
+	routes := []*netlink.Route{{LinkIndex: nsLink.Attrs().Index, Dst: ipNet(netip.MustParsePrefix("0.0.0.0/0")), Gw: host4.AsSlice()}}
+	if k.egress6 {
+		routes = append(routes, &netlink.Route{LinkIndex: nsLink.Attrs().Index, Dst: ipNet(netip.MustParsePrefix("::/0")), Gw: host6.AsSlice()})
+	}
+	for _, r := range routes {
+		if err := h.nl.RouteReplace(r); err != nil {
+			return fmt.Errorf("egress route %v: %w", r.Dst, err)
+		}
+	}
+	return nil
+}
+
+// grantEgress writes the link's grant chain and its map entry, and records
+// the grant in the host side's alias, where observation reads it.
+func (k *Kernel) grantEgress(cfg *kernel.EgressConfig) error {
+	c, err := nftables.New(nftables.WithNetNSFd(int(k.root)))
+	if err != nil {
+		return err
+	}
+	defer c.CloseLasting()
+	t := &nftables.Table{Name: egressTable, Family: nftables.TableFamilyINet}
+	ch := c.AddChain(&nftables.Chain{Name: egressLink(cfg.Index), Table: t})
+	c.FlushChain(ch)
+	for _, r := range cfg.Rules {
+		c.AddRule(&nftables.Rule{Table: t, Chain: ch, Exprs: append(protoMatch(r.Proto, r.Ports), accept())})
+	}
+	if err := c.SetAddElements(egressMap(t), []nftables.SetElement{{
+		Key: padIfname(egressLink(cfg.Index)), VerdictData: &expr.Verdict{Kind: expr.VerdictJump, Chain: ch.Name},
+	}}); err != nil {
+		return err
+	}
+	if err := c.Flush(); err != nil {
+		return fmt.Errorf("egress grant %d: %w", cfg.Index, err)
+	}
+	l, err := k.rootNL.LinkByName(egressLink(cfg.Index))
+	if err != nil {
+		return err
+	}
+	return k.rootNL.LinkSetAlias(l, egressAlias+formatRules(cfg.Rules))
+}
+
+// removeEgress deletes a link's grant and the link. Each step tolerates
+// finding its object gone, so a removal a crash cut short completes.
+func (k *Kernel) removeEgress(idx uint16) error {
+	c, err := nftables.New(nftables.WithNetNSFd(int(k.root)))
+	if err != nil {
+		return err
+	}
+	defer c.CloseLasting()
+	t := &nftables.Table{Name: egressTable, Family: nftables.TableFamilyINet}
+	if err := c.SetDeleteElements(egressMap(t), []nftables.SetElement{{Key: padIfname(egressLink(idx))}}); err != nil {
+		return err
+	}
+	if err := c.Flush(); err != nil && !errors.Is(err, unix.ENOENT) {
+		return fmt.Errorf("egress map entry %d: %w", idx, err)
+	}
+	ch := &nftables.Chain{Name: egressLink(idx), Table: t}
+	c.FlushChain(ch)
+	c.DelChain(ch)
+	if err := c.Flush(); err != nil && !errors.Is(err, unix.ENOENT) {
+		return fmt.Errorf("egress chain %d: %w", idx, err)
+	}
+	if l, err := k.rootNL.LinkByName(egressLink(idx)); err == nil {
+		if err := k.rootNL.LinkDel(l); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// observeEgress reads a namespace's egress link and its grant.
+func (k *Kernel) observeEgress(h *nsHandles) (*kernel.EgressConfig, error) {
+	l, err := h.nl.LinkByName(egressNSLink)
+	if err != nil {
+		return nil, nil
+	}
+	idx, err := strconv.ParseUint(strings.TrimPrefix(l.Attrs().Alias, egressAlias), 10, 16)
+	if err != nil || !strings.HasPrefix(l.Attrs().Alias, egressAlias) {
+		return nil, nil
+	}
+	cfg := &kernel.EgressConfig{Index: uint16(idx)}
+	host, err := k.rootNL.LinkByName(egressLink(cfg.Index))
+	if err != nil {
+		// The host side is gone, so the pair is: nothing to report.
+		return nil, nil
+	}
+	rules, err := parseRules(strings.TrimPrefix(host.Attrs().Alias, egressAlias))
+	if err != nil {
+		return nil, fmt.Errorf("egress %d: %w", idx, err)
+	}
+	cfg.Rules = rules
+	return cfg, nil
+}
+
+// formatRules writes a grant as "tcp/443-443,udp/53-53"; parseRules reads
+// it back. An empty grant writes nothing.
+func formatRules(rules []kernel.EgressRule) string {
+	var parts []string
+	for _, r := range rules {
+		parts = append(parts, fmt.Sprintf("%s/%d-%d", r.Proto, r.Ports.Lo, r.Ports.Hi))
+	}
+	return strings.Join(parts, ",")
+}
+
+func parseRules(s string) ([]kernel.EgressRule, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var out []kernel.EgressRule
+	for _, part := range strings.Split(s, ",") {
+		proto, ports, ok := strings.Cut(part, "/")
+		lo, hi, ok2 := strings.Cut(ports, "-")
+		l, err1 := strconv.ParseUint(lo, 10, 16)
+		h, err2 := strconv.ParseUint(hi, 10, 16)
+		if !ok || !ok2 || err1 != nil || err2 != nil {
+			return nil, fmt.Errorf("grant %q", part)
+		}
+		out = append(out, kernel.EgressRule{Proto: model.Proto(proto), Ports: model.PortRange{Lo: uint16(l), Hi: uint16(h)}})
+	}
+	return out, nil
+}
+
+// EnableForwarding turns on IPv4 forwarding, which egress needs on every
+// interface its return traffic arrives on, and reports whether IPv6 egress
+// is available: only where the host already forwards IPv6, since turning
+// that on would stop the host accepting router advertisements.
+func EnableForwarding() (ipv6 bool, err error) {
+	if err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0o644); err != nil {
+		return false, err
+	}
+	b, err := os.ReadFile("/proc/sys/net/ipv6/conf/all/forwarding")
+	return err == nil && strings.TrimSpace(string(b)) == "1", nil
+}
+
+// SetEgressIPv6 says whether egress links get an IPv6 default route.
+func (k *Kernel) SetEgressIPv6(on bool) { k.egress6 = on }

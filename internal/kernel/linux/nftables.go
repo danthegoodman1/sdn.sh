@@ -244,6 +244,11 @@ func (w *nftWriter) add(chain string, exprs ...expr.Any) {
 func (w *nftWriter) rules(r nft.Rules) error {
 	w.add("inbound", append(ifname(expr.MetaKeyIIFNAME, "lo"), accept())...)
 	w.add("inbound", append(ctState(expr.CtStateBitESTABLISHED|expr.CtStateBitRELATED), accept())...)
+	// Neighbour discovery, which an egress link needs, is never tracked.
+	for _, typ := range []byte{135, 136} {
+		w.add("inbound", append(l4(unix.IPPROTO_ICMPV6),
+			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 0, Len: 1}, eq([]byte{typ}), accept())...)
+	}
 	w.add("inbound", append(ctState(expr.CtStateBitINVALID), drop())...)
 	for _, a := range r.Accept {
 		set := w.set(a.Set)

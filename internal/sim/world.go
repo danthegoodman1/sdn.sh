@@ -40,6 +40,7 @@ type Summary struct {
 	Seed                                  uint64
 	Events                                uint64
 	Attaches, Detaches, Revokes, Rules    int
+	EgressGrants                          int
 	AgentCrashes, RelayCrashes, CPCrashes int
 	Reboots, Rebinds, Strays              int
 	FlowsOK, FlowsDenied                  int
@@ -49,8 +50,8 @@ type Summary struct {
 }
 
 func (s Summary) String() string {
-	return fmt.Sprintf("seed %d: %d events; %d attaches, %d detaches, %d revokes, %d rule changes; crashes agent %d relay %d cp %d, reboots %d, rebinds %d, strays %d; flows ok %d denied %d; batches %d, conflicts %d, failovers %d, registrations %d, attacker sent %d",
-		s.Seed, s.Events, s.Attaches, s.Detaches, s.Revokes, s.Rules, s.AgentCrashes, s.RelayCrashes, s.CPCrashes,
+	return fmt.Sprintf("seed %d: %d events; %d attaches, %d detaches, %d revokes, %d rule changes, %d egress grants; crashes agent %d relay %d cp %d, reboots %d, rebinds %d, strays %d; flows ok %d denied %d; batches %d, conflicts %d, failovers %d, registrations %d, attacker sent %d",
+		s.Seed, s.Events, s.Attaches, s.Detaches, s.Revokes, s.Rules, s.EgressGrants, s.AgentCrashes, s.RelayCrashes, s.CPCrashes,
 		s.Reboots, s.Rebinds, s.Strays, s.FlowsOK, s.FlowsDenied, s.Batches, s.Conflicts, s.Failovers, s.Registrations, s.AttackerSent)
 }
 

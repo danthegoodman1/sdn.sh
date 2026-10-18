@@ -63,8 +63,11 @@ type ifIntent struct {
 }
 
 type orchestrator struct {
-	w         *World
-	rng       *prng.Rand
+	w   *World
+	rng *prng.Rand
+	// egress draws internet grants, on a stream of its own so the other
+	// draws stay as they were.
+	egress    *prng.Rand
 	networks  []*netIntent
 	ifaces    map[model.InterfaceID]*ifIntent
 	attaching map[string]*pendingAttach
@@ -87,7 +90,7 @@ const retryAfter = 500 * time.Millisecond
 
 func newOrchestrator(w *World) *orchestrator {
 	return &orchestrator{
-		w: w, rng: prng.Stream(w.seed, "orchestrator"),
+		w: w, rng: prng.Stream(w.seed, "orchestrator"), egress: prng.Stream(w.seed, "egress"),
 		ifaces: map[model.InterfaceID]*ifIntent{}, attaching: map[string]*pendingAttach{},
 	}
 }
@@ -176,6 +179,44 @@ func (o *orchestrator) randomRule() (model.Proto, model.PortRange) {
 	}
 }
 
+// grantEgress sometimes lets a service reach the internet, or takes a grant
+// away.
+func (o *orchestrator) grantEgress() {
+	if !o.egress.Percent(4) || len(o.networks) == 0 {
+		return
+	}
+	n := o.networks[o.egress.Index(len(o.networks))]
+	var grants []model.RuleID
+	for _, id := range sortedKeys(n.rules) {
+		if n.rules[id].To == "" {
+			grants = append(grants, id)
+		}
+	}
+	if len(grants) > 0 && o.egress.Percent(40) {
+		id := grants[o.egress.Index(len(grants))]
+		if o.admin(func(tx store.Tx) error { return o.w.cp.plane.DeleteRule(tx, o.w.now(), string(n.id), id) }) {
+			delete(n.rules, id)
+			o.record(n)
+		}
+		return
+	}
+	s := n.services[o.egress.Index(len(n.services))]
+	proto, ports := model.TCP, model.PortRange{Lo: 443, Hi: 443}
+	if o.egress.Percent(30) {
+		proto, ports = model.UDP, model.PortRange{Lo: 53, Hi: 53}
+	}
+	var r store.Rule
+	if o.admin(func(tx store.Tx) error {
+		var err error
+		r, err = o.w.cp.plane.CreateRule(tx, o.w.now(), string(n.id), api.CreateRule{From: string(s.id), To: api.Internet, Proto: proto, Ports: ports})
+		return err
+	}) {
+		n.rules[r.ID] = r
+		o.w.summary.EgressGrants++
+		o.record(n)
+	}
+}
+
 func (o *orchestrator) addRule(n *netIntent, a, b *svcIntent) {
 	proto, ports := o.randomRule()
 	var r store.Rule
@@ -243,6 +284,7 @@ func (o *orchestrator) start() {
 			return
 		}
 		o.change()
+		o.grantEgress()
 		o.w.loop.After(o.rng.Duration(o.w.opts.ChangeEvery/4, o.w.opts.ChangeEvery*2), next)
 	}
 	o.w.loop.After(o.w.opts.ChangeEvery, next)

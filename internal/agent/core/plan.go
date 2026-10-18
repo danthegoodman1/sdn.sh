@@ -70,9 +70,14 @@ func (c *Core) plan(now time.Time, st *nsState, i *iface) []kernel.Op {
 	case configuring, ready:
 		return c.planReconcile(now, st, i)
 	}
-	// Delete the device before the namespace: a process holding the
-	// namespace would keep the device, and its host-side socket, alive.
+	// Remove the egress link first: its host filter outlives the
+	// namespace otherwise. Then the device before the namespace: a process
+	// holding the namespace would keep the device, and its host-side
+	// socket, alive.
 	var ops []kernel.Op
+	if st.egress != nil && st.exists {
+		ops = append(ops, kernel.Op{Kind: kernel.SetEgress, Namespace: st.name})
+	}
 	if st.device {
 		ops = append(ops, kernel.Op{Kind: kernel.DeleteDevice, Namespace: st.name, Device: c.cfg.Device})
 	}
@@ -138,6 +143,9 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 		l := tgt.link
 		ops = append(ops, kernel.Op{Kind: kernel.ConfigureLink, Namespace: st.name, Device: c.cfg.Device, Link: &l})
 	}
+	if want := egressFor(x, i.port); !want.Equal(st.egress) {
+		ops = append(ops, kernel.Op{Kind: kernel.SetEgress, Namespace: st.name, Egress: want})
+	}
 	var adds []kernel.PeerUpdate
 	want := map[model.Key]bool{}
 	for _, tp := range tgt.peers {
@@ -195,6 +203,18 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 			kernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: flush})
 	}
 	return ops
+}
+
+// egressFor is a live interface's egress grant, or nil.
+func egressFor(x *api.Interface, port uint16) *kernel.EgressConfig {
+	if x.State != api.Live || len(x.Egress) == 0 {
+		return nil
+	}
+	e := &kernel.EgressConfig{Index: port}
+	for _, r := range x.Egress {
+		e.Rules = append(e.Rules, kernel.EgressRule{Proto: r.Proto, Ports: r.Ports})
+	}
+	return e
 }
 
 // settled runs when a namespace needs no operations: whatever phase was
@@ -274,7 +294,7 @@ func (c *Core) BatchDone(now time.Time, namespace string, id uint64, done int, e
 				}
 			}
 		}
-	case kernel.SetPeers, kernel.ConfigureLink, kernel.DeleteDevice:
+	case kernel.SetPeers, kernel.ConfigureLink, kernel.DeleteDevice, kernel.SetEgress:
 		// A partial failure leaves the device in an unknown state; look
 		// before planning again.
 		st.observe = true
@@ -311,7 +331,9 @@ func (c *Core) believe(st *nsState, op kernel.Op) {
 		st.device = false
 		st.peers = map[model.Key]kernel.Peer{}
 	case kernel.DeleteNamespace:
-		st.exists, st.device = false, false
+		st.exists, st.device, st.egress = false, false, nil
+	case kernel.SetEgress:
+		st.egress = op.Egress.Clone()
 	case kernel.ConfigureLink:
 		l := *op.Link
 		st.link = &l
@@ -361,7 +383,7 @@ func (c *Core) Observed(now time.Time, ns kernel.Namespace, err error) {
 	st.observe = false
 	st.dirty = true
 	if errors.Is(err, kernel.ErrNoNamespace) {
-		st.exists, st.device = false, false
+		st.exists, st.device, st.egress = false, false, nil
 		st.peers = map[model.Key]kernel.Peer{}
 		st.link, st.rules = nil, nil
 		return
@@ -372,6 +394,7 @@ func (c *Core) Observed(now time.Time, ns kernel.Namespace, err error) {
 		return
 	}
 	st.exists = true
+	st.egress = ns.Egress.Clone()
 	dev, hasDev := findDevice(ns, c.cfg.Device)
 	st.device = hasDev
 	st.peers = map[model.Key]kernel.Peer{}

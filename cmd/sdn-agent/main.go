@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
@@ -22,6 +23,7 @@ import (
 	"sdn.sh/internal/agent/daemon"
 	"sdn.sh/internal/agent/journal"
 	"sdn.sh/internal/agent/localapi"
+	"sdn.sh/internal/agent/resolver"
 	"sdn.sh/internal/agent/underlay"
 	"sdn.sh/internal/api"
 	"sdn.sh/internal/cpclient"
@@ -46,6 +48,11 @@ func run() error {
 	socket := flag.String("socket", "/run/sdn/agent.sock", "local API socket")
 	telemetryAddr := flag.String("telemetry", ":9091", "metrics, health and pprof address")
 	probeAddr := flag.String("probe-addr", ":0", "address relay probes are sent from")
+	serveDNS := flag.Bool("resolver", true, "serve each workload's stub resolver on 127.0.0.53")
+	egress := flag.Bool("egress", true, "serve internet egress grants: turns on IPv4 forwarding and installs the host's egress filter")
+	var blocked prefixList
+	flag.Var(&blocked, "egress-block", "a prefix egress links never reach, beyond the defaults and the host's own; repeatable")
+	upstream := flag.String("upstream-resolver", "", "resolver for names outside every network (default: the first nameserver in /etc/resolv.conf)")
 	logLevel := flag.String("log-level", "info", "debug, info, warn or error")
 	logFormat := flag.String("log-format", "", "json or console (default: console on a terminal)")
 	portLo := flag.Uint("port-lo", uint(cfg.Core.PortLo), "lowest listen port a device binds")
@@ -104,9 +111,42 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if *egress {
+		ipv6, err := linux.EnableForwarding()
+		if err != nil {
+			return fmt.Errorf("enabling forwarding for egress: %w", err)
+		}
+		kern.SetEgressIPv6(ipv6)
+		if !ipv6 {
+			log.Warn().Msg("the host does not forward IPv6; egress grants reach the IPv4 internet alone")
+		}
+		own, err := hostPrefixes()
+		if err != nil {
+			return err
+		}
+		blocked = append(blocked, own...)
+		if err := kern.EnsureEgress(blocked); err != nil {
+			return fmt.Errorf("installing the egress filter: %w", err)
+		}
+	}
 	reg := telemetry.NewRegistry()
 	core := agentcore.New(cfg.Core, rand.Reader)
 	d := daemon.New(cfg, core, kern, cp, j, raw, prober, daemon.NewMetrics(reg), log)
+	if *egress {
+		d.Egress, d.EgressBase = kern, blocked
+	}
+	if *serveDNS {
+		up, err := resolver.Upstream("/etc/resolv.conf")
+		if *upstream != "" {
+			up, err = netip.ParseAddrPort(*upstream)
+		}
+		if err != nil {
+			log.Warn().Err(err).Msg("no upstream resolver; names outside every network fail")
+		}
+		res := resolver.New(up, log, reg)
+		defer res.Close()
+		d.Resolver = res
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -140,6 +180,38 @@ func run() error {
 	case err := <-errs:
 		return err
 	}
+}
+
+type prefixList []netip.Prefix
+
+func (p *prefixList) String() string { return fmt.Sprint(*p) }
+
+func (p *prefixList) Set(s string) error {
+	v, err := netip.ParsePrefix(s)
+	if err != nil {
+		return err
+	}
+	*p = append(*p, v.Masked())
+	return nil
+}
+
+// hostPrefixes lists the prefixes of the host's own addresses: the
+// underlay it sits on, which egress links must never reach.
+func hostPrefixes() ([]netip.Prefix, error) {
+	addrs, err := netlink.AddrList(nil, netlink.FAMILY_ALL)
+	if err != nil {
+		return nil, err
+	}
+	var out []netip.Prefix
+	for _, a := range addrs {
+		ip, ok := netip.AddrFromSlice(a.IP)
+		if !ok {
+			continue
+		}
+		bits, _ := a.Mask.Size()
+		out = append(out, netip.PrefixFrom(ip.Unmap(), bits).Masked())
+	}
+	return out, nil
 }
 
 func dirOf(path string) string {

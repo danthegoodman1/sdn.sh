@@ -117,7 +117,14 @@ type Interface struct {
 	Reach []Reach `json:"reach,omitempty"`
 	// Inbound lists the flows this interface accepts.
 	Inbound []Inbound `json:"inbound,omitempty"`
-	Egress  bool      `json:"egress,omitempty"`
+	// Egress lists the flows this interface may open to the internet.
+	Egress []Egress `json:"egress,omitempty"`
+}
+
+// Egress permits flows to the internet.
+type Egress struct {
+	Proto model.Proto     `json:"proto"`
+	Ports model.PortRange `json:"ports"`
 }
 
 // Addrs returns the interface's addresses, IPv6 first.

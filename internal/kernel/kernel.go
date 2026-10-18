@@ -53,6 +53,8 @@ type Namespace struct {
 	// Ref identifies a namespace without a name, for Reap.
 	Ref     string   `json:"ref,omitempty"`
 	Devices []Device `json:"devices,omitempty"`
+	// Egress is the namespace's link to the host's egress NAT, if any.
+	Egress *EgressConfig `json:"egress,omitempty"`
 }
 
 // Device is a WireGuard device as observed.
@@ -86,6 +88,7 @@ const (
 	Flush           OpKind = "flush"
 	Sweep           OpKind = "sweep"
 	DeleteDevice    OpKind = "delete_device"
+	SetEgress       OpKind = "set_egress"
 	Reap            OpKind = "reap"
 )
 
@@ -113,6 +116,9 @@ type Op struct {
 	// that Addrs does not keep, and leaves flows elsewhere, such as to the
 	// internet, alone.
 	Prefixes []netip.Prefix `json:"prefixes,omitempty"`
+	// Egress configures SetEgress: the namespace's link to the host's
+	// egress NAT and the flows it may open, or nil to remove the link.
+	Egress *EgressConfig `json:"egress,omitempty"`
 	// Ref names the namespace Reap clears.
 	Ref string `json:"ref,omitempty"`
 	// AliasPrefix limits Reap to devices this agent made.
@@ -158,6 +164,38 @@ type LinkConfig struct {
 // Equal reports whether two configurations match.
 func (l *LinkConfig) Equal(o *LinkConfig) bool {
 	return l != nil && o != nil && slices.Equal(l.Addrs, o.Addrs) && slices.Equal(l.Routes, o.Routes) && l.MTU == o.MTU
+}
+
+// EgressConfig is an interface's internet egress grant: a veth pair to
+// the host, whose host side the host's egress filter and NAT apply to.
+type EgressConfig struct {
+	// Index names the link's host side and picks its addresses. The
+	// device's listen port serves, being unique on the host.
+	Index uint16 `json:"index"`
+	// Rules are the flows the workload may open, sorted.
+	Rules []EgressRule `json:"rules"`
+}
+
+// EgressRule permits flows of one protocol to a port range.
+type EgressRule struct {
+	Proto model.Proto     `json:"proto"`
+	Ports model.PortRange `json:"ports"`
+}
+
+// Equal reports whether two grants match; nil is no grant.
+func (e *EgressConfig) Equal(o *EgressConfig) bool {
+	if e == nil || o == nil {
+		return e == nil && o == nil
+	}
+	return e.Index == o.Index && slices.Equal(e.Rules, o.Rules)
+}
+
+// Clone copies a grant.
+func (e *EgressConfig) Clone() *EgressConfig {
+	if e == nil {
+		return nil
+	}
+	return &EgressConfig{Index: e.Index, Rules: slices.Clone(e.Rules)}
 }
 
 // PeerUpdate changes one peer within a SetPeers call. An update replaces

@@ -232,6 +232,8 @@ type nsState struct {
 	exists bool
 	device bool
 	link   *kernel.LinkConfig
+	// egress is the namespace's egress link as installed, nil for none.
+	egress *kernel.EgressConfig
 	peers  map[model.Key]kernel.Peer
 	rules  *nft.Ruleset
 	chosen map[model.Key]netip.AddrPort

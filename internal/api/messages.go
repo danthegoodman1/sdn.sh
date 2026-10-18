@@ -255,6 +255,11 @@ type LocalInterface struct {
 	Addr4     netip.Addr        `json:"addr4,omitzero"`
 	PublicKey model.Key         `json:"public_key"`
 	Ready     bool              `json:"ready"`
+	// Resolver is the stub resolver's address inside the namespace, and
+	// Search the domain its names resolve under: a workload's resolv.conf
+	// names both.
+	Resolver netip.Addr `json:"resolver,omitzero"`
+	Search   string     `json:"search,omitempty"`
 }
 
 // LocalDetach asks the agent to tear an interface down.

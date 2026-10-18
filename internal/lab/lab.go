@@ -76,8 +76,11 @@ type Lab struct {
 // lockPath is the lock every lab holds while it exists.
 const lockPath = "/run/lock/sdn-lab.lock"
 
-// Underlay addressing.
+// Underlay addressing. Internet4 and Internet6 stand for the internet: the
+// underlay namespace answers them.
 var (
+	Internet4  = netip.MustParseAddr("203.0.113.1")
+	Internet6  = netip.MustParseAddr("2001:db8::1")
 	underlay6  = netip.MustParsePrefix("fd13:213::/64")
 	cpLink     = netip.MustParsePrefix("10.213.255.0/30")
 	cpRoot     = netip.MustParseAddr("10.213.255.1")
@@ -189,6 +192,11 @@ func (l *Lab) underlay() error {
 		{"ip", "-n", l.net, "addr", "add", cpUnderlay.String() + "/30", "dev", cpLinkNS},
 		{"ip", "-n", l.net, "link", "set", cpLinkNS, "up"},
 		{"ip", "route", "add", "10.213.0.0/24", "via", cpUnderlay.String(), "dev", cpLinkRoot},
+		// The internet, and a metadata service, as seen from the hosts.
+		{"ip", "-n", l.net, "addr", "add", Internet4.String() + "/32", "dev", "lo"},
+		{"ip", "-n", l.net, "addr", "add", Internet6.String() + "/128", "dev", "lo"},
+		{"ip", "-n", l.net, "addr", "add", "169.254.169.254/32", "dev", "lo"},
+		{"ip", "-n", l.net, "addr", "add", "fd00:ec2::254/128", "dev", "lo"},
 	}
 	for _, s := range steps {
 		if err := sh(s...); err != nil {
@@ -304,6 +312,9 @@ func (l *Lab) RestartCP() error {
 	return l.startCP()
 }
 
+// Underlay names the underlay namespace, where the internet answers.
+func (l *Lab) Underlay() string { return l.net }
+
 // CP returns the control plane's process.
 func (l *Lab) CP() *Proc { return l.cp }
 
@@ -352,6 +363,9 @@ func (l *Lab) addNode(name string) (node, error) {
 		{"ip", "-n", n.NS, "addr", "add", n.Addr6.String() + "/64", "dev", "eth0", "nodad"},
 		{"ip", "-n", n.NS, "link", "set", "eth0", "up"},
 		{"ip", "-n", n.NS, "route", "add", "default", "via", bridgeAddr.String()},
+		{"ip", "-n", n.NS, "-6", "route", "add", "default", "via", "fd13:213::1"},
+		// Hosts forward IPv6 as hostprep leaves them, so egress serves it.
+		{"ip", "netns", "exec", n.NS, "sysctl", "-qw", "net.ipv6.conf.all.forwarding=1"},
 	}
 	for _, s := range steps {
 		if err := sh(s...); err != nil {

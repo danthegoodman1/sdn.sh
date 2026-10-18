@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net/netip"
 	"slices"
+	"strings"
 
 	"sdn.sh/internal/api"
 	"sdn.sh/internal/model"
@@ -135,7 +136,7 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 			for _, r := range s.Rules {
 				switch {
 				case r.From == x.Service && r.To == "":
-					iface.Egress = true
+					iface.Egress = append(iface.Egress, api.Egress{Proto: r.Proto, Ports: r.Ports})
 				case r.From == x.Service:
 					if _, ok := services[r.To]; ok {
 						iface.Reach = append(iface.Reach, api.Reach{Service: r.To, Proto: r.Proto, Ports: r.Ports})
@@ -150,6 +151,8 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 			iface.Reach = slices.Compact(iface.Reach)
 			slices.SortFunc(iface.Inbound, compareInbound)
 			iface.Inbound = slices.Compact(iface.Inbound)
+			slices.SortFunc(iface.Egress, compareEgress)
+			iface.Egress = slices.Compact(iface.Egress)
 		}
 		ns.Interfaces = append(ns.Interfaces, iface)
 		out[x.Host] = ns
@@ -268,4 +271,14 @@ func Relay(r store.Relay, edges []store.Edge, generation uint64) api.RelayState 
 	}
 	slices.SortFunc(st.Ports, func(a, b api.RelayPort) int { return a.Local.Compare(b.Local) })
 	return st
+}
+
+func compareEgress(a, b api.Egress) int {
+	if c := strings.Compare(string(a.Proto), string(b.Proto)); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(a.Ports.Lo, b.Ports.Lo); c != 0 {
+		return c
+	}
+	return cmp.Compare(a.Ports.Hi, b.Ports.Hi)
 }

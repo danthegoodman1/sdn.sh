@@ -40,6 +40,10 @@ type Kernel struct {
 
 	mu      sync.Mutex
 	handles map[string]*nsHandles
+
+	// egressMu serializes changes to the host's egress table and links.
+	egressMu sync.Mutex
+	egress6  bool
 }
 
 // nsHandles are the sockets held open inside one namespace. mu serializes
@@ -190,6 +194,8 @@ func (k *Kernel) Run(op kernel.Op) (kernel.Result, error) {
 		return kernel.Result{}, setPeers(h, op.Device, op.Peers)
 	case kernel.ApplyRules:
 		return kernel.Result{}, applyTransaction(h.nft, *op.Rules)
+	case kernel.SetEgress:
+		return kernel.Result{}, k.setEgress(h, op.Egress)
 	case kernel.Flush:
 		return flush(h, func(a netip.Addr) bool { return slices.Contains(op.Addrs, a) })
 	case kernel.Sweep:
@@ -448,7 +454,11 @@ func (k *Kernel) Namespace(name, aliasPrefix string) (kernel.Namespace, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	devs, err := observe(h, "")
-	return kernel.Namespace{Name: name, Devices: devs}, err
+	if err != nil {
+		return kernel.Namespace{Name: name}, err
+	}
+	eg, err := k.observeEgress(h)
+	return kernel.Namespace{Name: name, Devices: devs, Egress: eg}, err
 }
 
 // observeHeld lists this agent's devices in a namespace a process holds,

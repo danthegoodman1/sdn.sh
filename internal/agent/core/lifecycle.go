@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"sdn.sh/internal/api"
+	"sdn.sh/internal/dns"
 	"sdn.sh/internal/kernel"
 	"sdn.sh/internal/model"
 )
@@ -48,6 +49,7 @@ func (c *Core) Start(now time.Time, journal []JournalEntry, snap kernel.Snapshot
 		observed, ok := byName[e.Namespace]
 		delete(byName, e.Namespace)
 		st.exists = ok
+		st.egress = observed.Egress.Clone()
 		dev, hasDev := findDevice(observed, c.cfg.Device)
 		if e.Detaching || !hasDev || !dev.HasKey || dev.PublicKey != e.PublicKey {
 			// A journaled interface whose device is gone lost its key with
@@ -65,6 +67,7 @@ func (c *Core) Start(now time.Time, journal []JournalEntry, snap kernel.Snapshot
 		c.ifaces[id] = i
 		st := newNS(name, id)
 		st.exists = true
+		st.egress = byName[name].Egress.Clone()
 		_, st.device = findDevice(byName[name], c.cfg.Device)
 		c.ns[name] = st
 	}
@@ -366,8 +369,10 @@ func (c *Core) describe(i *iface) api.LocalInterface {
 		Interface: i.id, Name: i.name, Network: i.network, Service: i.service, Namespace: i.ns,
 		PublicKey: i.pub, Ready: i.phase == ready, Addr6: i.addr6, Addr4: i.addr4,
 	}
-	if _, x, ok := c.desired.Interface(i.id); ok {
+	if n, x, ok := c.desired.Interface(i.id); ok {
 		li.Addr6, li.Addr4 = x.Addr6, x.Addr4
+		li.Search = n.Domain()
+		li.Resolver = dns.ListenAddr().Addr()
 	}
 	return li
 }

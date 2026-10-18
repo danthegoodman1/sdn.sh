@@ -217,11 +217,11 @@ The agent installs, per service the client may reach:
 
 ```text
 table inet sdn {
-  map db_slots { typeof numgen inc mod 1024 : ip daddr; }
+  map db_slots { typeof numgen random mod 1024 : ip daddr; }
   chain services {
     type nat hook output priority dstnat;
     ip daddr 10.42.0.7 tcp dport 5432 \
-      dnat to numgen inc mod 1024 map @db_slots
+      dnat to numgen random mod 1024 map @db_slots
   }
 }
 ```
@@ -238,7 +238,7 @@ The slot count is fixed for the life of the service, which is what makes a backe
 
 A namespace holding a forwarding workload, such as a microVM behind a TAP, gets the same rules in the `prerouting` hook.
 
-- **Selection is per connection.** Conntrack pins the first packet's choice for the life of the flow, for TCP and UDP alike. `numgen inc` spreads connections evenly and has no affinity to disturb. A map declared `typeof jhash ip saddr mod 1024 : ip daddr` keys selection to the client instead, which preserves affinity across reconnects and, because the slot table absorbs the change, moves only a departing backend's share — consistent-hash behavior, but only in the `jhash` form. Affinity holds within one family, since a client's IPv4 and IPv6 addresses hash to different slots. `numgen` is the default because `nft list` segfaults while printing a `jhash`-keyed map on nftables 1.0.9: the ruleset works and the inspection tool crashes.
+- **Selection is per connection.** Conntrack pins the first packet's choice for the life of the flow, for TCP and UDP alike. `numgen random` draws each connection's slot independently (`nft_ng_random_gen`, `net/netfilter/nft_numgen.c`), so a backend's share converges on its slot count, and it has no affinity to disturb. `numgen inc` reads as round-robin but concentrates load: each rule owns its counter and starts it at slot 0 (`nft_ng_inc_init`), so every client namespace begins on the same backend, and short-lived clients that open a few connections never leave it. On nftables 1.0.9 and Linux 6.10, twenty fresh namespaces opening one connection each all reached one backend under `inc` and split 8 and 12 under `random`. A map declared `typeof jhash ip saddr mod 1024 : ip daddr` keys selection to the client instead, which preserves affinity across reconnects and, because the slot table absorbs the change, moves only a departing backend's share — consistent-hash behavior, but only in the `jhash` form. Affinity holds within one family, since a client's IPv4 and IPv6 addresses hash to different slots. `numgen random` is the default because `nft list` segfaults while printing a `jhash`-keyed map on nftables 1.0.9: the ruleset works and the inspection tool crashes.
 - **Replies need no reverse lookup.** Conntrack untranslates them, so the application sees responses from the service address it dialed.
 - **The server never learns the service address.** It replies from its own interface address, which is also its identity to the policy engine. Incoming and outgoing identity are the same thing.
 - **Names resolve to service addresses** through the stub resolver on loopback, answered from pushed state. It answers AAAA for every service and A only where both the client's service and the target have IPv4, so no client receives an address it cannot reach. Because the agent serves it, an agent restart interrupts name resolution for every workload on the host. Persisting the resolver's state shortens that outage but does not remove it, since the listening sockets close with the process: the file descriptors are handed across restarts instead, through a descriptor store.

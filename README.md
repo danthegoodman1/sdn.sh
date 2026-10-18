@@ -114,10 +114,10 @@ Because relays carry ciphertext, nothing in the middle can read an inner destina
 
 ```text
 table inet sdn {
-  map db_slots { typeof numgen inc mod 1024 : ip daddr; }
+  map db_slots { typeof numgen random mod 1024 : ip daddr; }
   chain services {
     type nat hook output priority dstnat;
-    ip daddr 10.42.0.7 tcp dport 5432 dnat to numgen inc mod 1024 map @db_slots
+    ip daddr 10.42.0.7 tcp dport 5432 dnat to numgen random mod 1024 map @db_slots
   }
 }
 ```

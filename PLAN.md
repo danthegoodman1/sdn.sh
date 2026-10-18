@@ -38,7 +38,7 @@ The **device pool** has left the plan rather than being deferred: creating a dev
 - **Measure the plain-TCP underlay ceiling in the same run.** Without it a throughput figure is meaningless: a path that reads as a design limit is often 95% of the network.
 - **The relay-against-gateway comparison is the thesis regression test.** Both roles on the same machine against the same hosts, or it compares hardware rather than architectures.
 - **Purge stray state between runs.** `ip netns del` only removes the name: a namespace a process still holds keeps its WireGuard device keepaliving and will claim a relay direction. One orphaned `iperf3` silently contaminated three consecutive runs.
-- **`nft list` segfaults on a `jhash`-keyed map on nftables 1.0.9.** The ruleset works; the inspection tool crashes. Use `numgen` until a newer `nft` is the floor.
+- **`nft list` segfaults on a `jhash`-keyed map on nftables 1.0.9.** The ruleset works; the inspection tool crashes. Use `numgen random` until a newer `nft` is the floor.
 
 ## Phase 1: Host agent spike, attach and detach from static config
 
@@ -173,7 +173,7 @@ Goal:
 Services as the user-facing object, with a change that lands in one step per client and established connections that drain rather than break.
 
 Scope:
-- The fixed slot table, `typeof numgen inc mod 1024 : ip daddr`, every slot filled, weight by slot count. An IPv4-capable service gets a second map in the other family, with every slot assigned to the same backend and both maps changed in one transaction. **Measuring the slot-map rewrite across many namespaces belongs here**, since the convergence gate depends on it; nftables commits take a per-namespace lock, so these can run in parallel even though peer work, which is on RTNL, cannot.
+- The fixed slot table, `typeof numgen random mod 1024 : ip daddr`, every slot filled, weight by slot count. An IPv4-capable service gets a second map in the other family, with every slot assigned to the same backend and both maps changed in one transaction. **Measuring the slot-map rewrite across many namespaces belongs here**, since the convergence gate depends on it; nftables commits take a per-namespace lock, so these can run in parallel even though peer work, which is on RTNL, cannot.
 - Backend changes as element updates in one transaction, never a rule rebuild.
 - Peer installation ordered around that transaction; revocation skipping the grace period.
 - A service with no backends installing a reject rule rather than blackholing.
@@ -203,6 +203,7 @@ Status ledger:
 | --- | --- | --- | --- |
 | Complete | Decision | Slot map declaration form, `typeof` on both sides | Verified on nftables 1.0.9; `: ipv4_addr` and `type integer` both rejected. |
 | Complete | Decision | `numgen` ships first; `jhash` deferred | `nft list` segfaults printing a `jhash`-keyed map on 1.0.9. |
+| Complete | Decision | `numgen random`, not `numgen inc` | `nft_ng_inc_init` starts each rule's counter at slot 0, so every client namespace begins on the same backend. By traffic on nftables 1.0.9 and Linux 6.10: twenty fresh namespaces with one connection each all reached one backend under `inc` and split 8 and 12 under `random`. Both forms load, and `nft list` prints a `random`-keyed map. |
 | Complete | Doc | Convergence batch cost, one peer into each of H namespaces | `cmd/hostbench`; 111–126µs per namespace on c6i.xlarge / Linux 7.0, H=40 in 5ms, with fresh keys derived outside the timer and no flush inside it. The KVM figures (235–252µs) derived keys inside the timer and overstate the kernel cost. |
 | Incomplete | Decision | IPv6 slot map and `dnat ip6 to` forms | Missing: verification on nftables 1.0.9; every confirmed form is IPv4. |
 | Incomplete | Scope | Fixed slot table, every slot filled, one map per family | Missing: implementation, the partial-map test and the same-backend test. |

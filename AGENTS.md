@@ -21,6 +21,7 @@
 - **Budget a detach like an attach.** A single-peer removal waits an expedited grace period under RTNL: 60µs on an 8-vCPU KVM guest, where it was a quarter of an addition, and 90–100µs on a c6i.xlarge with Linux 7.0, where it matched one. Each removed peer pays its own grace period even when several share a call; only a full flush (`ReplacePeers`) pays one for all, so never quote the flush figure as a batched removal. Expedited grace periods interrupt every non-idle CPU, so removal churn costs the whole host.
 - **Hold one netlink socket per namespace, opened inside it.** It keeps configuring its device from outside, so an attach pays one namespace switch and an update pays none.
 - **Every slot in a service's map carries an entry.** A missed lookup leaves the packet addressed to the service address, which goes nowhere. A service with no backends installs a reject rule instead.
+- **Select slots with `numgen random`, never `numgen inc`.** Each rule owns its counter and starts it at slot 0 (`nft_ng_inc_init`), so every client namespace begins on the same backend, and short-lived clients that open a few connections never leave it.
 - **Order peer installation around the nftables transaction.** Add the peer before its slots, remove its slots before the peer — except a revocation, which removes both at once with no grace period. Removing a peer also flushes the conntrack entries translated to its address **and destroys the sockets addressed to it** (`SOCK_DESTROY`), because flushing conntrack leaves the socket and a later write would reach whoever holds the address next.
 - **Check every netlink call.** Discarding errors once turned three failures into three published measurements. The same mistake in the agent produces an interface that looks attached and is not.
 
@@ -38,7 +39,7 @@
 - **The relay-against-gateway comparison is the thesis regression test**, and the CPU-per-byte column is the part that holds. Both roles on the same machine against the same hosts.
 - **Purge stray state between runs.** `ip netns del` only removes the name: a namespace a process still holds keeps its WireGuard device keepaliving and will claim a relay direction. Check `/proc/*/ns/net` for namespaces outside the host's. One orphaned `iperf3` contaminated three consecutive runs.
 - **WireGuard initiates nothing without a reason.** No traffic and no `persistent-keepalive` means no handshake, so a test that waits for one will wait forever. A socket also appears only once the device is up, since it is created in `ndo_open`.
-- **`nft list` segfaults on a `jhash`-keyed map on nftables 1.0.9.** The ruleset works; the inspection tool crashes. Use `numgen` until a newer `nft` is the floor.
+- **`nft list` segfaults on a `jhash`-keyed map on nftables 1.0.9.** The ruleset works; the inspection tool crashes. Use `numgen random` until a newer `nft` is the floor.
 
 ## Commands
 

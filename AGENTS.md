@@ -15,8 +15,10 @@
 - **Roaming owns the peer endpoint.** Any authenticated packet from a new source rewrites it, and the relay path depends on that. A reconciler that treats a roamed endpoint as drift will fight the data plane.
 - **The agent mints keys and keeps them.** Private keys never leave the host; the control plane sees public keys only.
 - **Teardown follows the workload, not the control plane.** Hold configuration through an outage of any length — revocation runs through peers, so it costs the fence nothing.
+- **A new direction's first packets race its registrations.** A relay binds a port only once its own poll returns, so the agent resends a fresh direction's registration from 50ms, and the relay holds a data packet up to 2s for the registration that admits it. Dropping either costs WireGuard a 5-second retry.
+- **Nothing sends toward a co-located peer until its device holds the reverse peer.** A device drops an initiation from a key it lacks, and WireGuard waits 5s to retry. Keepalive, which sends when armed, and a client's slots for a co-located backend both wait for the other namespace's batch.
 - **Set `persistent-keepalive` per path.** None on relay peers once the registration datagram ships, exactly one side of a co-located pair, both sides on a direct path. A two-peer test on one host arms it on one side only. Why: SPEC.md "Paths".
-- **Peer work runs under RTNL: one lane per host, ~10–12k operations a second, and it will not grow with cores.** `wg_set_device` takes `rtnl_lock()` before the per-device lock and holds both for the whole call, and reads take the same locks. So peer changes serialize against each other and against device, address, route and link changes. Neighbour peer additions parallelize only across hosts.
+- **Peer work runs under RTNL: one lane per host, ~10–12k operations a second on a 4-vCPU cloud host and ~19k on a 24-thread desktop, and it will not grow with cores.** `wg_set_device` takes `rtnl_lock()` before the per-device lock and holds both for the whole call, and reads take the same locks. So peer changes serialize against each other and against device, address, route and link changes. Neighbour peer additions parallelize only across hosts.
 - **A per-call peer cap is not a lever.** `wgctrl` already splits over 32 peers into separate messages, so RTNL is released between chunks and a cap above 32 never fires. The tail comes from a tight loop winning an unfair mutex: yield between chunks or bound concurrent writers. Never bypass `wgctrl` to pack one huge message — that holds RTNL for all of it.
 - **Budget a detach like an attach.** A single-peer removal waits an expedited grace period under RTNL: 60µs on an 8-vCPU KVM guest, where it was a quarter of an addition, and 90–100µs on a c6i.xlarge with Linux 7.0, where it matched one. Each removed peer pays its own grace period even when several share a call; only a full flush (`ReplacePeers`) pays one for all, so never quote the flush figure as a batched removal. Expedited grace periods interrupt every non-idle CPU, so removal churn costs the whole host.
 - **Hold one netlink socket per namespace, opened inside it.** It keeps configuring its device from outside, so an attach pays one namespace switch and an update pays none.
@@ -40,16 +42,25 @@
 - **Purge stray state between runs.** `ip netns del` only removes the name: a namespace a process still holds keeps its WireGuard device keepaliving and will claim a relay direction. Check `/proc/*/ns/net` for namespaces outside the host's. One orphaned `iperf3` contaminated three consecutive runs.
 - **WireGuard initiates nothing without a reason.** No traffic and no `persistent-keepalive` means no handshake, so a test that waits for one will wait forever. A socket also appears only once the device is up, since it is created in `ndo_open`.
 - **`nft list` segfaults on a `jhash`-keyed map on nftables 1.0.9.** The ruleset works; the inspection tool crashes. Use `numgen random` until a newer `nft` is the floor.
+- **Judge an agent decision when it is planned.** A simulator property that checks an operation when it lands flags a correct plan that a concurrent policy change overtook. Check the batch as the agent emits it, against the kernel as it stands then.
+- **The lab's hosts share one kernel.** `sdn-lab --env local` and `e2e` run every host on one RTNL lock and the memory store under one mutex, so their latencies show mechanisms and their throughput says nothing about a fleet.
 
 ## Commands
 
 ```console
-go build ./... && go vet ./...
+go build ./... && go vet ./... && go test ./...
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" ./...   # from a non-Linux machine
+
+go run ./cmd/sdn-sim --seeds 10000 1    # simulator sweep; --trace SEED replays one with its last events
+scripts/ci all                          # every CI step; kernel and e2e run as root, postgres when SDN_TEST_POSTGRES is set
+scripts/e2e -test.run TestTwoHosts      # the daemons in namespaces; SDN_LAB_KEEP=DIR keeps a failed test's logs
+scripts/lab run --env local --plan all  # benchmark plans on this machine; --env aws needs deploy/aws
+go run ./scripts/mutants -root          # plant every known bug; -only ID runs one
+SDN_TEST_POSTGRES=postgres://... go test ./internal/store/... ./internal/cp/...   # the store suite on Postgres
 
 sudo ./hostbench                        # kernel costs, device placement, netdev and peer concurrency
                                         # names everything hb-*, and sweeps only that prefix first
-./relay 7001:7002                       # one port pair per edge; WORKERS and BATCH tune it
+./relay 7001:7002                       # the prototype relay; one port pair per edge
 sysctl -w net.core.rmem_max=268435456   # on a relay host, or SetReadBuffer is capped
 nstat -az | grep -i UdpRcvbufErrors     # a climbing count means the relay is dropping
 ls -l /proc/*/ns/net                    # find namespaces a process is holding open

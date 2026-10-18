@@ -2,9 +2,9 @@
 
 Per-workload network identity for short-lived workloads, across hosts in different places, with nothing on the path between two workloads able to read a packet.
 
-Each workload gets an ordinary interface and ordinary sockets, its own key, and its own address for as long as it runs. Encryption happens at both edges in kernel WireGuard; the relays between hosts forward ciphertext and hold no key.
+Each workload gets an ordinary interface and ordinary sockets, its own key, and its own address for as long as it runs. Encryption happens at both edges in kernel WireGuard; the relays between hosts forward ciphertext and hold no key that can read or forge it.
 
-**Status:** design, with the kernel mechanics measured. [SPEC.md](SPEC.md) is the design and holds every measurement, [PLAN.md](PLAN.md) the phased build, [AGENTS.md](AGENTS.md) the working rules.
+**Status:** built — control plane, host agent, relay and CLI — and tested end to end on one machine, with the fleet benchmarks ready to run on EC2. [SPEC.md](SPEC.md) is the design and holds every measurement, [PLAN.md](PLAN.md) the phased build and what each phase has proven, [AGENTS.md](AGENTS.md) the working rules.
 
 ## Contents
 
@@ -102,7 +102,7 @@ Creating into the namespace rather than creating and moving matters because the 
 
 ### The relay
 
-One port per **directed** policy edge, so the port a packet arrives on names its sender. Each direction learns one endpoint from the packets arriving on its own port, and a packet is forwarded to the peer direction's learned endpoint, sent from the peer direction's port — which is exactly where the receiver addresses the sender, so WireGuard's roaming keeps both sides pointing at the relay.
+One port per **directed** policy edge, so the port a packet arrives on names its sender. Each direction's endpoint is set only by an authenticated registration datagram, which the agent sends from the interface's own listen port, so it also holds the NAT mapping WireGuard uses. A data packet from the registered endpoint is forwarded to the peer direction's endpoint, sent from the peer direction's port — which is exactly where the receiver addresses the sender, so WireGuard's roaming keeps both sides pointing at the relay. A data packet never moves an endpoint.
 
 Directed ports exist so the relay never has to recognise a sender by address. A host behind NAT has no outbound address the control plane can know in advance, many have none that is stable, and two interfaces can share one NAT address — which an address-based scheme cannot disambiguate at all.
 
@@ -155,7 +155,8 @@ Every figure, its methodology, and the substrate that produced it live in [SPEC.
 ## Known limits
 
 - **Not a lock.** Address exclusivity and data exclusivity are different problems. A service needing a single writer fences in its storage layer.
-- **An endpoint change needs authenticated registration.** The relay holds a per-direction secret so it can verify the agent's registration datagram; it holds nothing that decrypts or forges traffic. Verifying a WireGuard handshake's `mac1` instead was considered and rejected, because a captured handshake replays from any address and at any relay.
+- **A relay is trusted for availability.** It holds a per-direction secret to verify the agent's registration datagram, and nothing that decrypts or forges traffic, but it can still drop or misdeliver. Verifying a WireGuard handshake's `mac1` instead was considered and rejected, because a captured handshake replays from any address and at any relay.
+- **One control plane orders every change.** Every write takes the next revision from one row, so attaches, releases and policy changes serialize across networks. Shorter transactions raise that ceiling; removing it is open.
 - **The relay's socket model caps its edge count.** One socket per directed port puts a userspace process far below the port space. `sk_lookup` fixes only the receive side, so the real answer is XDP or TC.
 - **A partition keeps an island alive.** A partition isolating a revoked interface together with some of its clients serves stale state until it reconnects.
 - **No connection migrates.** A workload that moves breaks its established connections and clients reconnect.
@@ -167,17 +168,26 @@ Every figure, its methodology, and the substrate that produced it live in [SPEC.
 
 ## Development
 
-[SPEC.md](SPEC.md) is the design contract, [PLAN.md](PLAN.md) the phased build plan, [AGENTS.md](AGENTS.md) the working rules.
+[SPEC.md](SPEC.md) is the design contract, [PLAN.md](PLAN.md) the phased build plan, [AGENTS.md](AGENTS.md) the working rules, and [deploy/README.md](deploy/README.md) the benchmark fleet.
 
-Two programs exist so far:
-
-- **`cmd/relay`** — the ciphertext relay. One port per directed policy edge, endpoints learned from traffic, reads and writes batched through `recvmmsg`/`sendmmsg` with `SO_REUSEPORT` sockets; `WORKERS` and `BATCH` tune it. Takes edges as `A:B` arguments, one pair per edge. Batching is not optional: a per-packet syscall loop overflowed its receive queue and lost to the gateway it is meant to beat.
-- **`cmd/hostbench`** — the kernel-cost harness behind every per-operation figure in the spec, covering device placement, netdev concurrency, and peer installation and removal. Runs as root on Linux, names everything it creates `hb-*`, and sweeps only that prefix before starting. Every netlink call is checked and every step asserts its post-condition, because an earlier version discarded errors and published the cost of three failures as measurements.
+| Program | What it is |
+|---|---|
+| `cmd/sdn-cp` | The control plane: networks, services, policy, leases, relays and edge ports over a transactional store, with long polls for agents and relays. `--store memory` or a Postgres URL. |
+| `cmd/sdn-agent` | The host agent: builds each workload's namespace, device, peers, nftables table, stub resolver and egress link, renews leases, registers at relays and fails over between them. |
+| `cmd/sdn-relay` | The ciphertext relay: one port per directed edge, batched reads and writes, endpoints moved only by authenticated registrations, persisted to its own disk. |
+| `cmd/sdnctl` | The CLI: operator commands against the control plane, a development machine's config, and attach and detach through the local agent. |
+| `cmd/sdn-sim` | The deterministic simulator: a seed draws a whole deployment, its faults and its workload, and replays exactly. |
+| `cmd/sdn-lab`, `cmd/sdn-bench` | The benchmark driver and its load tool, against namespaces on this machine or a fleet on EC2. |
+| `cmd/hostbench` | The kernel-cost harness behind every per-operation figure in the spec. Runs as root, names everything it creates `hb-*`, and sweeps only that prefix before starting. |
+| `cmd/relay` | The prototype relay that learned endpoints from traffic, kept for the relay-against-gateway comparison. |
 
 ```console
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" ./...
-sudo ./hostbench
-./relay 7001:7002
+go build ./... && go vet ./... && go test ./...      # unit tests, the determinism check, a simulator seed range
+go run ./cmd/sdn-sim --seeds 10000 1                # a simulator sweep
+scripts/ci all                                      # every CI step, root tests and end-to-end included
+scripts/e2e -test.run TestTwoHosts                  # the daemons in namespaces, as root
+scripts/lab run --env local --plan all              # every benchmark plan against this machine
+go run ./scripts/mutants -root                      # plant each known bug and check a test catches it
 ```
 
 Reproducing the measurements:

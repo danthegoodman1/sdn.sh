@@ -2,7 +2,7 @@
 
 Per-workload network identity for short-lived workloads, across hosts in different places, with nothing on the path between two workloads able to read a packet.
 
-A network is an isolated address space. A service is a stable name and address within it. An interface is a leased, cryptographically identified attachment that belongs to a workload rather than to the host running it. Encryption happens at both edges in kernel WireGuard; the relays between hosts forward ciphertext and hold no key.
+A network is an isolated address space. A service is a stable name and address within it. An interface is a leased, cryptographically identified attachment that belongs to a workload rather than to the host running it. Encryption happens at both edges in kernel WireGuard; the relays between hosts forward ciphertext and hold no key that can read or forge it.
 
 **In use:** you attach workloads to a service, and every workload that policy allows reaches them by the service's name.
 
@@ -72,7 +72,7 @@ A network holding no attached interface on a host costs that host nothing. Creat
 
 - **Control plane.** The only stateful component. Stores networks, services, interfaces, leases, policy, and relay assignments. It sits outside the data path: losing it freezes change and does not stop traffic.
 - **Host agent.** One per host. Mints interface keys, creates and configures kernel WireGuard devices, installs policy, serves name resolution, renews leases, and reconciles kernel state against pushed desired state.
-- **Relay.** A UDP forwarder with one port per directed policy edge. Holds no key and sees no plaintext.
+- **Relay.** A UDP forwarder with one port per directed policy edge. Holds no key that decrypts or forges traffic, and sees no plaintext.
 
 ```mermaid
 flowchart LR
@@ -104,9 +104,9 @@ Service and interface addresses come from one pool per family and are unique wit
 
 **A released address and its relay ports stay quarantined**, but for different reasons and on different clocks.
 
-An address does not need to outlast a partition. A peer that has yet to converge still holds the *old* key, and keys are not reused, so it cannot reach whoever holds the address next. The hazards are local to each host: installing a peer whose `AllowedIPs` contains an address silently moves that address away from the peer that held it, and conntrack entries translated to it outlive the peer entirely. Both are fixed by ordering — on every host, remove the old peer, flush its conntrack entries and destroy the sockets addressed to it before any new peer may claim the address — which leaves the address quarantine only needing to cover the grace period plus convergence.
+An address does not need to outlast a partition. A peer that has yet to converge still holds the *old* key, and keys are not reused, so it cannot reach whoever holds the address next. The hazards are local to each host: installing a peer whose `AllowedIPs` contains an address silently moves that address away from the peer that held it, and conntrack entries translated to it outlive the peer entirely. Both are fixed by ordering — on every host, remove the old peer, flush its conntrack entries and destroy the sockets addressed to it before any new peer may claim the address — which leaves the address quarantine only needing to cover the grace period plus convergence. It is 2 minutes against a 30-second grace period, and the control plane refuses to start with a quarantine that does not outlast the grace period. An agent that learns of an address's new owner while it still holds the previous one as a peer waits for the holder to go before installing the new owner.
 
-Relay ports do need the long quarantine, because a stale sender keeps sending to the old port whatever the control plane has done. That makes ports the scarcer pool; see [The relay](#the-relay).
+Relay ports do need the long quarantine, 5 minutes, because a stale sender keeps sending to the old port whatever the control plane has done. That makes ports the scarcer pool; see [The relay](#the-relay).
 
 A service address exists only in clients' namespaces as a translation target. It is never assigned to an interface, never announced, and never routed, so service addresses can be minted freely and cannot conflict with a workload's own configuration.
 
@@ -122,7 +122,7 @@ The host agent builds the whole data plane for a workload before the workload ex
 4. Install one peer per policy-connected interface: its public key, its endpoint, and as the only entries in `AllowedIPs`, its address in each family both interfaces have.
 5. Assign the interface's addresses, route the network's prefixes through the device, and set the MTU explicitly.
 6. Install the nftables table: service translation, policy, and MSS clamping.
-7. Open a stub resolver socket on loopback inside the namespace, served by the agent.
+7. Open a stub resolver socket on loopback inside the namespace, at `127.0.0.53:53`, served by the agent.
 8. Hand the namespace to the workload **without `CAP_NET_ADMIN`**.
 
 Creating into the namespace rather than creating and then moving is worth 6.3× on attach, because a namespace move waits on an RCU grace period inside the RTNL lock and so barely overlaps under concurrency. See [Measured](#measured).
@@ -250,7 +250,7 @@ table inet sdn {
 The slot count is fixed for the life of the service, which is what makes a backend change cheap:
 
 - **A backend is one interface**, one attached workload. A single-instance service owns every slot; five replicas own a fifth each, wherever they run. A backend's weight is how many slots it holds.
-- **The declaration uses `typeof` on both sides.** `typeof <key expression> : ip daddr` is the form nftables accepts. Naming a value type (`: ipv4_addr`) or an unqualified `type integer` key are both rejected, the second with advice to use `typeof`. The IPv6 form is analogous and unverified.
+- **The declaration uses `typeof` on both sides.** `typeof <key expression> : ip daddr` is the form nftables accepts. Naming a value type (`: ipv4_addr`) or an unqualified `type integer` key are both rejected, the second with advice to use `typeof`. The agent builds the same map for IPv6 with an `ip6 daddr` value, and the kernel tests translate by traffic in both families.
 - **An IPv4-capable service has one map per family.** A map's values are all one family, so the agent installs an IPv6 map and an IPv4 map, and both assign each slot to the same backend. A backend's weight is then the same whichever family a client dials, and one transaction changes both maps.
 - **The map always holds every slot**, and a change replaces only the entries whose backend moved. `delete element` and `add element` in one nftables batch apply atomically. A slot with no entry leaves the packet addressed to the service address, which goes nowhere, so a partially filled map is never written.
 - **Removing a backend disturbs only its own slots**, because the slot table is the indirection layer.
@@ -530,7 +530,7 @@ A host with 40 policy neighbours spends about 5–10ms per change, inside a 250m
 
 ### The relay against a terminating hub
 
-Three paths between the same two 4-vCPU hosts in one datacenter, same kernel WireGuard at both ends, 1380-byte overlay MTU. The middle box is the same machine in both middle cases: once running the ciphertext relay, once terminating WireGuard and re-encrypting. Plain TCP between the hosts bounds every row.
+Three paths between the same two 4-vCPU hosts in one datacenter, same kernel WireGuard at both ends, 1380-byte overlay MTU. The relay here is `cmd/relay`, the prototype that learned endpoints from traffic; `sdn-relay` reads and writes in the same batches. The middle box is the same machine in both middle cases: once running the ciphertext relay, once terminating WireGuard and re-encrypting. Plain TCP between the hosts bounds every row.
 
 Rates below are mean throughput over the 12-second window, derived from the bytes transferred. `iperf3`'s `SUM` bitrate for parallel streams sums per-stream rates over their own intervals and reads higher than the mean, so it is not used here.
 
@@ -570,21 +570,45 @@ via network B: NETWORK-B-SERVER
 
 Separate namespaces, separate relay ports, no translation and no tenant tag. Handshakes completed within 2s of configuration with no inbound reachability at either end, including across a NAT that gave the two hosts different public addresses, and including two senders sharing one address — the case directed ports exist to handle.
 
+### The whole system on one machine
+
+`sdn-lab --env local` and the end-to-end suite run the real daemons — control plane, relays and agents — with a network namespace standing in for each host and a veth bridge for the underlay, on the bare-metal Core Ultra 9 above. Every host shares one kernel, and so one RTNL lock, and the underlay carries 200–226 Gbit/s of plain TCP, so these figures show what the software adds and how each mechanism behaves rather than what a fleet does. The control plane used the memory store; Postgres 18 on the same machine put attach p50 at 21ms against 6ms.
+
+| Quantity | Result |
+|---|--:|
+| Attach, the local API call returning, degree 20 | p50 7.6ms, p90 9.3ms, max 11.7ms |
+| Attach to first connection to a remote peer, degree 20 | p50 12.2ms, p90 46ms, max 61ms |
+| Service change to settled, 30 clients on 3 hosts, under churn: cold replacement | p50 194–255ms, max 205–265ms |
+| The same, warm removal, half the slots rewritten in every client | p50 161–200ms, max 191–221ms |
+| Active relay killed: a new connection through the standby | 0.42–0.70s |
+| Active relay killed: an established flow's stall | 0.82s |
+| Relay restart to forwarding again, no registration sent | 2–4ms |
+| NAT rebinding to traffic resumed, 1-second registration period | 0.35–0.70s |
+| A query sent as the agent dies, answered | 379–584ms |
+| Interfaces on one host, degree 1, until attach p50 rose tenfold | 920, rising linearly from 4.2ms to 33.9ms |
+| Attach-and-detach pairs, 32 loops on each of 3 hosts, degree 20 | 42 a second on the memory store, attach p50 1.5–1.7s; 36 on Postgres |
+
+Attach figures come from 30 rounds, the service changes from two runs, failover from three rounds and the end-to-end suite. Two of these changed the design. Before registrations were resent, one attach in five at degree 20 waited 5–25 seconds for its first connection, because its first registration reached the relay before the relay bound the port. And before a co-located client's slots waited for the backend's device, a cold replacement settled at a p99 of 4.3 seconds.
+
+On this substrate the relay path carried 3.65 Gbit/s on one stream and 3.77 Gbit/s on eight, against 6.1 and 6.15 Gbit/s through a WireGuard gateway on the same middle box. One directed port is one socket read by one goroutine, so a single edge gets one core's worth of relay. Idle round trips through the relay were 0.25ms against 0.007ms for plain TCP; loaded, 7.5ms against 1.8ms through the gateway. Every host shares the machine's CPUs here, so the CPU-per-byte comparison that decides the thesis needs separate machines.
+
+A configured device takes 160–245ms to delete, against 39ms for a bare one in `hostbench`; `ip link del` on a configured device took 223ms against 51ms bare. That sets a detach near 130–180ms.
+
 ## Targets
 
-Still to measure.
+Each target still needs its fleet figure from EC2. The lab column is the whole system on one machine, from [The whole system on one machine](#the-whole-system-on-one-machine), where every host shares one kernel.
 
-| Quantity | Target | Why |
-|---|--:|---|
-| Relay forwarding, XDP or TC | 1M+ pps per core, 100k+ edges | Required for the stated edge capacity, not merely faster. Batched userspace Go carried ~118k pps on a hot edge; `sk_lookup` alone fixes only the receive side. |
-| Service change to converged, p99 in one region | < 250 ms | The cost of a change, and the number the product is judged on. |
-| Attach to first packet, peer already converged, degree ≤ 20 | < 100 ms | Device work is ~5ms and the interface's own peer table is ~3ms at degree 20. The figure is a latency, which the 64-way throughput numbers do not measure. |
-| Relay failover | < 1 s | A 200 ms probe interval plus an endpoint rewrite on both sides. |
-| Round-trip time added by a relay, p50 and p99, idle and under load | — | Unmeasured. Idle, the detour through the relay sets it. Under load, a relay that falls behind queues in its 64 MB socket buffers before it drops, and at the measured 1307 Mbit/s they hold hundreds of milliseconds. |
-| Interfaces per host | 1000+ | A netdev and a peer table each. |
-| Attaches per second, one network, degree ≤ 20 | 100+ | Device work allows 621/s. Peer work shares one RTNL lane of ~10,000–12,000 operations a second per host, so the target depends on degree and on how many hosts the network spreads across. |
-| Slot-map rewrite across many namespaces | — | Unmeasured. A 1024-entry map in each of 400 namespaces could take most of the convergence budget. |
-| Softirq CPU attribution | — | Unmeasured, and the standing risk to the density thesis. |
+| Quantity | Target | Lab | Why |
+|---|--:|--:|---|
+| Relay forwarding, XDP or TC | 1M+ pps per core, 100k+ edges | — | Required for the stated edge capacity, not merely faster. Batched userspace Go carried ~118k pps on a hot edge; `sk_lookup` alone fixes only the receive side. |
+| Service change to converged, p99 in one region | < 250 ms | 205–265ms | The cost of a change, and the number the product is judged on. |
+| Attach to first packet, peer already converged, degree ≤ 20 | < 100 ms | max 61ms | Device work is ~5ms and the interface's own peer table is ~3ms at degree 20. The figure is a latency, which the 64-way throughput numbers do not measure. |
+| Relay failover | < 1 s | 0.42–0.82s | A 200 ms probe interval plus an endpoint rewrite on both sides. |
+| Round-trip time added by a relay, p50 and p99, idle and under load | — | p50 0.25ms idle, 7.5ms loaded | Idle, the detour through the relay sets it. Under load, a relay that falls behind queues in its socket buffers before it drops. |
+| Interfaces per host | 1000+ | 920 before attach p50 rose tenfold | A netdev and a peer table each. |
+| Attaches per second, one network, degree ≤ 20 | 100+ | 36–42 pairs a second across 3 hosts | Device work allows 621/s. Every control-plane write takes the next revision from one row, which bounds the whole control plane; see [Open questions](#open-questions). Peer work shares one RTNL lane of ~10,000–19,000 operations a second per host, so the target depends on degree and on how many hosts the network spreads across. |
+| Slot-map rewrite across many namespaces | — | 30 namespaces within the change figures | A 1024-entry map in each of 400 namespaces could take most of the convergence budget. |
+| Softirq CPU attribution | — | — | Unmeasured, and the standing risk to the density thesis. |
 
 Semantics are verifiable inside one Linux kernel, with namespaces standing in for hosts: a relay in one, several hosts in others, each host handing a workload a namespace of its own, and veth pairs for the underlay. That covers the namespace placement, the slot table, convergence ordering, roaming on the return path, policy enforcement, and revocation, and it runs in CI. Every performance figure needs real hardware with the plain-TCP underlay ceiling measured in the same run, since a relay comparison without it measures the network.
 
@@ -603,13 +627,13 @@ Out of scope for now:
 
 ## Open questions
 
-- **The registration protocol's remaining details.** The shape is settled: per-relay derived key, counter persisted at both ends, sent on change. Open are the packet format, how keys reach a relay, and what a relay does with a direction whose key it has yet to receive.
-- **The relay's socket model.** One socket per directed port caps a userspace process far below the port space, and `sk_lookup` fixes only receiving — sending from the peer direction's port needs a bound socket or a raw socket. XDP or TC handles both in one place, which is likely the answer.
-- **Relay port pressure under churn.** Ports must outlast stale senders, which at 100 attaches a second and degree 10 means hundreds of thousands live at once. Either the relay address space is IPv6, or authenticated registration makes early reuse safe — a stale sender's datagrams fail their MAC, so a reused port can refuse them.
+- **The relay's socket model.** One socket per directed port caps a userspace process far below the port space, and one goroutine per socket gives a single edge one core: 3.7 Gbit/s in the lab at one stream or eight. `sk_lookup` fixes only receiving — sending from the peer direction's port needs a bound socket or a raw socket. XDP or TC handles both in one place, which is likely the answer.
+- **Relay port pressure under churn.** Ports must outlast stale senders, which at 100 attaches a second and degree 10 means hundreds of thousands live at once; the lab's churn plan used 19,040 ports in 11 seconds. Either the relay address space is IPv6, or the quarantine shrinks: a stale sender's registrations already fail their MAC on a reallocated port, and its data packets, from an endpoint nobody registered, wait and drop.
 - **Whether the peer ceiling can be raised at all.** What contends is RTNL, so raising it needs a kernel change. From userspace the lever is grouping every pending change for a device into one call, which reaches the ceiling with fewer writers rather than moving it.
+- **What bounds attach throughput.** Every write transaction takes the next revision from one row (`Bump` in `pgstore/tx.go`), which orders every attach, release and policy change in the control plane, across networks: under `SERIALIZABLE`, two writers whose transactions overlap conflict and one runs again. In the lab, 32 attach-and-detach loops on each of three hosts sustained 36 pairs a second on Postgres, where 8 of 367 attaches outlasted the agent's 10-second wait, and 42 on the memory store, which runs every transaction, reads included, under one mutex. The agents, sharing one kernel, saw kernel operations average 200–535ms under that load. Shorter write transactions raise the ceiling in proportion; removing it needs revisions that no longer share one row, without letting a poll skip a change that commits late.
 - **Slot-map rewrite cost under churn.** Rewriting a 1024-entry map in each of hundreds of namespaces is unmeasured and may dominate the convergence window.
 - **Softirq CPU attribution on a loaded multi-tenant host.** WireGuard crypto for a container runs in softirq context, which cgroups account for poorly, so a chatty tenant can burn host CPU that is hard to bill. This is the standing risk to the density thesis.
-- **Address and port quarantine length.** An address needs the grace period plus convergence, given the ordering in [Address space](#address-space). A relay port needs to outlast stale senders, which authenticated registration shortens, since a stale sender's datagrams now fail their MAC.
+- **Registration counters under clock irregularities.** An agent's counter is its clock in milliseconds, so an agent whose clock steps back after a restart is locked out of its directions until the clock passes the counter the relay holds.
 
 ## References
 

@@ -33,6 +33,90 @@ func (w *World) checkMoves(h *hostNode) {
 	}
 }
 
+// checkColocated fails the run if a batch arms keepalive on a co-located
+// peer, or points a slot at one, before that peer's device holds the
+// reverse peer, judged when the agent plans the batch. Anything sent to a
+// device without the reverse peer is dropped, and WireGuard waits five
+// seconds before trying again.
+func (w *World) checkColocated(h *hostNode, b agentcore.RunBatch) {
+	ns, ok := h.kernel.Named(b.Namespace)
+	if !ok {
+		return
+	}
+	dev, ok := ns.Devices[h.cfg.Device]
+	if !ok {
+		return
+	}
+	// The endpoint each allowed address routes to, once the batch's peers
+	// are in.
+	route := map[netip.Addr]netip.AddrPort{}
+	for _, p := range dev.PeerList() {
+		for _, a := range p.Allowed {
+			route[a.Addr()] = p.Endpoint
+		}
+	}
+	for _, op := range b.Ops {
+		switch op.Kind {
+		case kernel.SetPeers:
+			for _, u := range op.Peers {
+				if u.Remove {
+					continue
+				}
+				ep := u.Endpoint
+				if p, ok := dev.Peers[u.PublicKey]; ok && !ep.IsValid() {
+					ep = p.Endpoint
+				}
+				for _, a := range u.Allowed {
+					route[a.Addr()] = ep
+				}
+				if u.Keepalive == 0 || !ep.Addr().IsLoopback() {
+					continue
+				}
+				if p, ok := dev.Peers[u.PublicKey]; ok && p.Keepalive > 0 {
+					continue
+				}
+				if !holdsReverse(h, dev, ep) {
+					w.fail("%s: %s arms keepalive toward %s before that device holds the reverse peer", h.name, b.Namespace, w.byKey[u.PublicKey])
+					return
+				}
+			}
+		case kernel.ApplyRules:
+			for _, a := range slotAddrs(op.Rules) {
+				if ep, ok := route[a]; ok && ep.Addr().IsLoopback() && !holdsReverse(h, dev, ep) {
+					w.fail("%s: %s points a slot at %v before that device holds the reverse peer", h.name, b.Namespace, a)
+					return
+				}
+			}
+		}
+	}
+}
+
+// slotAddrs lists every address a transaction writes into a slot.
+func slotAddrs(tx *nft.Transaction) []netip.Addr {
+	if tx == nil {
+		return nil
+	}
+	written := slices.Clone(tx.AddMaps)
+	if tx.Replace != nil {
+		written = append(written, tx.Replace.Maps...)
+	}
+	var out []netip.Addr
+	for _, m := range written {
+		out = append(out, m.Slots...)
+	}
+	for _, u := range tx.Slots {
+		out = append(out, u.Addr)
+	}
+	return out
+}
+
+// holdsReverse reports whether the device listening on a loopback endpoint
+// holds dev's key as a peer.
+func holdsReverse(h *hostNode, dev *kmodel.Device, endpoint netip.AddrPort) bool {
+	other, ok := h.kernel.PortOwner(endpoint.Port())
+	return ok && other.Peers[dev.Private.Public()] != nil
+}
+
 // checkTables fails the run if a namespace's table names an address its
 // device cannot route: a slot whose backend has no peer, or a source address
 // no peer holds. It runs after every kernel operation, since a batch must
@@ -435,7 +519,7 @@ func (w *World) checkLiveness() {
 		for _, name := range named {
 			s, ok := settled[name]
 			if !ok {
-				w.fail("%s: %s never settled", h.name, name)
+				w.fail("%s: %s never settled; pending %v", h.name, name, h.core.Pending())
 				return
 			}
 			ns, _ := h.kernel.Named(name)

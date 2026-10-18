@@ -251,9 +251,13 @@ type nsState struct {
 	// accounts for, after a restart lost track.
 	unflushed []netip.Addr
 	sweep     bool
-	busy      bool
-	dirty     bool
-	observe   bool
+	// awaiting names co-located interfaces whose devices have yet to hold
+	// this namespace's interface as a peer; keepalive and slots toward
+	// them wait.
+	awaiting []model.InterfaceID
+	busy     bool
+	dirty    bool
+	observe  bool
 	// revision is the network revision last reconciled against.
 	revision uint64
 	// nextDrain is when the earliest draining peer's grace ends.

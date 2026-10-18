@@ -58,6 +58,18 @@ var Mutants = []Mutant{
 		Catch:  []string{"cp", "sim"},
 	},
 	{
+		ID:     "keepalive-armed-before-reverse",
+		Breaks: "a co-located peer's keepalive is armed only once the other device holds the reverse peer, so its first initiation is never dropped",
+		Edits:  []Edit{{agentTarget, "(tp.awaiting || p.Draining)", "p.Draining"}},
+		Catch:  []string{"sim"},
+	},
+	{
+		ID:     "slot-before-colocated-reverse",
+		Breaks: "no slot names a co-located backend until its device holds the reverse peer, so a client's first initiation is never dropped",
+		Edits:  []Edit{{agentTarget, "if !p.peer.Draining && !p.awaiting {", "if !p.peer.Draining {"}},
+		Catch:  []string{"sim"},
+	},
+	{
 		ID:     "keepalive-on-relay-peers",
 		Breaks: "relay peers carry no persistent-keepalive; the registration datagram holds the NAT mapping",
 		Edits:  []Edit{{compileGo, "p.Registration = e.SecretAB", "p.Registration, p.Keepalive = e.SecretAB, true"}},

@@ -362,13 +362,14 @@ func TestTrafficFailsOverWhenTheActiveRelayDies(t *testing.T) {
 }
 
 func TestARelayRestartsFromItsDisk(t *testing.T) {
-	// A long registration period: only the relay's disk can restore the
-	// directions within the test.
+	// A long registration period and resends that end 650ms after an
+	// install: only the relay's disk can restore the directions within the
+	// test.
 	l := newLab(t, "e2ed", fastClocks...)
 	ctx := context.Background()
 	relay := must(l.AddRelay(ctx, "r1"))
-	h1 := must(l.AddHost(ctx, "h1", "--register-every", "5m"))
-	h2 := must(l.AddHost(ctx, "h2", "--register-every", "5m"))
+	h1 := must(l.AddHost(ctx, "h1", "--register-every", "5m", "--register-retries", "3"))
+	h2 := must(l.AddHost(ctx, "h2", "--register-every", "5m", "--register-retries", "3"))
 	svc := webDB(t, l, relay)
 	attachDB(t, h2, "db-1")
 	web := must(h1.Attach(ctx, "web-1", "prod", "web"))
@@ -376,6 +377,7 @@ func TestARelayRestartsFromItsDisk(t *testing.T) {
 	if _, err := lab.DialUntil(web.Namespace, dbAddr, 20*time.Second); err != nil {
 		t.Fatal(err)
 	}
+	time.Sleep(time.Second)
 	relay.Kill()
 	if err := relay.Start(); err != nil {
 		t.Fatal(err)

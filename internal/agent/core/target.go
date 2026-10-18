@@ -31,6 +31,9 @@ type tpeer struct {
 	endpoint  netip.AddrPort
 	accept    []netip.AddrPort
 	keepalive time.Duration
+	// awaiting marks a co-located peer whose device has yet to hold the
+	// reverse peer; no slot names it until then.
+	awaiting bool
 }
 
 // loopback is the address co-located devices reach each other at. Both
@@ -93,7 +96,16 @@ func (c *Core) target(now time.Time, st *nsState, n *api.NetworkState, x *api.In
 				c.Stats.Conflicts++
 				continue
 			}
-			t.peers = append(t.peers, c.tpeer(n, p))
+			tp := c.tpeer(n, p)
+			if p.Loopback != 0 && !p.Draining && !c.holdsReverse(st, p) {
+				tp.awaiting = true
+				st.awaiting = append(st.awaiting, p.Interface)
+			}
+			// A draining peer carries nothing new, so it is never armed.
+			if tp.keepalive > 0 && st.peers[p.PublicKey].Keepalive == 0 && (tp.awaiting || p.Draining) {
+				tp.keepalive = 0
+			}
+			t.peers = append(t.peers, tp)
 		}
 	}
 	for _, key := range slices.SortedFunc(maps.Keys(st.drain), compareKey) {
@@ -104,6 +116,47 @@ func (c *Core) target(now time.Time, st *nsState, n *api.NetworkState, x *api.In
 	slices.SortFunc(t.peers, func(a, b tpeer) int { return compareKey(a.peer.PublicKey, b.peer.PublicKey) })
 	t.rules = c.rules(n, x, t.peers)
 	return t
+}
+
+// holdsReverse reports whether the co-located device a peer names holds
+// this namespace's interface as a peer, as far as the agent knows: the
+// other namespace's peers, less what a batch running there removes.
+// Anything sent to a device without the reverse peer is dropped, and
+// WireGuard waits five seconds before trying again, so keepalive, which
+// sends at once when armed, and slots, which send a workload's traffic,
+// wait for it.
+func (c *Core) holdsReverse(st *nsState, p api.Peer) bool {
+	self, ok := c.ifaces[st.iface]
+	if !ok {
+		return false
+	}
+	other, ok := c.ifaces[p.Interface]
+	if !ok || other.phase.tearingDown() {
+		return false
+	}
+	ost, ok := c.ns[other.ns]
+	if !ok {
+		return false
+	}
+	if _, ok := ost.peers[self.pub]; !ok {
+		return false
+	}
+	if ost.batch == nil {
+		return true
+	}
+	for _, op := range ost.batch.Ops {
+		switch op.Kind {
+		case kernel.DeleteDevice, kernel.DeleteNamespace:
+			return false
+		case kernel.SetPeers:
+			for _, u := range op.Peers {
+				if u.Remove && u.PublicKey == self.pub {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 func conflicted(owner map[netip.Prefix]model.Key, p api.Peer) bool {
@@ -156,7 +209,7 @@ func (c *Core) rules(n *api.NetworkState, x *api.Interface, peers []tpeer) *nft.
 	rs := &nft.Ruleset{Forward: x.Kind == api.Gateway}
 	live := map[model.InterfaceID]bool{x.ID: true}
 	for _, p := range peers {
-		if !p.peer.Draining {
+		if !p.peer.Draining && !p.awaiting {
 			live[p.peer.Interface] = true
 		}
 	}

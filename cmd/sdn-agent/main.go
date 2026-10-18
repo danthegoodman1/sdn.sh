@@ -61,6 +61,7 @@ func run() error {
 	flag.DurationVar(&cfg.Core.DrainGrace, "drain-grace", cfg.Core.DrainGrace, "how long a released peer stays installed")
 	flag.DurationVar(&cfg.RenewEvery, "renew-every", cfg.RenewEvery, "lease renewal period")
 	flag.DurationVar(&cfg.Core.RegisterEvery, "register-every", cfg.Core.RegisterEvery, "registration period, which must undercut the shortest NAT idle timeout on the path")
+	flag.IntVar(&cfg.Core.RegisterRetries, "register-retries", cfg.Core.RegisterRetries, "times a new direction's registration is sent again, in case it reached a relay before the relay bound the port")
 	flag.DurationVar(&cfg.Core.Keepalive, "keepalive", cfg.Core.Keepalive, "persistent-keepalive interval on paths that carry one")
 	flag.IntVar(&cfg.Workers, "workers", cfg.Workers, "namespaces configured at once")
 	flag.Parse()

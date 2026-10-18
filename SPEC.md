@@ -144,9 +144,10 @@ state:    port -> the endpoint its last accepted registration named,
 
 A packet arriving on port `P` from endpoint `E`:
 
-1. An unknown `P` drops.
-2. A registration datagram is verified against the direction's key and counter. On success it sets this direction's endpoint to `E`, and is consumed rather than forwarded.
-3. Any other packet is forwarded from the peer port's socket to the endpoint the peer direction last registered, and is dropped while that side has yet to register or while `E` is not the registered endpoint.
+1. An unknown `P` drops. The relay binds a socket only for ports its table holds, so the kernel drops these before the relay sees them.
+2. A registration datagram is verified against the direction's key and counter. On success it is written to the relay's log, then sets this direction's endpoint to `E`, and is consumed rather than forwarded.
+3. Any other packet from the direction's registered endpoint is forwarded from the peer port's socket to the endpoint the peer direction last registered.
+4. A packet that arrives before the registration that would admit it — its own direction's from `E`, or the peer direction's — waits up to 2 seconds and goes out, in arrival order, once that registration commits. One still waiting then drops. At most eight wait per port and 65,536 per relay.
 
 So a data packet never moves an endpoint. Only a registration does.
 
@@ -154,30 +155,45 @@ Sending from the peer port is what makes the return path work without configurat
 
 **Directed ports exist so that the relay never has to recognise a sender by address.** A host behind NAT has no outbound address the control plane can know in advance, and many have none that is even stable — a microVM substrate that reassigns a public address on each resume is common. Two interfaces can also share one NAT address, which an address-based scheme cannot disambiguate at all. Doubling the ports per edge buys exactness.
 
-Both sides register before any application traffic, because each agent sends a registration datagram for every direction as it installs the peer. A side that has yet to register costs one dropped handshake and a retry.
+**A direction's first packets race its registrations, so the relay holds them.** Each agent sends a registration for every direction as it installs the peer, then five more times, the first after 50ms and each gap three times the last, because a relay binds a new port only once it loads the table naming it, and a registration that arrives first finds no socket. The relay and the agents learn of a new edge from the same commit, through separate polls, and the agent's first registration often wins: across 30 attaches at degree 20 in the lab, the relay's kernel counted 241 datagrams to ports it had yet to bind. The two agents of an edge install it at different moments, so a handshake initiation often reaches the relay before the other side's registration commits. Dropped, it would cost WireGuard a 5-second retry; held, it costs the time the registration takes to arrive and reach disk.
 
 Consequences:
 
 - **No crypto, no conntrack, no per-flow state.** One table lookup, one endpoint record, and a send. Reads and writes must be batched through `recvmmsg`/`sendmmsg`: a per-packet syscall loop overflows its receive queue and carries less traffic than a terminating gateway, which removes the reason to relay at all.
-- **An endpoint change is admitted only by an authenticated registration datagram.** The agent sends one to the active relay and to every standby, carrying the direction, a monotonic counter, and a MAC over all of it *plus the relay address and port*. Three properties the design depends on:
-  - **The key is derived per relay**, from the direction's secret and that relay's identity, and each relay receives only its own. A single shared secret would let a compromised relay compute valid registrations for its peers by naming their address in the MAC.
-  - **The counter survives restarts at both ends.** The relay persists the highest counter it has accepted per direction; the agent derives its counter from a clock rather than from a variable that resets. Otherwise a relay restart reopens replay, and an agent restart locks the agent out of its own direction.
-  - **It is sent on change, not only on a timer.** The periodic interval is 25 seconds, under common NAT UDP timeouts and the figure `wg(8)` recommends for keepalive, because on the relay path this datagram is the only thing holding the NAT mapping open. A periodic send alone would leave recovery waiting up to that long after a resume or an address change, so the agent also sends immediately when its underlay address changes and on resume. The steady cost is edges × relays ÷ interval.
+- **An endpoint change is admitted only by an authenticated registration datagram.** The agent sends one to the active relay and to every standby, carrying a monotonic counter and a MAC over it *plus the relay's advertised address and port*, which name the direction. Three properties the design depends on:
+  - **The key is derived per relay**, from the direction's secret and that relay's identity, and each relay receives only its own. A single shared secret would let a compromised relay compute valid registrations for its peers by naming their address in the MAC. The control plane mints a secret per direction when it creates an edge, pushes each relay its derived key in the port table, and gives the sending interface's agent the secret, from which it derives every relay's key.
+  - **The counter survives restarts at both ends.** The relay persists the highest counter it has accepted per direction; the agent's counter is its clock in milliseconds, kept rising within a run. Otherwise a relay restart reopens replay, and an agent restart locks the agent out of its own direction.
+  - **It is sent on change, not only on a timer.** The periodic interval is 25 seconds, under common NAT UDP timeouts and the figure `wg(8)` recommends for keepalive, because on the relay path this datagram is the only thing holding the NAT mapping open. A periodic send alone would leave recovery waiting up to that long after a resume or an address change, so the agent also sends at once when an underlay address changes, at most once a second. The steady cost is edges × relays ÷ interval.
+
+  The datagram is 32 bytes:
+
+  ```text
+  0:4    magic 0xff 'S' 'D' 'R'
+  4      version 1
+  5:8    zero
+  8:16   counter, big-endian
+  16:32  HMAC-SHA256 over a label, the relay's advertised address and port,
+         and bytes 0:16, truncated to 16 bytes
+  ```
+
+  A WireGuard message begins with a type from 1 to 4 followed by three zero bytes, so the first byte alone tells a registration from traffic. A relay verifies a registration under the key its table held when the registration arrived and commits it only if that key still holds, so a registration for a port that was reallocated meanwhile commits nothing. Each port admits 20 registrations a second, which bounds the MACs a flood can make the relay compute.
   Verifying a WireGuard handshake's `mac1` is **not** sufficient and was rejected: `mac1` is a fixed MAC over the message bytes, covers no destination, and the timestamp that would make it fresh is encrypted, so a captured initiation replays from any address and at any relay — and every peer of the receiver already knows the public key that keys it, so an insider forges outright.
   A packet that loses an endpoint race is dropped rather than forwarded, so the relay cannot be used as a reflector.
-- **A relay persists what it is pushed.** Its port table and per-direction secrets survive a restart, or a relay that comes back during a control-plane outage strands every edge it serves.
-- **A restart costs at most one registration interval**, after which both directions have registered again.
+- **A relay persists what it is pushed and what it accepts.** Its port table, per-direction keys, endpoints and highest counters survive a restart, or a relay that comes back during a control-plane outage strands every edge it serves. Every accepted registration is appended to a log and synced, with concurrent writes committed as a group, before it moves an endpoint; a state file rewritten every 10 seconds truncates the log.
+- **A restart costs only its downtime.** The relay reloads its table, endpoints and counters from disk and binds its sockets, so traffic resumes with no registration sent.
 - **Zero added bytes**, so the overlay MTU accounts for WireGuard overhead alone.
 - **No key, no plaintext, ever.** A relay can be run by someone the workloads' owner does not trust with data.
 
 A relay carries several addresses, so the table keys on `(local address, port)`. Two limits bind, and both are tighter than they look:
 
-- **Port supply, under churn.** Ports have to stay quarantined after an edge goes away, because a stale sender keeps sending to the old port. At 100 attaches a second with an average degree of 10, two directions each, and a five-minute quarantine, that is 600,000 live ports — more than eight IPv4 addresses supply. An IPv6 relay address space or authenticated registration that makes early reuse safe is what relieves it.
+- **Port supply, under churn.** Ports stay quarantined for five minutes after an edge goes away, because a stale sender keeps sending to the old port. At 100 attaches a second with an average degree of 10, two directions each, that is 600,000 live ports — more than eight IPv4 addresses supply. An IPv6 relay address space relieves it, and so would a shorter quarantine: a stale sender's registrations fail their MAC under the new direction's key, and its data packets, arriving from an endpoint nobody registered, wait and drop.
 - **Socket count.** A userspace relay opens a socket per directed port, so one process serves thousands of edges rather than the hundreds of thousands the port space allows. `sk_lookup` fixes the receive side only; sending from the peer direction's port still needs a socket bound to it or a raw socket, so the userspace route is `sk_lookup` plus raw sends, while XDP or TC handles both in one place. This is a correctness requirement for the stated scale, not a speedup.
 
 Edge ports are allocated on **every** relay in a network's set up front, because an agent can only fail over to a relay it already has an address for.
 
-**Standby registration needs its own packet, because kernel WireGuard sends to one endpoint per peer.** The agent sends the registration datagram above to the active relay and to every standby once per registration interval, from a raw socket bearing the interface's own listen port so the NAT mapping it creates is the one real traffic will use. The relay recognises these by their MAC and keeps them out of forwarding. Admission and failover are therefore one protocol rather than two features, which is why it has to be settled before the relay is built rather than after. Moving an edge between relays is safer than a service change, because both paths deliver throughout: allocate, push, repoint, then free the old ports after convergence.
+**Standby registration needs its own packet, because kernel WireGuard sends to one endpoint per peer.** The agent sends the registration datagram to the active relay and to every standby on the schedule above, from a raw socket bearing the interface's own listen port so the NAT mapping it creates is the one real traffic will use. The raw socket carries a BPF filter that accepts nothing, so it never queues the host's traffic. The relay recognises registrations by their MAC and keeps them out of forwarding. Admission and failover are therefore one protocol. Moving an edge between relays is safer than a service change, because both paths deliver throughout: allocate, push, repoint, then free the old ports after convergence.
+
+**An edge that policy stops connecting goes dormant rather than away.** While both interfaces stay attached, the control plane keeps the edge's ports and secrets, so a rule removed and restored reconnects on the ports both sides already registered. An edge dormant for a port quarantine is deleted, and its ports are free at once, since nothing has sent to them meanwhile.
 
 ### Paths
 
@@ -203,11 +219,16 @@ Kernel WireGuard holds exactly one endpoint per peer, so failover is the agent's
 
 Leaving keepalive off relay peers makes an idle peer free: it sends nothing and never rekeys, since WireGuard rekeys on a timer only for the side that initiated the session, and only when it sends (`drivers/net/wireguard/send.c`). The cost is one handshake round trip on the first packet after a session idles past its 180-second lifetime (`messages.h`), a few milliseconds through an in-region relay. It also removes a collision at attach. Arming keepalive on a running device sends a packet at once (`netlink.c`), and both agents install a new edge within milliseconds of each other, so two armed peers each initiate immediately; initiations that cross within the relay's one-way latency cancel each other and cost a 5-second round, more than the attach target allows. Without keepalive, only the side with traffic initiates.
 
-This rests on a raw-socket registration datagram refreshing the same NAT mapping that WireGuard's own socket uses. A NAT keys its mappings on addresses and ports rather than on the sending socket, so it should, but Phase 3 tests it before relay peers go without keepalive.
+This rests on a raw-socket registration datagram refreshing the same NAT mapping that WireGuard's own socket uses. A NAT keys its mappings on addresses and ports rather than on the sending socket, and a conntrack NAT built from namespaces confirms it: behind a NAT that forgets an idle UDP mapping after 3 seconds, a relay peer with no keepalive still answered at once after 8 idle seconds, and when the NAT dropped every mapping and assigned new ports, the next registration moved the endpoint and traffic resumed in 0.7s.
 
 The loopback path makes co-location a real placement objective: two services that talk constantly cost nothing to connect when scheduled together.
 
-**On the loopback path, at most one side initiates.** One agent configures both ends of a co-located pair, so if both peers carry `persistent-keepalive` they initiate at the same instant. Each answers the other's initiation, which discards its own pending handshake, and both responses come back invalid. WireGuard retries after 5 seconds plus up to 333ms of jitter (`drivers/net/wireguard/timers.c`), but at `HZ=1000` a timer that far out sits in a timer-wheel level that rounds expiry to 512ms (`kernel/time/timer.c`), so the two retries usually fire on the same tick again. On Linux 7.0 a pair stayed in that lockstep for minutes. So the agent arms keepalive on exactly one side of a co-located pair, chosen deterministically, such as the interface with the lower ID. That side keeps a session up and owns every rekey, so the other side always finds a valid session and never initiates. Leaving both sides bare would let two workloads that start sending at the same instant after an idle period fall into the same lockstep. Peers on different hosts keep separate clocks and do not lock together this way, though a simultaneous first initiation can still cost a 5-second round.
+**On the loopback path, at most one side initiates.** One agent configures both ends of a co-located pair, so if both peers carry `persistent-keepalive` they initiate at the same instant. Each answers the other's initiation, which discards its own pending handshake, and both responses come back invalid. WireGuard retries after 5 seconds plus up to 333ms of jitter (`drivers/net/wireguard/timers.c`), but at `HZ=1000` a timer that far out sits in a timer-wheel level that rounds expiry to 512ms (`kernel/time/timer.c`), so the two retries usually fire on the same tick again. On Linux 7.0 a pair stayed in that lockstep for minutes. So the agent arms keepalive on exactly one side of a co-located pair, the interface with the lower ID. That side keeps a session up and owns every rekey, so the other side always finds a valid session and never initiates. **Nothing sends toward a co-located peer until the other device holds the reverse peer.** A device drops an initiation from a key it has no peer for, and WireGuard waits 5 seconds before trying again, rate-limiting every initiation in between (`send.c`). The agent configures the two namespaces concurrently, so either side can install first. Two things would send early:
+
+- **Arming keepalive**, which sends an initiation at once (`netlink.c`). The keepalive side installs its peer unarmed and arms it in a later batch.
+- **A slot naming the peer**, which turns a workload's next connection into an initiation. A client's slots for a co-located backend wait the same way, so the backend joins that client's map only once its device holds the client.
+
+The agent judges the other namespace by the peers it believes are installed there, less any a batch running there removes, and replans the waiting namespaces whenever a batch completes. Without this, in the lab, every client co-located with a freshly attached backend that sent before the backend's namespace was configured reached it only after 5.2 seconds. Leaving both sides bare would let two workloads that start sending at the same instant after an idle period fall into the same lockstep. Peers on different hosts keep separate clocks and do not lock together this way, though a simultaneous first initiation can still cost a 5-second round.
 
 ### Service addresses and selection
 
@@ -241,7 +262,7 @@ A namespace holding a forwarding workload, such as a microVM behind a TAP, gets 
 - **Selection is per connection.** Conntrack pins the first packet's choice for the life of the flow, for TCP and UDP alike. `numgen random` draws each connection's slot independently (`nft_ng_random_gen`, `net/netfilter/nft_numgen.c`), so a backend's share converges on its slot count, and it has no affinity to disturb. `numgen inc` reads as round-robin but concentrates load: each rule owns its counter and starts it at slot 0 (`nft_ng_inc_init`), so every client namespace begins on the same backend, and short-lived clients that open a few connections never leave it. On nftables 1.0.9 and Linux 6.10, twenty fresh namespaces opening one connection each all reached one backend under `inc` and split 8 and 12 under `random`. A map declared `typeof jhash ip saddr mod 1024 : ip daddr` keys selection to the client instead, which preserves affinity across reconnects and, because the slot table absorbs the change, moves only a departing backend's share — consistent-hash behavior, but only in the `jhash` form. Affinity holds within one family, since a client's IPv4 and IPv6 addresses hash to different slots. `numgen random` is the default because `nft list` segfaults while printing a `jhash`-keyed map on nftables 1.0.9: the ruleset works and the inspection tool crashes.
 - **Replies need no reverse lookup.** Conntrack untranslates them, so the application sees responses from the service address it dialed.
 - **The server never learns the service address.** It replies from its own interface address, which is also its identity to the policy engine. Incoming and outgoing identity are the same thing.
-- **Names resolve to service addresses** through the stub resolver on loopback, answered from pushed state. It answers AAAA for every service and A only where both the client's service and the target have IPv4, so no client receives an address it cannot reach. Because the agent serves it, an agent restart interrupts name resolution for every workload on the host. Persisting the resolver's state shortens that outage but does not remove it, since the listening sockets close with the process: the file descriptors are handed across restarts instead, through a descriptor store.
+- **Names resolve to service addresses** through the stub resolver on loopback, answered from pushed state. It answers AAAA for every service and A only where both the client's service and the target have IPv4, so no client receives an address it cannot reach. Because the agent serves it, an agent restart would interrupt name resolution for every workload on the host: persisting the resolver's state alone cannot help, since the listening sockets close with the process. The agent keeps each namespace's listening descriptors in systemd's descriptor store instead (`FDSTORE=1`), and takes them back from `LISTEN_FDS` when it starts, so a query sent while it restarts waits in the socket buffer.
 
 ### Policy
 
@@ -262,9 +283,16 @@ Compilation produces two things, and default is deny:
 
 **Attach latency grows with policy degree.** Peers install at roughly 130µs each in one batched call, so an interface joining a fully connected 2,000-interface network waits about 250 ms for its own peer table before it can talk to anyone. Dense policy is expensive at attach even when it is affordable at steady state.
 
-**Internet egress is a separate grant, and it is the one case where a namespace has a second way out.** The agent adds a veth pair to the host namespace and NATs there; without the grant no such path exists, which is what gates egress. The filter lives in the **host** namespace, on that veth, and must drop at least the link-local ranges (`169.254.0.0/16` and `fe80::/10`) and the metadata service in both families (`169.254.169.254`, and on EC2 also `fd00:ec2::254`), **the host's own addresses**, the underlay prefix, every relay address, and private ranges the network has not been granted. The host itself matters as much as the rest: the veth's host end otherwise reaches host services and every co-located interface's WireGuard listen port, where a flood of handshake initiations costs the host a Curve25519 operation each. A workload that can reach the relays can attack endpoint registration.
+**Internet egress is a separate grant, and it is the one case where a namespace has a second way out.** A grant names protocols and ports on the interface, such as `tcp/443`. The agent adds a veth pair, `eg0` in the namespace and `sdne<listen port>` on the host, routes the namespace's default through it, and masquerades on the host; without the grant no such path exists, which is what gates egress. The filter lives in the **host** namespace, in table `inet sdn_egress`, and drops before any grant applies:
 
-The veth carries per-host addresses outside the network's prefixes, in whichever families the host can route, so a service without IPv4 still reaches the IPv4 internet. IPv6 egress is masqueraded like IPv4, because the network's IPv6 addresses are ULAs.
+- loopback, link-local and the metadata service in both families (`169.254.169.254`, and on EC2 `fd00:ec2::254`, inside `fc00::/7`);
+- private, shared, multicast and reserved ranges in both families;
+- **the host's own prefixes**, and every relay address;
+- anything addressed to the host itself, but for the IPv6 neighbour discovery the link needs.
+
+The host matters as much as the rest: the veth's host end otherwise reaches host services and every co-located interface's WireGuard listen port, where a flood of handshake initiations costs the host a Curve25519 operation each. A workload that can reach the relays can attack endpoint registration. What passes the filter meets the link's own grant, reached through a verdict map keyed by the link's name, so a grant change rewrites one chain. Nothing outside may open a flow into an egress link; only replies return. The grant is recorded on the link itself, so an agent that restarts reads back what it installed.
+
+The veth carries per-host addresses outside the network's prefixes, derived from the listen port: a `/31` in `100.64.0.0/10` and a `/127` in `fdff:e9e5::/64`, so a service without IPv4 still reaches the IPv4 internet. IPv6 egress is masqueraded like IPv4, because the network's IPv6 addresses are ULAs, and is offered only on a host that already forwards IPv6: turning IPv6 forwarding on would stop the host accepting router advertisements on its own uplink. The agent turns on IPv4 forwarding, which egress needs. A granted namespace's stub resolver forwards names outside the network to the host's upstream resolver.
 
 ### Development machines
 
@@ -286,17 +314,18 @@ PersistentKeepalive = 25
 
 - **The laptop mints its own key.** The tool that writes the config generates the keypair locally and registers only the public half, so the control plane still sees public keys only. A web page can do the same in the browser.
 - **The laptop has one peer: a gateway interface.** A stock client holds a static peer list and runs no agent, so it can neither follow backends as they churn nor translate service addresses itself. It peers with a gateway instead: an agent-managed interface on a Linux host that routes the network's prefixes. The config stays valid as backends come and go.
-- **The gateway translates and forwards.** It translates service addresses in its `prerouting` hook, as any forwarding namespace does, and forwards to the backend with the laptop's own address as the source. Each backend's peer entry for the gateway carries the addresses of the laptops it fronts, the one peer entry that holds more than its own addresses, so receivers enforce policy against the laptop's address like any other source. The gateway's own peer entry for each laptop stops one laptop sending as another.
-- **The laptop dials the gateway directly.** A stock client cannot send the relay's registration datagram, so the gateway host exposes one inbound UDP port, and the laptop's keepalive holds its own NAT mapping open.
-- **The gateway serves names.** The `DNS` line points at a resolver the agent serves on the gateway's address, answering the network's names and forwarding everything else, and the search domain lets `db` resolve on the laptop as it does in a workload.
-- **The lease has a fixed term.** No agent renews it, so the control plane issues it with an expiry and the developer regenerates the config to extend it. Revocation removes the laptop's peer from the gateway and its addresses from the backends' entries, with no grace period.
-- **IPv6 keeps the laptop's routes clean.** ULA prefixes are random, so a network's IPv6 prefix collides neither with another network's nor with the laptop's own LAN. Two networks with overlapping IPv4 prefixes cannot both be routed on one laptop.
+- **The gateway translates and forwards.** It translates service addresses in its `prerouting` hook, as any forwarding namespace does, and forwards to the backend with the laptop's own address as the source; forwarding is on in the gateway's namespace alone. Each backend's peer entry for the gateway carries the addresses of the laptops it fronts, the one peer entry that holds more than its own addresses, so receivers enforce policy against the laptop's address like any other source. The gateway's own peer entry for each laptop stops one laptop sending as another.
+- **A laptop takes replies alone.** The gateway drops every new flow forwarded toward one of its machines, from a backend or from another machine, so a laptop is a client of the network rather than a server in it, and two laptops behind one gateway cannot reach each other.
+- **The laptop dials the gateway directly.** A stock client cannot send the relay's registration datagram, so the gateway host exposes one inbound UDP port: the gateway's listen port, or the port the host's registered endpoint names when a port forward fronts it. The laptop's keepalive holds its own NAT mapping open.
+- **The gateway serves names.** The `DNS` line points at a resolver the agent serves on the gateway's own address, answering the names any of its machines may reach and forwarding everything else upstream; the gateway admits DNS from its machines over UDP and TCP. The search domain lets `db` resolve on the laptop as it does in a workload.
+- **The lease has a fixed term**, at most 30 days. No agent renews it, so the control plane issues it with an expiry and the developer regenerates the config to extend it. Revocation removes the laptop's peer from the gateway and its addresses from the backends' entries, with no grace period.
+- **IPv6 keeps the laptop's routes clean.** ULA prefixes are random, so a network's IPv6 prefix collides neither with another network's nor with the laptop's own LAN. Two networks with overlapping IPv4 prefixes cannot both be routed on one laptop. A laptop gets IPv4 only where both its service and its gateway's have it, since the gateway forwards for it.
 
 The gateway decrypts the laptop's traffic and re-encrypts it toward backends, the terminating hop the design avoids for workloads. A developer's traffic needs reach rather than throughput, so the cost is acceptable here, and the laptop trusts the gateway's host the way a workload trusts its own.
 
 ### Leases and keys
 
-A lease binds `(interface, public key, host)` with a TTL the agent renews. **The host agent mints the keypair**; the private half never leaves the host and the control plane only ever sees public keys. The key is minted at attach and discarded at detach, and no key is ever reused.
+A lease binds `(interface, public key, host)` with a TTL the agent renews: 30 seconds. The agent renews once a third of the remaining term has passed, so each failed renewal still leaves two thirds of what remained to try again. **The host agent mints the keypair**; the private half never leaves the host and the control plane only ever sees public keys. The key is minted at attach and discarded at detach, and no key is ever reused.
 
 **The lease is the key binding.** Revoking it means removing that public key from every peer that holds it, which is a data-plane fence rather than a database state. A host that no longer holds the lease holds a key that no peer will accept.
 
@@ -312,7 +341,7 @@ Lease expiry makes an interface unreachable. It does not stop the workload, whic
 
 Steady-state traffic involves no lookup and no control-plane participation. A change to a service produces one update per host holding a policy-connected interface.
 
-**The control plane pushes to hosts, not to namespaces.** One message per host carries the deltas for every namespace on it, and the agent applies them as a batch of netlink operations. Fan-out therefore scales with the fleet rather than with the network:
+**The control plane pushes to hosts, not to namespaces.** One message per host carries the deltas for every namespace on it, and the agent applies them as a batch of netlink operations. The push is an HTTP long poll on the host's generation, answered with every network whose state changed since the generation the agent holds; a commit wakes the polls it concerns, and replicas sharing one Postgres wake each other through `LISTEN`/`NOTIFY`. Fan-out therefore scales with the fleet rather than with the network:
 
 ```text
 control-plane load = hosts_in_network x change_rate
@@ -322,7 +351,8 @@ per-host work      = affected namespaces on that host, netlink operations per ba
 **Peer work runs under RTNL and is therefore one lane per host.** `wg_set_device` takes `rtnl_lock()` before the per-device lock and holds both for the whole call, the Curve25519 precompute included; reading device state takes the same locks. So peer changes serialize against each other *and* against device creation, address, route and link changes — against anything on the host that uses RTNL.
 
 ```text
-~10,000-12,000 peer operations per second, per host, and it will not grow with cores
+~10,000-12,000 peer operations per second on a 4-vCPU cloud host, ~19,000 on a
+24-thread bare-metal desktop, and on any host it will not grow with cores
 ```
 
 Measurement only sizes that ceiling; the source decides the shape. One to two writers reach it, and a single writer batching ten peers per call reaches the same figure alone.
@@ -337,7 +367,7 @@ A 2,000-interface fully connected network remains unworkable, for the plainer re
 
 | Change | Order | Intermediate state |
 |---|---|---|
-| **Add an instance** | Install peer, then add its slots | Peer exists, receives nothing |
+| **Add an instance** | Install peer, then add its slots; for a co-located instance, also wait for its device to hold the client | Peer exists, receives nothing |
 | **Remove an instance** | Remove its slots, then after the grace period remove the peer, flush the conntrack entries translated to its addresses, and destroy the sockets addressed to it | Peer exists, takes no new flows; established flows finish |
 | **Replace an instance** | Install new peer, swap the slots in one transaction, then after the grace period remove the old peer, flush its conntrack entries and destroy the sockets addressed to it | New connections go to the new instance; established connections stay with the old one |
 | **Revoke an instance** | Remove its slots, its peer, its conntrack entries and its sockets together, no grace | The interface is unreachable at once |
@@ -346,12 +376,12 @@ Neither the conntrack flush nor the socket teardown is optional. An established 
 
 So a single-instance service flips atomically per client, and established connections drain rather than break. `cutover` mode evicts the conntrack entries instead, breaking them immediately.
 
-Across namespaces the change is eventually consistent, and the window is the push latency. **This is the cost of a change**, and it is the figure to design and report against. Note that it bounds a different thing from attach latency: an attach can finish locally in milliseconds, but a first packet to a *remote* peer cannot arrive before that peer's host has converged, so the two targets measure different things and the convergence window dominates.
+Across namespaces the change is eventually consistent, and the window is the push latency. **This is the cost of a change**, and it is the figure to design and report against. Every network carries the time of its last change, and each agent reports, per namespace, the time from that change to the moment the namespace holds it (`sdn_agent_convergence_seconds`). The clocks of the control plane and the hosts differ, so the figure is only as good as their synchronization. Note that it bounds a different thing from attach latency: an attach can finish locally in milliseconds, but a first packet to a *remote* peer cannot arrive before that peer's host has converged, so the two targets measure different things and the convergence window dominates.
 
 During that window, clients disagree. For a single-instance service, some clients talk to the old instance and some to the new one — never both, since each client flips in one step. Two modes decide how to handle that:
 
 - **`flip`** (default): add, then remove. No gap in availability, brief overlap in which instance is serving. Correct for stateless services.
-- **`drain`**: remove everywhere, wait for every client to acknowledge the generation, then add. Brief gap, no overlap. For single-writer services.
+- **`drain`**: remove everywhere, wait for every client to acknowledge the generation, then add. Brief gap, no overlap. For single-writer services. Designed, and deferred until a service needs it.
 
 `drain` requires per-namespace acknowledgment of a generation number, which the control plane tracks anyway for observability. A client partitioned from the control plane keeps its last known state and keeps using the old instance; `drain` then blocks and names who has not acknowledged. Waiting or proceeding is an explicit operator choice, and proceeding means accepting overlap.
 
@@ -382,30 +412,30 @@ Every namespace clamps TCP MSS, and ICMP and ICMPv6 `Packet Too Big` are permitt
 | Loss | Effect |
 |---|---|
 | **Control plane** | Traffic continues on last known state. Attach, detach, and policy changes stop. The agent holds its configuration for as long as the outage lasts, which costs the fence nothing because revocation runs through peers. Teardown is tied to **whether the workload is still there**, not to control-plane contact, so an outage of any length does not take the fleet down. On recovery the control plane waits out a grace period at least as long as its own downtime before acting on leases that expired during it, or it would revoke the fleet at once. |
-| **One relay** | Agents repoint endpoints to another relay in the set, where both sides are already registered. Established flows **survive**: keys, sessions and conntrack all live at the edges, so a sub-second repoint looks like brief packet loss and TCP retransmits across it. |
+| **One relay** | Agents repoint endpoints to another relay in the set, where both sides are already registered, once three 200ms probes in a row go unanswered. Established flows **survive**: keys, sessions and conntrack all live at the edges, so a sub-second repoint looks like brief packet loss and TCP retransmits across it. A relay that restarts reloads its table and registrations from disk and forwards again at once. |
 | **Every relay in a network** | Only loopback and direct paths survive. |
 | **A host** | Its leases expire, and its interfaces leave every backend map. Workloads elsewhere are unaffected. |
 | **A gateway** | Development machines joined through it lose the network until it returns. Workloads are unaffected. |
 | **A workload** | Its interface stays leased while the agent renews, so a restart in place keeps the address and the keys. |
-| **The agent** | Traffic continues: the kernel holds the data plane. Name resolution pauses rather than failing: the resolver's listening descriptors are handed across the restart, so queries wait in the socket buffer and are answered once the agent reloads its state. |
+| **The agent** | Traffic continues: the kernel holds the data plane. On restart the agent adopts its interfaces from its journal and the kernel, and removes anything it built that neither accounts for. Name resolution pauses rather than failing: the resolver's listening descriptors are kept in systemd's descriptor store across the restart, so queries wait in the socket buffer and are answered once the agent reloads its state. An agent run outside systemd binds fresh sockets, and queries sent while it is down go unanswered. |
 | **Partition between client and server** | WireGuard retries handshakes; the flow resumes when connectivity does. |
 
 No connection migrates. A workload that moves breaks its established connections and clients reconnect. The relay does not replay bytes.
 
 ## Measured
 
-Three substrates, because anything bound by an RCU grace period is sensitive to the kernel and the hypervisor, and the difference is large enough to matter: a KVM guest on kernel 6.8, a microVM on kernel 6.18, and an EC2 c6i.xlarge (Nitro, Ice Lake) on Ubuntu's AWS kernel 7.0, all 4 vCPU. Every call is checked and every step asserts its post-condition; `cmd/hostbench` reproduces this table.
+Four substrates, because anything bound by an RCU grace period is sensitive to the kernel and the hypervisor, and the difference is large enough to matter: a KVM guest on kernel 6.8, a microVM on kernel 6.18, and an EC2 c6i.xlarge (Nitro, Ice Lake) on Ubuntu's AWS kernel 7.0, all 4 vCPU; and a bare-metal desktop, an Intel Core Ultra 9 285 with 24 threads on Linux 7.0, which is no hypervisor and six times the cores. Every call is checked and every step asserts its post-condition; `cmd/hostbench` reproduces this table.
 
-| Operation | KVM, 6.8 | microVM, 6.18 | c6i.xlarge, 7.0 |
-|---|--:|--:|--:|
-| Create a device in the host namespace | 4.76ms | 0.79ms | 3.6ms |
-| Set private key and listen port | 0.22ms | — | 0.10–0.15ms |
-| Add one peer (keyed device, distinct peer key) | 0.30ms | — | 0.15–0.20ms |
-| Add one peer, batched 2,000 per call | 0.13ms | — | 0.10ms |
-| Flush a device's peers | 0.10ms | — | 0.10ms |
-| Move a device into a namespace | 7.65ms | 21.6ms | 7.0–7.6ms |
-| Move it back out | 9.81ms | 23.6ms | 7.7–7.9ms |
-| Destroy a device | 32.93ms | 85.9ms | 27ms |
+| Operation | KVM, 6.8 | microVM, 6.18 | c6i.xlarge, 7.0 | Core Ultra 9, 7.0 |
+|---|--:|--:|--:|--:|
+| Create a device in the host namespace | 4.76ms | 0.79ms | 3.6ms | 0.11ms |
+| Set private key and listen port | 0.22ms | — | 0.10–0.15ms | 0.05ms |
+| Add one peer (keyed device, distinct peer key) | 0.30ms | — | 0.15–0.20ms | 0.07ms |
+| Add one peer, batched 2,000 per call | 0.13ms | — | 0.10ms | 0.055ms |
+| Flush a device's peers | 0.10ms | — | 0.10ms | 0.04ms |
+| Move a device into a namespace | 7.65ms | 21.6ms | 7.0–7.6ms | 9.6ms |
+| Move it back out | 9.81ms | 23.6ms | 7.7–7.9ms | 8.8ms |
+| Destroy a device | 32.93ms | 85.9ms | 27ms | 39.4ms |
 
 The KVM peer row derived each peer's public key inside the timer, which an agent never pays, since it receives public keys from the control plane. On the c6i.xlarge that inflated the same row by about 0.15ms, so treat 0.30ms as an upper bound until it is rerun.
 
@@ -441,24 +471,24 @@ A destroy defers its grace period past `rtnl_unlock`, so the waits overlap. A mo
 
 A fresh device per row, so no row is charged for removing the previous row's peers. `wgctrl` splits anything over 32 peers into separate messages, so the larger rows are many calls rather than one. Cost per peer:
 
-| Peers per call | 8-vCPU KVM, 6.8 | c6i.xlarge, 7.0 |
-|--:|--:|--:|
-| 1 | 291µs | 194µs |
-| 10 | 81µs | 93–105µs |
-| 100 | 139µs | 119–131µs |
-| 1000 | 203µs | 100µs |
-| 2000 | 161µs (321ms in total) | 102–104µs (205–208ms) |
+| Peers per call | 8-vCPU KVM, 6.8 | c6i.xlarge, 7.0 | Core Ultra 9, 7.0 |
+|--:|--:|--:|--:|
+| 1 | 291µs | 194µs | 64µs |
+| 10 | 81µs | 93–105µs | 49µs |
+| 100 | 139µs | 119–131µs | 69µs |
+| 1000 | 203µs | 100µs | 68µs |
+| 2000 | 161µs (321ms in total) | 102–104µs (205–208ms) | 55µs (111ms) |
 
 Concurrent writers, each with its own device and socket, public keys precomputed outside the timer — `PublicKey()` is the Curve25519 scalar multiplication and parallelizes, so leaving it in reads as netlink scaling:
 
-| Writers | 8-vCPU KVM, run A | run B | c6i.xlarge, run A | run B |
-|--:|--:|--:|--:|--:|
-| 1 | 4,232/s | 2,490/s | 4,485/s | 9,954/s |
-| 2 | 8,135/s | **11,377/s** | 9,407/s | 10,200/s |
-| 4 | **11,671/s** | 9,859/s | **10,535/s** | **10,760/s** |
-| 8 | 11,073/s | 6,902/s | 10,388/s | 10,791/s |
+| Writers | 8-vCPU KVM, run A | run B | c6i.xlarge, run A | run B | Core Ultra 9 |
+|--:|--:|--:|--:|--:|--:|
+| 1 | 4,232/s | 2,490/s | 4,485/s | 9,954/s | 7,418/s |
+| 2 | 8,135/s | **11,377/s** | 9,407/s | 10,200/s | 17,711/s |
+| 4 | **11,671/s** | 9,859/s | **10,535/s** | **10,760/s** | **18,978/s** |
+| 8 | 11,073/s | 6,902/s | 10,388/s | 10,791/s | 14,293/s |
 
-Noisy at 500 operations per writer, and the single-writer figure is unstable between runs. What every run agrees on is a ceiling near 10,000–12,000 a second, reached by one to four writers and not improved past it — the number to budget. On the c6i.xlarge, process CPU stayed at 1.3–1.4 cores from two writers to eight: adding writers added neither throughput nor CPU, which is the shape a single lock predicts. `wg_set_device` holds RTNL, so the shape comes from the source and the measurement only sizes it.
+Noisy at 500 operations per writer, and the single-writer figure is unstable between runs. What every run agrees on is a ceiling reached by one to four writers and not improved past it: near 10,000–12,000 a second on the 4- and 8-vCPU guests, the number to budget on cloud hosts, and near 18,000–19,000 on the bare-metal desktop, where process CPU stayed at 1.0–1.2 cores from two writers to eight. On the c6i.xlarge, process CPU stayed at 1.3–1.4 cores from two writers to eight: adding writers added neither throughput nor CPU, which is the shape a single lock predicts. `wg_set_device` holds RTNL, so the shape comes from the source and the measurement only sizes it.
 
 Device-create latency under saturation:
 
@@ -468,15 +498,17 @@ Device-create latency under saturation:
 | 8-vCPU KVM, saturated | 1.61ms | 4.35ms |
 | c6i.xlarge, idle | 0.29–0.45ms | 0.35–0.82ms |
 | c6i.xlarge, saturated | 0.75–1.07ms | 1.52–6.20ms |
+| Core Ultra 9, idle | 0.54ms | 0.82ms |
+| Core Ultra 9, saturated | 0.55ms | 1.39ms |
 
 On the 8-vCPU guest run-to-run variance swamped the effect. On the c6i.xlarge creates ran 1.9–3.2× slower under saturation in all four runs, so device work does queue behind peer work on RTNL, at a cost of under a millisecond per create at these rates.
 
 ### Peer removal
 
-| Removing 100 peers, cost per peer | 8-vCPU KVM, 6.8 | c6i.xlarge, 7.0 |
-|---|--:|--:|
-| One peer per call | 60µs | 90–100µs |
-| Flush every peer (`ReplacePeers`) | 8µs | 27–31µs |
+| Removing 100 peers, cost per peer | 8-vCPU KVM, 6.8 | c6i.xlarge, 7.0 | Core Ultra 9, 7.0 |
+|---|--:|--:|--:|
+| One peer per call | 60µs | 90–100µs | 43µs |
+| Flush every peer (`ReplacePeers`) | 8µs | 27–31µs | 26µs |
 
 How removal compares with addition depends on the substrate. On the 8-vCPU guest a single-peer removal cost about a quarter of an addition. On the c6i.xlarge it cost about the same as a single-peer addition, roughly 100µs each, so a detach has to be budgeted like an attach. `wg_peer_remove` waits a grace period per peer and `wg_peer_remove_all` waits one in total — but `synchronize_net()` calls `synchronize_rcu_expedited()` when RTNL is held (`net/core/dev.c`), and `wg_set_device` holds it, so that wait is microseconds rather than the milliseconds an unexpedited grace period costs. This is also independent evidence that RTNL really is held: without it, removal would be millisecond-scale.
 
@@ -486,11 +518,11 @@ How removal compares with addition depends on the substrate. On the 8-vCPU guest
 
 One peer into each of H workload namespaces on one host, each with its own held netlink socket:
 
-| H | KVM batch | per namespace | c6i.xlarge batch | per namespace |
-|--:|--:|--:|--:|--:|
-| 40 | 10ms | 252µs | 5ms | 124–126µs |
-| 100 | 24ms | 238µs | 11–12ms | 114–117µs |
-| 400 | 94ms | 235µs | 44–47ms | 111–117µs |
+| H | KVM batch | per namespace | c6i.xlarge batch | per namespace | Core Ultra 9 batch | per namespace |
+|--:|--:|--:|--:|--:|--:|--:|
+| 40 | 10ms | 252µs | 5ms | 124–126µs | 3ms | 84µs |
+| 100 | 24ms | 238µs | 11–12ms | 114–117µs | 7ms | 72µs |
+| 400 | 94ms | 235µs | 44–47ms | 111–117µs | 35ms | 87µs |
 
 Three traps for a harness here. Re-adding a peer that already exists skips the static-static precompute and reads 20–60% cheaper. Flushing with `ReplacePeers` inside the timer charges the round for a removal a real update never does. And deriving each peer's public key inside the timer charges the round for a userspace scalar multiplication the agent never performs: on the c6i.xlarge, moving it out cut the per-namespace figure from about 205µs to 111–126µs. The KVM columns still include it, so they overstate the kernel cost by a similar margin.
 

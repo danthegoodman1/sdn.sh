@@ -607,7 +607,9 @@ func (p *Plane) CreateDevice(tx store.Tx, now time.Time, netRef string, req api.
 		PublicKey: req.PublicKey, State: api.Live, Expires: now.Add(req.TTL), Created: now,
 	}
 	d.Addr6 = alloc6(&n)
-	if svc.IPv4 {
+	// The gateway forwards for the device, so the device has IPv4 only
+	// where both its service and its gateway do.
+	if svc.IPv4 && gw.Addr4.IsValid() {
 		if d.Addr4, err = p.alloc4(tx, &n, now); err != nil {
 			return store.Interface{}, err
 		}

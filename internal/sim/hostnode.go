@@ -239,6 +239,7 @@ func (h *hostNode) carry(a agentcore.Action) {
 	now := h.w.now
 	switch a := a.(type) {
 	case agentcore.RunBatch:
+		h.w.checkColocated(h, a)
 		if h.w.debugNS != "" {
 			for _, op := range a.Ops {
 				for _, p := range op.Peers {

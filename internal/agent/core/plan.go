@@ -102,6 +102,7 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 		}
 		st.revision = n.Revision
 	}
+	st.awaiting = nil
 	var tgt target
 	if ok {
 		tgt = c.target(now, st, n, x)
@@ -278,6 +279,7 @@ func (c *Core) BatchDone(now time.Time, namespace string, id uint64, done int, e
 	if err == nil {
 		st.failures = 0
 		c.registerFresh(now, st)
+		c.rearm(st)
 		return
 	}
 	c.Stats.Failures++
@@ -308,6 +310,16 @@ func (c *Core) BatchDone(now time.Time, namespace string, id uint64, done int, e
 		// was; a failure that repeats replaces it.
 		if st.failures > 1 {
 			st.rules = nil
+		}
+	}
+}
+
+// rearm replans every namespace awaiting a co-located device's reverse
+// peer, since the batch just done may have installed it.
+func (c *Core) rearm(done *nsState) {
+	for _, name := range slices.Sorted(maps.Keys(c.ns)) {
+		if st := c.ns[name]; st != done && len(st.awaiting) > 0 {
+			st.dirty = true
 		}
 	}
 }
@@ -433,7 +445,7 @@ func (c *Core) Settled() map[string]SettledNamespace {
 	for _, name := range slices.Sorted(maps.Keys(c.ns)) {
 		st := c.ns[name]
 		i, ok := c.ifaces[st.iface]
-		if !ok || i.phase != ready || st.busy || st.dirty || st.observe || st.sweep || len(st.unflushed) > 0 {
+		if !ok || i.phase != ready || st.busy || st.dirty || st.observe || st.sweep || len(st.awaiting) > 0 || len(st.unflushed) > 0 {
 			continue
 		}
 		n, ok := c.desired.Networks[i.network]
@@ -452,8 +464,8 @@ func (c *Core) Pending() []string {
 	var out []string
 	for _, name := range slices.Sorted(maps.Keys(c.ns)) {
 		st := c.ns[name]
-		if st.busy || st.dirty || st.observe {
-			out = append(out, fmt.Sprintf("namespace %s: busy=%v dirty=%v observe=%v failures=%d retry=%v", name, st.busy, st.dirty, st.observe, st.failures, st.retryAt))
+		if st.busy || st.dirty || st.observe || len(st.awaiting) > 0 {
+			out = append(out, fmt.Sprintf("namespace %s: busy=%v dirty=%v observe=%v awaiting=%v failures=%d retry=%v", name, st.busy, st.dirty, st.observe, st.awaiting, st.failures, st.retryAt))
 		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(c.ifaces)) {

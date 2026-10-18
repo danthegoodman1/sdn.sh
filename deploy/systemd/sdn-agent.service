@@ -1,0 +1,24 @@
+[Unit]
+Description=sdn.sh host agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# agent.env holds SDN_AGENT_ARGS: the control plane's URL, the host's
+# credentials file and the telemetry address.
+EnvironmentFile=/etc/sdn/agent.env
+ExecStart=/usr/local/bin/sdn-agent $SDN_AGENT_ARGS
+# The kernel keeps the data plane when the agent stops, so a restart
+# costs no traffic. The descriptor store hands the stub resolver's
+# listening sockets to the next process, so queries wait in their buffers
+# across the restart instead of failing.
+Restart=always
+RestartSec=300ms
+NotifyAccess=main
+FileDescriptorStoreMax=4096
+FileDescriptorStorePreserve=yes
+# One netlink socket per workload namespace, and devices by the thousand.
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

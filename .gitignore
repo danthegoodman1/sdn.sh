@@ -1,3 +1,9 @@
 .env*
 /hostbench
 /relay
+/reports/
+/fleet.json
+/bin/
+deploy/aws/terraform/.terraform/
+deploy/aws/terraform/terraform.tfstate*
+deploy/aws/terraform/*.tfvars

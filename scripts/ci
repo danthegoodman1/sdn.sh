@@ -82,13 +82,13 @@ step_e2e() {
 }
 
 step_terraform() {
-	if [ ! -d deploy/aws ]; then
-		echo "no deploy/aws; nothing to check"
+	if [ ! -d deploy/aws/terraform ]; then
+		echo "no deploy/aws/terraform; nothing to check"
 		return 0
 	fi
-	terraform -chdir=deploy/aws fmt -check -recursive
-	terraform -chdir=deploy/aws init -backend=false -input=false
-	terraform -chdir=deploy/aws validate
+	terraform -chdir=deploy/aws/terraform fmt -check -recursive
+	terraform -chdir=deploy/aws/terraform init -backend=false -input=false
+	terraform -chdir=deploy/aws/terraform validate
 }
 
 if [ $# -eq 0 ]; then

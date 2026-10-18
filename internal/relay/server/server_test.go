@@ -4,6 +4,10 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -100,7 +104,7 @@ func send(t *testing.T, c *net.UDPConn, to netip.AddrPort, b []byte) {
 // recv returns what arrives within d, or nil.
 func recv(c *net.UDPConn, d time.Duration) ([]byte, netip.AddrPort) {
 	c.SetReadDeadline(time.Now().Add(d))
-	b := make([]byte, 2048)
+	b := make([]byte, 65536)
 	n, from, err := c.ReadFromUDPAddrPort(b)
 	if err != nil {
 		return nil, netip.AddrPort{}
@@ -152,7 +156,8 @@ func TestARelayForwardsOnlyBetweenRegisteredEndpointsAndRemembersThem(t *testing
 	e := newEdge(t)
 	cp := &fakeCP{st: e.st}
 	dir := t.TempDir()
-	_, cancel, done := start(t, dir, cp)
+	srv, cancel, done := start(t, dir, cp)
+	waitBound(t, srv, e.ab, e.ba)
 	a, b, attacker := udp(t), udp(t), udp(t)
 
 	regA := regproto.Encode(e.keyA, e.ab, 100)
@@ -219,7 +224,11 @@ func TestARegistrationTheLogFailsToHoldMovesNoEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.table.Load(time.Now(), e.st)
+	srv.table.Load(e.st)
+	// The table is on disk; only the log fails.
+	if err := srv.writeSnapshot(); err != nil {
+		t.Fatal(err)
+	}
 	srv.disk.Close()
 	reg := regproto.Encode(e.keyA, e.ab, 1)
 	d := srv.table.Packet(time.Now(), e.ab, netip.MustParseAddrPort("127.0.0.1:40000"), reg[:])
@@ -257,5 +266,250 @@ func TestARelayAnswersProbes(t *testing.T) {
 	got, _ := recv(c, time.Second)
 	if n, ok := regproto.ProbeNonce(got); !ok || n != 42 {
 		t.Fatalf("probe answer %x", got)
+	}
+}
+
+// waitBound waits until the relay holds a socket for each port, so a
+// datagram sent to one reaches the relay.
+func waitBound(t *testing.T, srv *Server, ports ...netip.AddrPort) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for _, p := range ports {
+		for srv.sockFor(p) == nil {
+			if time.Now().After(deadline) {
+				t.Fatalf("%v never bound", p)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+// connect registers both directions of an edge, resending until a packet
+// crosses each way, and drains what crossed.
+func connect(t *testing.T, e edge, a, b *net.UDPConn) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for counter := uint64(1); ; counter++ {
+		if time.Now().After(deadline) {
+			t.Fatalf("edge %v-%v never connected", e.ab, e.ba)
+		}
+		regA := regproto.Encode(e.keyA, e.ab, counter)
+		regB := regproto.Encode(e.keyB, e.ba, counter)
+		send(t, a, e.ab, regA[:])
+		send(t, b, e.ba, regB[:])
+		time.Sleep(20 * time.Millisecond)
+		send(t, a, e.ab, data("ping"))
+		send(t, b, e.ba, data("pong"))
+		gotB, _ := recv(b, 100*time.Millisecond)
+		gotA, _ := recv(a, 100*time.Millisecond)
+		if string(gotB) == string(data("ping")) && string(gotA) == string(data("pong")) {
+			drain(a)
+			drain(b)
+			return
+		}
+	}
+}
+
+// metric reads one counter or gauge from a registry.
+func metric(t *testing.T, reg *prometheus.Registry, name string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		m := mf.GetMetric()[0]
+		if m.GetCounter() != nil {
+			return m.GetCounter().GetValue()
+		}
+		return m.GetGauge().GetValue()
+	}
+	t.Fatalf("no metric %s", name)
+	return 0
+}
+
+// TestARelayForwardsADatagramWholeOrNotAtAll: the largest datagram an
+// overlay MTU allows goes on whole, and a longer one, which the kernel cuts
+// to the read buffer, drops rather than going on cut short.
+func TestARelayForwardsADatagramWholeOrNotAtAll(t *testing.T) {
+	e := newEdge(t)
+	srv, cancel, done := start(t, t.TempDir(), &fakeCP{st: e.st})
+	defer func() { cancel(); <-done }()
+	a, b := udp(t), udp(t)
+	connect(t, e, a, b)
+
+	jumbo := data(strings.Repeat("j", srv.cfg.MaxDatagram-4))
+	send(t, a, e.ab, jumbo)
+	if got, _ := recv(b, time.Second); string(got) != string(jumbo) {
+		t.Fatalf("a %d-byte datagram arrived as %d bytes", len(jumbo), len(got))
+	}
+
+	send(t, a, e.ab, data(strings.Repeat("o", srv.cfg.MaxDatagram)))
+	send(t, a, e.ab, data("after"))
+	for {
+		got, _ := recv(b, time.Second)
+		if got == nil {
+			t.Fatal("nothing arrived after the oversized datagram")
+		}
+		if string(got) == string(data("after")) {
+			break
+		}
+		t.Fatalf("forwarded %d bytes of an oversized datagram", len(got))
+	}
+}
+
+// TestAPortThatFailsToBindLeavesTheRestServing: one port of the restored
+// table is held by another program. The relay serves every other port, and
+// binds that one once it frees.
+func TestAPortThatFailsToBindLeavesTheRestServing(t *testing.T) {
+	e1, e2 := newEdge(t), newEdge(t)
+	st := api.RelayState{Relay: "r", Generation: 5, Ports: append(e1.st.Ports, e2.st.Ports...)}
+	dir := t.TempDir()
+	disk, _, _, err := OpenDisk(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := disk.Snapshot(relaycore.State{Generation: st.Generation, Ports: st.Ports}); err != nil {
+		t.Fatal(err)
+	}
+	disk.Close()
+	blocker, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(e2.ab))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+
+	cfg := DefaultConfig()
+	cfg.SocketBuffer = 0
+	cfg.RebindEvery = 50 * time.Millisecond
+	reg := prometheus.NewRegistry()
+	srv, err := New(cfg, &fakeCP{st: st}, dir, NewMetrics(reg, 16), zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+	select {
+	case <-srv.Ready():
+	case err := <-done:
+		cancel()
+		t.Fatalf("the relay stopped over one port: %v", err)
+	}
+	defer func() { cancel(); <-done }()
+	if n := metric(t, reg, "sdn_relay_unbound_ports"); n != 1 {
+		t.Fatalf("%v ports unbound, want 1", n)
+	}
+	a, b := udp(t), udp(t)
+	connect(t, e1, a, b)
+
+	blocker.Close()
+	c, d := udp(t), udp(t)
+	connect(t, e2, c, d)
+	if n := metric(t, reg, "sdn_relay_unbound_ports"); n != 0 {
+		t.Fatalf("%v ports unbound after the port freed", n)
+	}
+	if n := metric(t, reg, "sdn_relay_bind_failures_total"); n < 1 {
+		t.Fatal("the failed bind went uncounted")
+	}
+}
+
+// TestARegistrationUnderANewTableSurvivesACrash: the poll has loaded a
+// table the state file lacks when a registration under it arrives. The
+// relay crashes once the registration commits, and restarts with it.
+func TestARegistrationUnderANewTableSurvivesACrash(t *testing.T) {
+	e := newEdge(t)
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	srv, err := New(cfg, &fakeCP{st: e.st}, dir, NewMetrics(prometheus.NewRegistry(), 16), zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := netip.MustParseAddrPort("127.0.0.1:40000")
+	reg := regproto.Encode(e.keyA, e.ab, 1)
+	srv.mu.Lock()
+	srv.table.Load(e.st)
+	d := srv.table.Packet(time.Now(), e.ab, src, reg[:])
+	srv.mu.Unlock()
+	if d.Verdict != relaycore.Register {
+		t.Fatalf("the registration did not verify: %+v", d)
+	}
+	srv.enqueue(d.Registration)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.committer(ctx) }()
+	committed := func() bool {
+		return slices.ContainsFunc(srv.Dirs(), func(d relaycore.Dir) bool { return d.Local == e.ab && d.Endpoint == src })
+	}
+	for deadline := time.Now().Add(3 * time.Second); !committed(); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the registration never committed")
+		}
+	}
+	// The crash: nothing further reaches disk.
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	srv.disk.Close()
+
+	again, err := New(cfg, &fakeCP{st: e.st}, dir, NewMetrics(prometheus.NewRegistry(), 16), zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.disk.Close()
+	if dir, ok := again.table.Dir(e.ab); !ok || dir.Endpoint != src {
+		t.Fatalf("after the crash, %v holds %+v, want endpoint %v", e.ab, dir, src)
+	}
+}
+
+// TestATornLogTailIsCutBeforeTheNextAppend: a crash mid-append leaves part
+// of a line. The next run's appends start lines of their own, so the run
+// after that reads them.
+func TestATornLogTailIsCutBeforeTheNextAppend(t *testing.T) {
+	dir := t.TempDir()
+	r := func(counter uint64) relaycore.Registration {
+		return relaycore.Registration{Local: netip.MustParseAddrPort("127.0.0.1:7001"), Endpoint: netip.MustParseAddrPort("127.0.0.1:40000"), Counter: counter}
+	}
+	disk, _, _, err := OpenDisk(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := disk.Append([]relaycore.Registration{r(1), r(2)}); err != nil {
+		t.Fatal(err)
+	}
+	disk.Close()
+	f, err := os.OpenFile(filepath.Join(dir, logFile), os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"local":"127.0.0.1:7001","endpo`)
+	f.Close()
+
+	disk, _, regs, err := OpenDisk(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(regs) != 2 {
+		t.Fatalf("read %d registrations past a torn tail, want 2", len(regs))
+	}
+	if err := disk.Append([]relaycore.Registration{r(3)}); err != nil {
+		t.Fatal(err)
+	}
+	disk.Close()
+	disk, _, regs, err = OpenDisk(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk.Close()
+	var counters []uint64
+	for _, r := range regs {
+		counters = append(counters, r.Counter)
+	}
+	if !slices.Equal(counters, []uint64{1, 2, 3}) {
+		t.Fatalf("read counters %v, want [1 2 3]", counters)
 	}
 }

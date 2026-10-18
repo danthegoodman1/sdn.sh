@@ -71,8 +71,7 @@ func (r *relayNode) boot() { r.start() }
 func (r *relayNode) start() {
 	r.inc++
 	r.up = true
-	r.table = relaycore.New(relaycore.Config{RegistrationRate: 50, EarlyHold: 5 * time.Second, EarlyMax: 1024,
-		WaitFor: 2 * time.Second, WaitMax: 8, WaitTotal: 1024})
+	r.table = relaycore.New(relaycore.Config{RegistrationRate: 50, WaitFor: 2 * time.Second, WaitMax: 8, WaitTotal: 1024})
 	r.waiting = map[uint64]waitingPacket{}
 	r.table.Restore(r.disk.state, r.disk.log)
 	r.w.logf("%s starts with %d ports", r.name, len(r.disk.state.Ports))
@@ -124,9 +123,7 @@ func (r *relayNode) poll() {
 				if r.inc != inc || !r.up {
 					return
 				}
-				for _, reg := range r.table.Load(r.w.now(), st) {
-					r.persist(reg, nil)
-				}
+				r.table.Load(st)
 				r.disk.state = r.table.Persisted()
 				r.disk.log = nil
 				if seq == r.pollSeq && !answered {

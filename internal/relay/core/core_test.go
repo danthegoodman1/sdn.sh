@@ -27,8 +27,8 @@ var (
 )
 
 func table() *Table {
-	t := New(Config{EarlyHold: 5 * time.Second, EarlyMax: 16})
-	t.Load(t0, api.RelayState{Generation: 1, Ports: []api.RelayPort{
+	t := New(Config{})
+	t.Load(api.RelayState{Generation: 1, Ports: []api.RelayPort{
 		{Local: portAB, Peer: 7002, Advertised: advAB, Key: keyAB},
 		{Local: portBA, Peer: 7001, Advertised: advBA, Key: keyBA},
 	}})
@@ -69,10 +69,20 @@ func TestForwardingNeedsBothSidesRegistered(t *testing.T) {
 	}
 }
 
+// TestAnUnknownPortDrops covers data and registrations alike: the relay
+// binds sockets only for the ports its table holds, so nothing waits for a
+// port to arrive.
 func TestAnUnknownPortDrops(t *testing.T) {
 	tb := table()
-	if d := tb.Packet(t0, netip.AddrPortFrom(local, 9999), senderA, wg); d.Verdict != Drop || d.Reason != Unknown {
-		t.Fatalf("%+v", d)
+	unknown := netip.AddrPortFrom(local, 9999)
+	reg := regproto.Encode(keyAB, netip.AddrPortFrom(adv, 9999), 3)
+	for name, b := range map[string][]byte{"data": wg, "registration": reg[:]} {
+		if d := tb.Packet(t0, unknown, senderA, b); d.Verdict != Drop || d.Reason != Unknown {
+			t.Fatalf("%s: %+v", name, d)
+		}
+	}
+	if tb.Unknown != 2 {
+		t.Fatalf("counted %d packets to unknown ports, want 2", tb.Unknown)
 	}
 }
 
@@ -141,14 +151,14 @@ func TestARaceIsWonOnce(t *testing.T) {
 func TestAReloadKeepsRegistrationsOfUnchangedPorts(t *testing.T) {
 	tb := table()
 	register(t, tb, portAB, keyAB, advAB, senderA, 10)
-	tb.Load(t0, api.RelayState{Generation: 2, Ports: []api.RelayPort{
+	tb.Load(api.RelayState{Generation: 2, Ports: []api.RelayPort{
 		{Local: portAB, Peer: 7002, Advertised: advAB, Key: keyAB},
 		{Local: portBA, Peer: 7001, Advertised: advBA, Key: model.Secret{7}},
 	}})
 	if dir, _ := tb.Dir(portAB); dir.Endpoint != senderA || dir.Counter != 10 {
 		t.Fatal("an unchanged port lost its registration")
 	}
-	tb.Load(t0, api.RelayState{Generation: 3, Ports: []api.RelayPort{
+	tb.Load(api.RelayState{Generation: 3, Ports: []api.RelayPort{
 		{Local: portAB, Peer: 7002, Advertised: advAB, Key: model.Secret{8}},
 	}})
 	if dir, _ := tb.Dir(portAB); dir.Endpoint.IsValid() || dir.Counter != 0 {
@@ -180,27 +190,9 @@ func TestRestoreReplaysTheLog(t *testing.T) {
 	}
 }
 
-func TestARegistrationForAPortNotYetPushedWaits(t *testing.T) {
-	tb := New(Config{EarlyHold: 5 * time.Second, EarlyMax: 16})
-	b := regproto.Encode(keyAB, advAB, 3)
-	if d := tb.Packet(t0, portAB, senderA, b[:]); d.Verdict != Held {
-		t.Fatalf("%+v", d)
-	}
-	regs := tb.Load(t0.Add(time.Second), api.RelayState{Ports: []api.RelayPort{{Local: portAB, Peer: 7002, Advertised: advAB, Key: keyAB}}})
-	if len(regs) != 1 || regs[0].Endpoint != senderA {
-		t.Fatalf("held registrations %+v", regs)
-	}
-	// One held past the hold is forgotten.
-	tb2 := New(Config{EarlyHold: 5 * time.Second, EarlyMax: 16})
-	tb2.Packet(t0, portAB, senderA, b[:])
-	if regs := tb2.Load(t0.Add(6*time.Second), api.RelayState{Ports: []api.RelayPort{{Local: portAB, Peer: 7002, Advertised: advAB, Key: keyAB}}}); len(regs) != 0 {
-		t.Fatal("a stale held registration verified")
-	}
-}
-
 func TestRateLimitsHold(t *testing.T) {
 	tb := New(Config{Rate: 10, Burst: 10, RegistrationRate: 2})
-	tb.Load(t0, api.RelayState{Ports: []api.RelayPort{
+	tb.Load(api.RelayState{Ports: []api.RelayPort{
 		{Local: portAB, Peer: 7002, Advertised: advAB, Key: keyAB},
 		{Local: portBA, Peer: 7001, Advertised: advBA, Key: keyBA},
 	}})
@@ -228,19 +220,97 @@ func TestRateLimitsHold(t *testing.T) {
 }
 
 func TestProbesEchoTheirOwnBytes(t *testing.T) {
+	probes := NewProbes(Config{})
 	p := regproto.Probe(7)
-	out, ok := ProbeReply(p[:])
-	if !ok || len(out) != regproto.ProbeSize {
+	if out, reason := probes.Reply(t0, p[:]); string(out) != string(p[:]) || reason != "" {
 		t.Fatal("probe not answered in kind")
 	}
-	if _, ok := ProbeReply(wg); ok {
+	if out, reason := probes.Reply(t0, wg); out != nil || reason != "" {
 		t.Fatal("answered a non-probe")
 	}
 }
 
+// TestProbeAnswersAreCappedAcrossTheRelay: a probe's source can be forged,
+// so the probe port answers at most ProbeRate a second, whoever asks.
+func TestProbeAnswersAreCappedAcrossTheRelay(t *testing.T) {
+	probes := NewProbes(Config{ProbeRate: 5})
+	p := regproto.Probe(7)
+	answered, limited := 0, 0
+	for range 20 {
+		switch out, reason := probes.Reply(t0, p[:]); {
+		case out != nil:
+			answered++
+		case reason == Limited:
+			limited++
+		}
+	}
+	if answered != 5 || limited != 15 {
+		t.Fatalf("answered %d and limited %d of 20 within a second, want 5 and 15", answered, limited)
+	}
+	if out, _ := probes.Reply(t0.Add(time.Second), p[:]); out == nil {
+		t.Fatal("the cap never refilled")
+	}
+}
+
+// TestJunkLeavesAnOwnerItsRegistrations: registrations that fail spend the
+// relay's reject budget, never the port's, so a flood of junk at a port's
+// registration rate still lets its owner move the endpoint.
+func TestJunkLeavesAnOwnerItsRegistrations(t *testing.T) {
+	tb := New(Config{RegistrationRate: 2, RejectRate: 1000})
+	tb.Load(api.RelayState{Ports: []api.RelayPort{{Local: portAB, Peer: 7002, Advertised: advAB, Key: keyAB}}})
+	for c := range uint64(100) {
+		forged := regproto.Encode(model.Secret{9}, advAB, c+1)
+		tb.Packet(t0, portAB, attacker, forged[:])
+	}
+	for c := range uint64(2) {
+		if !register(t, tb, portAB, keyAB, advAB, senderA, c+1) {
+			t.Fatalf("after junk, the owner's registration %d was refused", c+1)
+		}
+	}
+	// The port's own budget still caps what verifies.
+	b := regproto.Encode(keyAB, advAB, 3)
+	if d := tb.Packet(t0, portAB, senderA, b[:]); d.Reason != Limited {
+		t.Fatalf("a third registration within a second: %+v", d)
+	}
+}
+
+// TestFailedVerificationsAreCappedAcrossTheRelay: once the reject budget is
+// spent, no port verifies anything until it refills, which bounds the MACs a
+// flood across many ports makes the relay compute.
+func TestFailedVerificationsAreCappedAcrossTheRelay(t *testing.T) {
+	tb := New(Config{RegistrationRate: 2, RejectRate: 10})
+	tb.Load(api.RelayState{Ports: []api.RelayPort{
+		{Local: portAB, Peer: 7002, Advertised: advAB, Key: keyAB},
+		{Local: portBA, Peer: 7001, Advertised: advBA, Key: keyBA},
+	}})
+	for i := range 50 {
+		port, a := portAB, advAB
+		if i%2 == 1 {
+			port, a = portBA, advBA
+		}
+		forged := regproto.Encode(model.Secret{9}, a, uint64(i+1))
+		tb.Packet(t0, port, attacker, forged[:])
+	}
+	ab, _ := tb.Dir(portAB)
+	ba, _ := tb.Dir(portBA)
+	if macs := ab.Stats.BadMAC + ba.Stats.BadMAC; macs != 10 {
+		t.Fatalf("verified %d junk registrations within a second, want 10", macs)
+	}
+	if limited := ab.Stats.Limited + ba.Stats.Limited; limited != 40 {
+		t.Fatalf("limited %d, want 40", limited)
+	}
+	b := regproto.Encode(keyAB, advAB, 1)
+	if d := tb.Packet(t0, portAB, senderA, b[:]); d.Reason != Limited {
+		t.Fatalf("with the reject budget spent: %+v", d)
+	}
+	if d := tb.Packet(t0.Add(time.Second), portAB, senderA, b[:]); d.Verdict != Register {
+		t.Fatalf("once the budget refilled: %+v", d)
+	}
+}
+
 func waitTable() *Table {
-	t := New(Config{EarlyHold: 5 * time.Second, EarlyMax: 16, WaitFor: 2 * time.Second, WaitMax: 2, WaitTotal: 16})
-	t.Load(t0, api.RelayState{Generation: 1, Ports: []api.RelayPort{
+	t := New(Config{WaitFor: 2 * time.Second, WaitMax: 2, WaitTotal: 16})
+	t.Load(api.RelayState{Generation: 1, Ports: []api.RelayPort{
 		{Local: portAB, Peer: 7002, Advertised: advAB, Key: keyAB},
 		{Local: portBA, Peer: 7001, Advertised: advBA, Key: keyBA},
 	}})
@@ -297,4 +367,107 @@ func TestAPortHoldsAFewWaitingPacketsAtMost(t *testing.T) {
 	if tb.Waiting() != 2 {
 		t.Fatalf("%d waiting", tb.Waiting())
 	}
+}
+
+// TestWaitSlotsFreeHoweverAWaitEnds: a port's slots and the relay's free
+// when a waiting packet goes, when its port leaves the table, and when its
+// wait runs out.
+func TestWaitSlotsFreeHoweverAWaitEnds(t *testing.T) {
+	portCD, portDC := netip.AddrPortFrom(local, 7003), netip.AddrPortFrom(local, 7004)
+	ports := []api.RelayPort{
+		{Local: portAB, Peer: 7002, Advertised: advAB, Key: keyAB},
+		{Local: portBA, Peer: 7001, Advertised: advBA, Key: keyBA},
+		{Local: portCD, Peer: 7004, Advertised: netip.AddrPortFrom(adv, 7003), Key: model.Secret{3}},
+		{Local: portDC, Peer: 7003, Advertised: netip.AddrPortFrom(adv, 7004), Key: model.Secret{4}},
+	}
+	tb := New(Config{WaitFor: 2 * time.Second, WaitMax: 2, WaitTotal: 3})
+	tb.Load(api.RelayState{Generation: 1, Ports: ports})
+	waits := func(at time.Time, port, src netip.AddrPort) bool {
+		return tb.Packet(at, port, src, wg).Verdict == Wait
+	}
+	if !waits(t0, portAB, senderA) || !waits(t0, portAB, attacker) || waits(t0, portAB, attacker) {
+		t.Fatal("port AB should hold two")
+	}
+	if !waits(t0, portCD, attacker) || waits(t0, portDC, attacker) {
+		t.Fatal("the relay should hold three")
+	}
+
+	register(t, tb, portAB, keyAB, advAB, senderA, 1)
+	register(t, tb, portBA, keyBA, advBA, senderB, 1)
+	if rel := tb.Release(t0); len(rel) != 1 || rel[0].Drop {
+		t.Fatalf("released %+v, want A's packet", rel)
+	}
+	if tb.Waiting() != 2 || !waits(t0, portAB, attacker) || waits(t0, portAB, attacker) {
+		t.Fatal("a packet that went kept its slot")
+	}
+
+	tb.Load(api.RelayState{Generation: 2, Ports: ports[:2]})
+	if rel := tb.Release(t0); len(rel) != 1 || !rel[0].Drop {
+		t.Fatalf("after CD left the table: %+v", rel)
+	}
+	tb.Load(api.RelayState{Generation: 3, Ports: ports})
+	if tb.Waiting() != 2 || !waits(t0, portCD, attacker) || waits(t0, portDC, attacker) {
+		t.Fatal("a packet whose port left the table kept its slot")
+	}
+
+	later := t0.Add(3 * time.Second)
+	if rel := tb.Release(later); len(rel) != 3 {
+		t.Fatalf("expired %+v, want three", rel)
+	}
+	if tb.Waiting() != 0 || !waits(later, portAB, attacker) || !waits(later, portAB, attacker) {
+		t.Fatal("an expired packet kept its slot")
+	}
+}
+
+// TestAWaitCostsTheSameHoweverManyWait: refusing a packet at a full port,
+// and releasing after it, cost no more with 64,000 packets waiting than with
+// 16, so junk spread across ports cannot stall forwarding.
+func TestAWaitCostsTheSameHoweverManyWait(t *testing.T) {
+	few, many := waitCost(16), waitCost(64000)
+	if many > 10*few {
+		t.Fatalf("a packet at a full port costs %v with 64,000 waiting and %v with 16", many, few)
+	}
+}
+
+// waitCost is the least time, over a few runs, a junk packet to a full port
+// and a release after it take with n packets waiting.
+func waitCost(n int) time.Duration {
+	const rounds = 500
+	tb, full := fullTable(n)
+	best := time.Duration(1<<63 - 1)
+	for range 5 {
+		start := time.Now()
+		for range rounds {
+			tb.Packet(t0, full, attacker, wg)
+			tb.Release(t0)
+		}
+		best = min(best, time.Since(start))
+	}
+	return best / rounds
+}
+
+func BenchmarkAJunkPacketAt64000Waiting(b *testing.B) {
+	tb, full := fullTable(64000)
+	for b.Loop() {
+		tb.Packet(t0, full, attacker, wg)
+		tb.Release(t0)
+	}
+}
+
+// fullTable returns a table with n packets waiting, eight on each of n/8
+// ports, and one of those ports.
+func fullTable(n int) (*Table, netip.AddrPort) {
+	tb := New(DefaultConfig())
+	var st api.RelayState
+	for i := range n / 8 {
+		port := uint16(10000 + i)
+		st.Ports = append(st.Ports, api.RelayPort{Local: netip.AddrPortFrom(local, port), Peer: port ^ 1, Advertised: netip.AddrPortFrom(adv, port), Key: model.Secret{1}})
+	}
+	tb.Load(st)
+	for _, p := range st.Ports {
+		for range 8 {
+			tb.Packet(t0, p.Local, attacker, wg)
+		}
+	}
+	return tb, st.Ports[0].Local
 }

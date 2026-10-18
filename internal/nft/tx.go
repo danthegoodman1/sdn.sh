@@ -17,6 +17,9 @@ type Transaction struct {
 	// Replace rebuilds the table from nothing, for a namespace whose table
 	// the agent has yet to see.
 	Replace *Ruleset `json:"replace,omitempty"`
+	// Forward says the table translates forwarded traffic too, so a rule
+	// rewrite covers the forwarding chains.
+	Forward bool `json:"forward,omitempty"`
 	// Rules, when set, replaces every chain's rules. Rules are flushed
 	// first and written last, so maps and sets they name exist in between.
 	Rules   *Rules       `json:"rules,omitempty"`
@@ -55,7 +58,7 @@ func Diff(have, want *Ruleset) Transaction {
 	if have == nil || have.Forward != want.Forward {
 		return Transaction{Replace: want.Clone()}
 	}
-	var t Transaction
+	t := Transaction{Forward: want.Forward}
 	if !rulesEqual(have.Rules, want.Rules) {
 		r := Rules{
 			Translate: slices.Clone(want.Rules.Translate),

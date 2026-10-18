@@ -546,11 +546,17 @@ func TestADisconnectedPairKeepsItsEdgeForTheQuarantine(t *testing.T) {
 	var rules []store.Rule
 	f.s.View(context.Background(), func(tx store.ReadTx) error { rules, _ = tx.Rules(r2.Network); return nil })
 	f.update(func(tx store.Tx) error { return f.p.DeleteRule(tx, f.now, "n", rules[0].ID) })
-	f.update(func(tx store.Tx) error { _, err := f.p.Sweep(tx, f.now.Add(f.p.Config.PortQuarantine-time.Second)); return err })
+	f.update(func(tx store.Tx) error {
+		_, err := f.p.Sweep(tx, f.now.Add(f.p.Config.PortQuarantine-time.Second))
+		return err
+	})
 	if len(edges()) != 1 {
 		t.Fatal("a dormant edge went before the quarantine passed")
 	}
-	f.update(func(tx store.Tx) error { _, err := f.p.Sweep(tx, f.now.Add(f.p.Config.PortQuarantine+time.Second)); return err })
+	f.update(func(tx store.Tx) error {
+		_, err := f.p.Sweep(tx, f.now.Add(f.p.Config.PortQuarantine+time.Second))
+		return err
+	})
 	if len(edges()) != 0 {
 		t.Fatal("a dormant edge outlived the quarantine")
 	}

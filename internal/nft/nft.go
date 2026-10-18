@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 
 	"sdn.sh/internal/model"
 )
@@ -122,6 +123,16 @@ func MapName(svc model.ServiceID, f Family) string {
 // SetName names a service's source set in one family.
 func SetName(svc model.ServiceID, f Family) string {
 	return fmt.Sprintf("f_%s_%d", model.Short(string(svc)), f)
+}
+
+// ParseName reports whether a name MapName or SetName made names a slot map,
+// and its family.
+func ParseName(name string) (isMap bool, f Family) {
+	f = IPv6
+	if strings.HasSuffix(name, "_4") {
+		f = IPv4
+	}
+	return strings.HasPrefix(name, "s_"), f
 }
 
 // Normalize sorts a ruleset's parts, so equal rulesets compare equal.

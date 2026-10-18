@@ -138,13 +138,14 @@ func (p *Plane) token() (string, [32]byte, error) {
 }
 
 // bump gives the network, and the hosts whose interface set changed, this
-// transaction's revision, and records the touch.
-func bump(tx store.Tx, n *store.Network, hosts ...model.HostID) error {
+// transaction's revision, stamps the network with the time, and records
+// the touch.
+func bump(tx store.Tx, now time.Time, n *store.Network, hosts ...model.HostID) error {
 	rev, err := tx.Bump()
 	if err != nil {
 		return err
 	}
-	n.Revision = rev
+	n.Revision, n.Changed = rev, now
 	if err := tx.PutNetwork(*n); err != nil {
 		return err
 	}
@@ -241,7 +242,7 @@ func (p *Plane) CreateNetwork(tx store.Tx, now time.Time, req api.CreateNetwork)
 	if err := tx.PutNetwork(n); err != nil {
 		return store.Network{}, conflict(err, "network "+req.Name)
 	}
-	return n, bump(tx, &n)
+	return n, bump(tx, now, &n)
 }
 
 // DeleteNetwork removes a network with nothing connected to it.
@@ -319,7 +320,7 @@ func (p *Plane) CreateService(tx store.Tx, now time.Time, netRef string, req api
 	if err := tx.PutService(s); err != nil {
 		return store.Service{}, conflict(err, "service "+req.Name)
 	}
-	return s, bump(tx, &n)
+	return s, bump(tx, now, &n)
 }
 
 // DeleteService removes a service with no connected interfaces, and the
@@ -361,7 +362,7 @@ func (p *Plane) DeleteService(tx store.Tx, now time.Time, netRef, ref string) er
 	if err := tx.DeleteService(s.ID); err != nil {
 		return err
 	}
-	return bump(tx, &n)
+	return bump(tx, now, &n)
 }
 
 // CreateRule permits a flow from one service to another, or to the
@@ -414,7 +415,7 @@ func (p *Plane) CreateRule(tx store.Tx, now time.Time, netRef string, req api.Cr
 			return store.Rule{}, err
 		}
 	}
-	return r, bump(tx, &n)
+	return r, bump(tx, now, &n)
 }
 
 // DeleteRule removes a rule, and the edges no other rule keeps.
@@ -435,7 +436,7 @@ func (p *Plane) DeleteRule(tx store.Tx, now time.Time, netRef string, id model.R
 			return err
 		}
 	}
-	return bump(tx, &n)
+	return bump(tx, now, &n)
 }
 
 // CreateHost registers a host and returns its token.
@@ -563,7 +564,7 @@ func (p *Plane) Attach(tx store.Tx, now time.Time, host model.HostID, req api.At
 	if err := p.reconcileEdges(tx, now, &n, interfaceScope(iface.ID)); err != nil {
 		return store.Interface{}, err
 	}
-	return iface, bump(tx, &n, host)
+	return iface, bump(tx, now, &n, host)
 }
 
 // MaxDeviceTTL bounds a development machine's lease term.
@@ -617,7 +618,7 @@ func (p *Plane) CreateDevice(tx store.Tx, now time.Time, netRef string, req api.
 	if err := p.reconcileEdges(tx, now, &n, interfaceScope(gw.ID)); err != nil {
 		return store.Interface{}, err
 	}
-	return d, bump(tx, &n, gw.Host)
+	return d, bump(tx, now, &n, gw.Host)
 }
 
 // DeviceConfig returns what a development machine's WireGuard config needs.
@@ -723,7 +724,7 @@ func (p *Plane) end(tx store.Tx, now time.Time, i store.Interface, quarantine bo
 			return err
 		}
 	}
-	return bump(tx, &n, i.Host)
+	return bump(tx, now, &n, i.Host)
 }
 
 // Renew extends the leases of a host's live interfaces and returns their
@@ -794,7 +795,7 @@ func (p *Plane) Sweep(tx store.Tx, now time.Time) (int, error) {
 		if err := p.reconcileEdges(tx, now, &n, interfaceScope(i.ID)); err != nil {
 			return 0, err
 		}
-		if err := bump(tx, &n, i.Host); err != nil {
+		if err := bump(tx, now, &n, i.Host); err != nil {
 			return 0, err
 		}
 		changed++
@@ -822,7 +823,7 @@ func (p *Plane) Sweep(tx store.Tx, now time.Time) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		if err := bump(tx, &n, i.Host); err != nil {
+		if err := bump(tx, now, &n, i.Host); err != nil {
 			return 0, err
 		}
 		changed++

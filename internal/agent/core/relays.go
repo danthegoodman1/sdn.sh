@@ -134,6 +134,47 @@ func (c *Core) registerFresh(now time.Time, st *nsState) {
 	keys := slices.SortedFunc(maps.Keys(st.fresh), compareKey)
 	st.fresh = map[model.Key]bool{}
 	c.register(now, st, keys)
+	if c.cfg.RegisterRetries <= 0 {
+		return
+	}
+	r, ok := c.resends[st.name]
+	if !ok {
+		r = &resend{}
+		c.resends[st.name] = r
+	}
+	r.keys = slices.Compact(slices.SortedFunc(slices.Values(append(r.keys, keys...)), compareKey))
+	r.left, r.gap = c.cfg.RegisterRetries, c.cfg.RegisterRetry
+	r.at = now.Add(r.gap)
+}
+
+// resend is a namespace's fresh directions awaiting another registration.
+type resend struct {
+	keys []model.Key
+	at   time.Time
+	gap  time.Duration
+	left int
+}
+
+// resendDue sends the registrations whose retry is due.
+func (c *Core) resendDue(now time.Time) {
+	for _, name := range slices.Sorted(maps.Keys(c.resends)) {
+		r := c.resends[name]
+		if now.Before(r.at) {
+			continue
+		}
+		st, ok := c.ns[name]
+		if !ok {
+			delete(c.resends, name)
+			continue
+		}
+		c.register(now, st, r.keys)
+		r.left--
+		r.gap *= 3
+		r.at = now.Add(r.gap)
+		if r.left <= 0 {
+			delete(c.resends, name)
+		}
+	}
 }
 
 // register sends a registration for each relay peer named, to every relay of
@@ -213,6 +254,7 @@ func (c *Core) Tick(now time.Time) {
 	if c.cfg.RegisterEvery > 0 && !now.Before(c.lastRegister.Add(c.cfg.RegisterEvery)) {
 		c.UnderlayChanged(now)
 	}
+	c.resendDue(now)
 	if c.cfg.ResyncEvery > 0 && !now.Before(c.lastResync.Add(c.cfg.ResyncEvery)) {
 		c.lastResync = now
 		for _, name := range slices.Sorted(maps.Keys(c.ns)) {
@@ -239,6 +281,9 @@ func (c *Core) NextWake(now time.Time) time.Time {
 	soonest(c.lastRegister.Add(c.cfg.RegisterEvery))
 	soonest(c.lastResync.Add(c.cfg.ResyncEvery))
 	soonest(c.nextRelease)
+	for _, name := range slices.Sorted(maps.Keys(c.resends)) {
+		soonest(c.resends[name].at)
+	}
 	for _, id := range slices.Sorted(maps.Keys(c.ifaces)) {
 		if i := c.ifaces[id]; i.phase == creating || i.phase == registering {
 			soonest(i.deadline)

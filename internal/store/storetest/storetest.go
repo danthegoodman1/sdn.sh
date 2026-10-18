@@ -186,7 +186,7 @@ func fullNetwork(id model.NetworkID, name string) store.Network {
 		MTU:     1380,
 		Relays:  []model.RelayID{"relay-b", "relay-a"},
 		Next6:   math.MaxUint64, Next4: 1<<63 + 7, Revision: 1<<63 + 1,
-		Created: fine,
+		Created: fine, Changed: fine.Add(time.Hour),
 	}
 }
 

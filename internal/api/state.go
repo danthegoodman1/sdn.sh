@@ -59,9 +59,12 @@ type NetworkState struct {
 	Network  model.NetworkID `json:"network"`
 	Name     string          `json:"name"`
 	Revision uint64          `json:"revision"`
-	Prefix6  netip.Prefix    `json:"prefix6"`
-	Prefix4  netip.Prefix    `json:"prefix4,omitzero"`
-	MTU      int             `json:"mtu"`
+	// Changed is when the revision committed, which agents measure
+	// convergence from.
+	Changed time.Time    `json:"changed,omitzero"`
+	Prefix6 netip.Prefix `json:"prefix6"`
+	Prefix4 netip.Prefix `json:"prefix4,omitzero"`
+	MTU     int          `json:"mtu"`
 	// Relays is the network's relay set in preference order.
 	Relays     []RelayRef  `json:"relays,omitempty"`
 	Interfaces []Interface `json:"interfaces"`

@@ -741,3 +741,99 @@ func TestADevelopmentMachineReachesServicesThroughItsGatewayAndLosesThemOnRevoca
 		time.Sleep(200 * time.Millisecond)
 	}
 }
+
+// TestEveryDaemonReportsWhatItDoes drives an attach, a service change, a
+// relay failover and a revocation, and checks that each daemon's metrics
+// move and its logs name the resources involved.
+func TestEveryDaemonReportsWhatItDoes(t *testing.T) {
+	l := newLab(t, "e2el", fastClocks...)
+	ctx := context.Background()
+	r1 := must(l.AddRelay(ctx, "r1"))
+	r2 := must(l.AddRelay(ctx, "r2"))
+	h1 := must(l.AddHost(ctx, "h1"))
+	h2 := must(l.AddHost(ctx, "h2"))
+	svc := webDB(t, l, r1, r2)
+	db1 := attachDB(t, h2, "db-1")
+	web := must(h1.Attach(ctx, "web-1", "prod", "web"))
+	dbAddr := netip.AddrPortFrom(svc.Addr6, 5432)
+	if _, err := lab.DialUntil(web.Namespace, dbAddr, 20*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	type check struct {
+		url, sel string
+		min      float64
+	}
+	expect := func(when string, checks ...check) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for _, c := range checks {
+			for {
+				v := metric(must(lab.Metrics(c.url)), c.sel)
+				if v >= c.min {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Errorf("%s: %s = %v, want at least %v", when, c.sel, v, c.min)
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+	}
+	cpm := l.CPTelemetry()
+	expect("after an attach",
+		check{h1.Telemetry, `sdn_agent_local_calls_total{call="attach",result="ok"}`, 1},
+		check{h1.Telemetry, `sdn_agent_kernel_ops_total{kind="create_device",result="ok"}`, 1},
+		check{h1.Telemetry, `sdn_agent_kernel_op_seconds_count{kind="set_peers"}`, 1},
+		check{h1.Telemetry, `sdn_agent_convergence_seconds_count`, 1},
+		check{h1.Telemetry, `sdn_agent_registrations_total{result="sent"}`, 1},
+		check{h1.Telemetry, `sdn_agent_relay_probes_total`, 1},
+		check{h1.Telemetry, `sdn_agent_generation`, 1},
+		check{cpm, `sdn_cp_requests_total{code="200",route="POST /v1/agent/attach"}`, 2},
+		check{cpm, `sdn_cp_lease_events_total{event="attached"}`, 2},
+		check{cpm, `sdn_cp_store_transactions_total{op="attach",result="ok"}`, 2},
+		check{cpm, `sdn_cp_pushes_total`, 1},
+		check{r1.Telemetry, `sdn_relay_forwarded_packets_total`, 1},
+		check{r1.Telemetry, `sdn_relay_registrations_total{result="accepted"}`, 2},
+		check{r1.Telemetry, `sdn_relay_ports`, 2},
+	)
+	if lines := h1.Agent.LogLines("attach"); len(lines) == 0 || lines[0]["interface"] != string(web.Interface) ||
+		lines[0]["namespace"] != web.Namespace || lines[0]["network"] != string(web.Network) || lines[0]["service"] != string(web.Service) {
+		t.Errorf("the agent's attach line: %v", lines)
+	}
+	if lines := l.CP().LogLines("interface attached"); len(lines) < 2 || lines[0]["host"] == nil || lines[0]["interface"] == nil || lines[0]["network"] == nil {
+		t.Errorf("the control plane's attach lines: %v", lines)
+	}
+	if lines := r1.Proc.LogLines("port table loaded"); len(lines) == 0 || lines[len(lines)-1]["generation"] == nil {
+		t.Errorf("the relay's table lines: %v", lines)
+	}
+
+	// A service change rewrites the client's slot map in one transaction.
+	before := metric(must(lab.Metrics(h1.Telemetry)), `sdn_agent_nft_transaction_size_count`)
+	attachDB(t, h2, "db-2")
+	expect("after a service change", check{h1.Telemetry, `sdn_agent_nft_transaction_size_count`, before + 1})
+
+	// A failover is counted and logged.
+	r1.Kill()
+	if _, _, err := timeToReach(web.Namespace, dbAddr, 15*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	expect("after a failover", check{h1.Telemetry, `sdn_agent_core_events_total{event="failovers"}`, 1})
+	if lines := h1.Agent.LogLines("relay failover"); len(lines) == 0 || lines[0]["active"] == nil {
+		t.Errorf("the agent's failover line: %v", lines)
+	}
+
+	// A revocation is counted at the control plane and flushes at the peer.
+	flushes := metric(must(lab.Metrics(h1.Telemetry)), `sdn_agent_kernel_ops_total{kind="flush",result="ok"}`)
+	if err := l.Admin.Revoke(ctx, db1.Interface); err != nil {
+		t.Fatal(err)
+	}
+	expect("after a revocation",
+		check{cpm, `sdn_cp_lease_events_total{event="revoked"}`, 1},
+		check{h1.Telemetry, `sdn_agent_kernel_ops_total{kind="flush",result="ok"}`, flushes + 1},
+	)
+	if lines := l.CP().LogLines("interface revoked"); len(lines) != 1 || lines[0]["interface"] != string(db1.Interface) {
+		t.Errorf("the control plane's revocation line: %v", lines)
+	}
+	_ = r2
+}

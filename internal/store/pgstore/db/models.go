@@ -63,6 +63,7 @@ type Network struct {
 	Next4    int64
 	Revision int64
 	Created  time.Time
+	Changed  time.Time
 }
 
 type PortCursor struct {

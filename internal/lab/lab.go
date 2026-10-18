@@ -315,6 +315,9 @@ func (l *Lab) RestartCP() error {
 // Underlay names the underlay namespace, where the internet answers.
 func (l *Lab) Underlay() string { return l.net }
 
+// CPTelemetry is the control plane's metrics and health address.
+func (l *Lab) CPTelemetry() string { return "http://" + netip.AddrPortFrom(cpRoot, 19090).String() }
+
 // CP returns the control plane's process.
 func (l *Lab) CP() *Proc { return l.cp }
 
@@ -996,4 +999,18 @@ func LookupAt(ns string, server netip.Addr, name string, typ dnsmessage.Type) ([
 // Exec runs a command inside a namespace.
 func Exec(ns string, args ...string) error {
 	return nsh(ns, args...)
+}
+
+// LogLines returns a process's JSON log lines whose message is msg, as
+// decoded objects.
+func (p *Proc) LogLines(msg string) []map[string]any {
+	b, _ := os.ReadFile(p.Log)
+	var out []map[string]any
+	for _, line := range strings.Split(string(b), "\n") {
+		var m map[string]any
+		if json.Unmarshal([]byte(line), &m) == nil && m["message"] == msg {
+			out = append(out, m)
+		}
+	}
+	return out
 }

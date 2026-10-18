@@ -21,6 +21,7 @@ type Metrics struct {
 	localCalls    *prometheus.CounterVec
 	localSeconds  *prometheus.HistogramVec
 	core          *prometheus.CounterVec
+	convergence   prometheus.Histogram
 }
 
 // NewMetrics registers the agent's metrics.
@@ -73,12 +74,16 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "sdn_agent_local_call_seconds", Help: "Local attach and detach latency, to a namespace ready to hand over.",
 			Buckets: prometheus.ExponentialBuckets(0.0005, 2, 16),
 		}, []string{"call"}),
+		convergence: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "sdn_agent_convergence_seconds", Help: "Time from the control plane committing a network revision to a namespace's kernel state settling on it.",
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 16),
+		}),
 		core: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "sdn_agent_core_events_total", Help: "Core decisions: conflicts deferred, batches preempted, relay failovers, failed batches.",
 		}, []string{"event"}),
 	}
 	reg.MustRegister(m.kernelOps, m.kernelSeconds, m.batches, m.batchSeconds, m.nftSize, m.flushed, m.cpCalls,
-		m.polls, m.generation, m.registrations, m.probes, m.probeRTT, m.localCalls, m.localSeconds, m.core)
+		m.polls, m.generation, m.registrations, m.probes, m.probeRTT, m.localCalls, m.localSeconds, m.core, m.convergence)
 	return m
 }
 

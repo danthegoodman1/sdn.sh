@@ -39,7 +39,7 @@ func (q *Queries) DeleteService(ctx context.Context, id string) error {
 }
 
 const getNetwork = `-- name: GetNetwork :one
-SELECT id, name, prefix6, prefix4, mtu, relays, next6, next4, revision, created FROM networks WHERE id = $1
+SELECT id, name, prefix6, prefix4, mtu, relays, next6, next4, revision, created, changed FROM networks WHERE id = $1
 `
 
 func (q *Queries) GetNetwork(ctx context.Context, id string) (Network, error) {
@@ -56,12 +56,13 @@ func (q *Queries) GetNetwork(ctx context.Context, id string) (Network, error) {
 		&i.Next4,
 		&i.Revision,
 		&i.Created,
+		&i.Changed,
 	)
 	return i, err
 }
 
 const getNetworkByName = `-- name: GetNetworkByName :one
-SELECT id, name, prefix6, prefix4, mtu, relays, next6, next4, revision, created FROM networks WHERE name = $1
+SELECT id, name, prefix6, prefix4, mtu, relays, next6, next4, revision, created, changed FROM networks WHERE name = $1
 `
 
 func (q *Queries) GetNetworkByName(ctx context.Context, name string) (Network, error) {
@@ -78,6 +79,7 @@ func (q *Queries) GetNetworkByName(ctx context.Context, name string) (Network, e
 		&i.Next4,
 		&i.Revision,
 		&i.Created,
+		&i.Changed,
 	)
 	return i, err
 }
@@ -148,7 +150,7 @@ func (q *Queries) GetServiceByName(ctx context.Context, arg GetServiceByNamePara
 }
 
 const listNetworks = `-- name: ListNetworks :many
-SELECT id, name, prefix6, prefix4, mtu, relays, next6, next4, revision, created FROM networks ORDER BY id
+SELECT id, name, prefix6, prefix4, mtu, relays, next6, next4, revision, created, changed FROM networks ORDER BY id
 `
 
 func (q *Queries) ListNetworks(ctx context.Context) ([]Network, error) {
@@ -171,6 +173,7 @@ func (q *Queries) ListNetworks(ctx context.Context) ([]Network, error) {
 			&i.Next4,
 			&i.Revision,
 			&i.Created,
+			&i.Changed,
 		); err != nil {
 			return nil, err
 		}
@@ -249,13 +252,14 @@ func (q *Queries) ListServices(ctx context.Context, network string) ([]Service, 
 }
 
 const putNetwork = `-- name: PutNetwork :execrows
-INSERT INTO networks (id, name, prefix6, prefix4, mtu, relays, next6, next4, revision, created)
-SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+INSERT INTO networks (id, name, prefix6, prefix4, mtu, relays, next6, next4, revision, created, changed)
+SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 WHERE NOT EXISTS (SELECT 1 FROM networks AS o WHERE o.name = $2 AND o.id <> $1)
 ON CONFLICT (id) DO UPDATE SET
 	name = excluded.name, prefix6 = excluded.prefix6, prefix4 = excluded.prefix4,
 	mtu = excluded.mtu, relays = excluded.relays, next6 = excluded.next6,
-	next4 = excluded.next4, revision = excluded.revision, created = excluded.created
+	next4 = excluded.next4, revision = excluded.revision, created = excluded.created,
+	changed = excluded.changed
 `
 
 type PutNetworkParams struct {
@@ -269,6 +273,7 @@ type PutNetworkParams struct {
 	Next4    int64
 	Revision int64
 	Created  time.Time
+	Changed  time.Time
 }
 
 // PutNetwork, like every put of a named record, writes nothing when another
@@ -287,6 +292,7 @@ func (q *Queries) PutNetwork(ctx context.Context, arg PutNetworkParams) (int64, 
 		arg.Next4,
 		arg.Revision,
 		arg.Created,
+		arg.Changed,
 	)
 	if err != nil {
 		return 0, err

@@ -174,6 +174,11 @@ func (r *relayNode) receive(src, dst netip.AddrPort, p packet) {
 		return
 	}
 	local := netip.AddrPortFrom(r.local, dst.Port())
+	// The relay binds a socket per port its table holds; a datagram to any
+	// other port finds none, and the kernel drops it.
+	if _, ok := r.table.Dir(local); !ok {
+		return
+	}
 	var b []byte
 	switch {
 	case p.reg != nil:

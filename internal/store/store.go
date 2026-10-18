@@ -173,6 +173,9 @@ type Network struct {
 	Next4    uint64    `json:"next4"`
 	Revision uint64    `json:"revision"`
 	Created  time.Time `json:"created"`
+	// Changed is when the revision last moved: the commit time agents
+	// measure convergence from.
+	Changed time.Time `json:"changed,omitzero"`
 }
 
 // Service is a stable name and address in a network.

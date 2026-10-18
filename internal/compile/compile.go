@@ -174,6 +174,7 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 				Network:  s.Network.ID,
 				Name:     s.Network.Name,
 				Revision: s.Network.Revision,
+				Changed:  s.Network.Changed,
 				Prefix6:  s.Network.Prefix6,
 				Prefix4:  s.Network.Prefix4,
 				MTU:      s.Network.MTU,

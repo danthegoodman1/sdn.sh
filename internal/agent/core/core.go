@@ -50,6 +50,11 @@ type Config struct {
 	// RegisterEvery is the registration datagram's period, which holds a
 	// NAT mapping open on the relay path.
 	RegisterEvery time.Duration
+	// RegisterRetries sends a new direction's registration again this many
+	// times, the first after RegisterRetry and each gap three times the
+	// last: a relay drops one that arrives before it binds the port.
+	RegisterRetries int
+	RegisterRetry   time.Duration
 	// ProbeEvery is how often each relay is probed; a relay that misses
 	// ProbeMisses probes in a row is down.
 	ProbeEvery  time.Duration
@@ -62,20 +67,22 @@ type Config struct {
 // DefaultConfig returns the production settings for a host.
 func DefaultConfig(host model.HostID) Config {
 	return Config{
-		Host:          host,
-		Prefix:        "sdn-",
-		Device:        "sdn0",
-		PortLo:        40000,
-		PortHi:        59999,
-		DrainGrace:    30 * time.Second,
-		Keepalive:     25 * time.Second,
-		AttachTimeout: 10 * time.Second,
-		RetryMin:      50 * time.Millisecond,
-		RetryMax:      5 * time.Second,
-		RegisterEvery: 25 * time.Second,
-		ProbeEvery:    200 * time.Millisecond,
-		ProbeMisses:   3,
-		ResyncEvery:   5 * time.Minute,
+		Host:            host,
+		Prefix:          "sdn-",
+		Device:          "sdn0",
+		PortLo:          40000,
+		PortHi:          59999,
+		DrainGrace:      30 * time.Second,
+		Keepalive:       25 * time.Second,
+		AttachTimeout:   10 * time.Second,
+		RetryMin:        50 * time.Millisecond,
+		RetryMax:        5 * time.Second,
+		RegisterEvery:   25 * time.Second,
+		RegisterRetries: 3,
+		RegisterRetry:   250 * time.Millisecond,
+		ProbeEvery:      200 * time.Millisecond,
+		ProbeMisses:     3,
+		ResyncEvery:     5 * time.Minute,
 	}
 }
 
@@ -295,8 +302,11 @@ type Core struct {
 	// sent again.
 	nextRelease  time.Time
 	lastRegister time.Time
-	lastProbe    time.Time
-	lastResync   time.Time
+	// resends holds each namespace's fresh directions awaiting another
+	// registration.
+	resends    map[string]*resend
+	lastProbe  time.Time
+	lastResync time.Time
 	// Stats counts what the core decided, for metrics.
 	Stats Stats
 	// Debug, when set, receives a line per reconcile plan.
@@ -319,6 +329,7 @@ func New(cfg Config, rand io.Reader) *Core {
 		relays:  map[model.RelayID]*relayHealth{},
 		active:  map[model.NetworkID]model.RelayID{},
 		badPort: map[uint16]bool{},
+		resends: map[string]*resend{},
 	}
 }
 

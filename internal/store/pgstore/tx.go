@@ -239,7 +239,7 @@ func (t *tx) PutNetwork(n store.Network) error {
 	written, err := t.q.PutNetwork(t.ctx, db.PutNetworkParams{
 		ID: string(n.ID), Name: n.Name, Prefix6: n.Prefix6, Prefix4: n.Prefix4, Mtu: int64(n.MTU),
 		Relays: relays, Next6: int64(n.Next6), Next4: int64(n.Next4), Revision: int64(n.Revision),
-		Created: n.Created,
+		Created: n.Created, Changed: n.Changed,
 	})
 	return t.unique(written, err, "network", n.Name)
 }
@@ -404,6 +404,7 @@ func network(r db.Network) (store.Network, error) {
 	n := store.Network{
 		ID: model.NetworkID(r.ID), Name: r.Name, Prefix6: r.Prefix6, Prefix4: r.Prefix4, MTU: int(r.Mtu),
 		Next6: uint64(r.Next6), Next4: uint64(r.Next4), Revision: uint64(r.Revision), Created: r.Created.UTC(),
+		Changed: r.Changed.UTC(),
 	}
 	if err := json.Unmarshal(r.Relays, &n.Relays); err != nil {
 		return store.Network{}, fmt.Errorf("network %s relays: %w", r.ID, err)

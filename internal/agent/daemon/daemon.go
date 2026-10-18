@@ -118,6 +118,10 @@ type Daemon struct {
 	syncs         chan resolverSync
 	egressGen     uint64
 	egressRelays  []netip.Prefix
+	// reported is the network revision each interface last settled at, so
+	// convergence is observed once per revision.
+	reported    map[model.InterfaceID]uint64
+	settleCheck bool
 
 	ready sync.Once
 	up    chan struct{}
@@ -146,6 +150,7 @@ func New(cfg Config, core *agentcore.Core, kern kernel.Kernel, cp ControlPlane, 
 		probes:        map[uint64]probe{},
 		up:            make(chan struct{}),
 		syncs:         make(chan resolverSync, 1),
+		reported:      map[model.InterfaceID]uint64{},
 		resolverDirty: true,
 	}
 }
@@ -254,6 +259,31 @@ func (d *Daemon) drive() {
 	d.noteStats()
 	d.syncResolver()
 	d.syncEgress()
+	if d.settleCheck {
+		d.settleCheck = false
+		d.noteConvergence()
+	}
+}
+
+// noteConvergence observes, once per revision, how long each namespace took
+// to settle on a network revision after the control plane committed it.
+func (d *Daemon) noteConvergence() {
+	now := d.now()
+	desired := d.core.Desired()
+	for _, s := range d.core.Settled() {
+		if s.Revision == 0 || s.Revision <= d.reported[s.Interface] {
+			continue
+		}
+		d.reported[s.Interface] = s.Revision
+		n, ok := desired.Networks[s.Network]
+		if !ok || n.Revision != s.Revision || n.Changed.IsZero() {
+			continue
+		}
+		took := now.Sub(n.Changed)
+		d.m.convergence.Observe(took.Seconds())
+		d.log.Debug().Str("interface", string(s.Interface)).Str("network", string(s.Network)).
+			Uint64("revision", s.Revision).Dur("took", took).Msg("converged")
+	}
 }
 
 // syncEgress blocks every relay address desired state names from egress
@@ -339,6 +369,7 @@ func (d *Daemon) carry(a agentcore.Action) {
 			d.fatal = fmt.Errorf("journal write for %s: %w", a.Entry.Interface, err)
 		}
 	case agentcore.DeleteJournal:
+		delete(d.reported, a.Interface)
 		if err := d.journal.Delete(a.Interface); err != nil {
 			d.fatal = fmt.Errorf("journal delete for %s: %w", a.Interface, err)
 		}
@@ -383,7 +414,10 @@ func (d *Daemon) runBatch(b agentcore.RunBatch) {
 		} else {
 			d.m.batches.WithLabelValues("ok").Inc()
 		}
-		d.post(func() { d.core.BatchDone(d.now(), b.Namespace, b.ID, done, err) })
+		d.post(func() {
+			d.core.BatchDone(d.now(), b.Namespace, b.ID, done, err)
+			d.settleCheck = true
+		})
 	}()
 }
 

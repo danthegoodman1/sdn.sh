@@ -62,8 +62,8 @@ Status ledger:
 
 | Status | Type | Item | Evidence / Gap |
 | --- | --- | --- | --- |
-| Complete | Gate | 10,000-seed simulator sweep with no failures | `go run ./cmd/sdn-sim --seeds 10000 1` at `429463a`: 0 of 10,000 failed, 1,368s on the Core Ultra 9. The sweep at `0ceb8f3` failed seeds 371, 2425 and 3389 (1G), which `TestAnUnnamedNamespaceLivesWhileTheAgentHoldsIt` now replays; one at `46afa06` passed before the changes in 2F. |
-| Complete | Gate | Every planted bug caught | `go run ./scripts/mutants -root -all-layers -jobs 6` at `429463a`, with Postgres: 94 of 94 caught in 742s. The run before it, at `29c0c28`, caught 90 of 93: `egress-filter-outlives-namespace` had never been caught, since no simulator seed tears down an egress-granted interface whose namespace vanished, and `TestAnInterfaceWhoseNamespaceVanishesIsTornDown` now gives it a grant and checks the index; `unmounted-name-accepted` and `metric-increment-dropped` had stopped compiling. |
+| Complete | Gate | 10,000-seed simulator sweep with no failures | `go run ./cmd/sdn-sim --seeds 10000 1` at `c869970`: 0 of 10,000 failed on the Core Ultra 9, as at `95a283c` and `429463a`. The sweep at `0ceb8f3` failed seeds 371, 2425 and 3389 (1G), which `TestAnUnnamedNamespaceLivesWhileTheAgentHoldsIt` now replays; one at `46afa06` passed before the changes in 2F. |
+| Complete | Gate | Every planted bug caught | `go run ./scripts/mutants -root -all-layers -jobs 6` at `c869970`, with Postgres: 102 of 102 caught. The run at `429463a` caught 94 of 94; the one before it, at `29c0c28`, caught 90 of 93: `egress-filter-outlives-namespace` had never been caught, since no simulator seed tears down an egress-granted interface whose namespace vanished, and `TestAnInterfaceWhoseNamespaceVanishesIsTornDown` now gives it a grant and checks the index; `unmounted-name-accepted` and `metric-increment-dropped` had stopped compiling. |
 | Complete | Gate | Code review, findings fixed or recorded | Reviews of the agent and kernel (1F), the control plane (2E), the relay (3H), and the acknowledgment work (1G); what they left is recorded as Risk rows in Phases 1 and 9. |
 
 ## Phase 0: Scaffold

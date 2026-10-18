@@ -62,8 +62,10 @@ type Server struct {
 	log  zerolog.Logger
 	m    *Metrics
 
-	mu    sync.Mutex // guards table
+	mu    sync.Mutex // guards table and waiting
 	table *relaycore.Table
+	// waiting holds the bytes of packets the table keeps waiting, by token.
+	waiting map[uint64][]byte
 
 	smu   sync.RWMutex // guards socks
 	socks map[netip.AddrPort]*sock
@@ -95,7 +97,7 @@ func New(cfg Config, cp ControlPlane, dir string, m *Metrics, log zerolog.Logger
 	t := relaycore.New(cfg.Core)
 	t.Restore(st, regs)
 	s := &Server{
-		cfg: cfg, cp: cp, disk: disk, log: log, m: m, table: t,
+		cfg: cfg, cp: cp, disk: disk, log: log, m: m, table: t, waiting: map[uint64][]byte{},
 		socks:    map[netip.AddrPort]*sock{},
 		regs:     make(chan relaycore.Registration, 4096),
 		snapshot: make(chan struct{}, 1),
@@ -300,7 +302,11 @@ func (s *Server) serve(k *sock) {
 		s.mu.Lock()
 		for i := range n {
 			src := addrPort(rms[i].Addr)
-			decisions[i] = s.table.Packet(now, k.local, src, rms[i].Buffers[0][:rms[i].N])
+			b := rms[i].Buffers[0][:rms[i].N]
+			decisions[i] = s.table.Packet(now, k.local, src, b)
+			if decisions[i].Verdict == relaycore.Wait {
+				s.waiting[decisions[i].Token] = append([]byte(nil), b...)
+			}
 		}
 		s.mu.Unlock()
 		outs = outs[:0]
@@ -321,6 +327,8 @@ func (s *Server) serve(k *sock) {
 				s.enqueue(d.Registration)
 			case relaycore.Held:
 				s.m.registrations.WithLabelValues("held").Inc()
+			case relaycore.Wait:
+				s.m.waits.WithLabelValues("waiting").Inc()
 			default:
 				s.m.dropped.WithLabelValues(string(d.Reason)).Inc()
 				if d.Reason == relaycore.BadMAC || d.Reason == relaycore.Replay {
@@ -385,6 +393,32 @@ func (s *Server) requestSnapshot() {
 	}
 }
 
+// release sends the waiting packets the table now lets through and frees
+// those whose wait ended.
+func (s *Server) release() {
+	s.mu.Lock()
+	rel := s.table.Release(time.Now())
+	type send struct {
+		from netip.AddrPort
+		msg  ipv4.Message
+	}
+	var sends []send
+	for _, r := range rel {
+		b := s.waiting[r.Token]
+		delete(s.waiting, r.Token)
+		if r.Drop {
+			s.m.waits.WithLabelValues("expired").Inc()
+			continue
+		}
+		s.m.waits.WithLabelValues("released").Inc()
+		sends = append(sends, send{r.From, ipv4.Message{Buffers: [][]byte{b}, Addr: net.UDPAddrFromAddrPort(r.To)}})
+	}
+	s.mu.Unlock()
+	for _, x := range sends {
+		s.write(x.from, []ipv4.Message{x.msg})
+	}
+}
+
 // committer makes registrations durable, then commits them, sharing one
 // fsync among every registration waiting. It also writes snapshots, so no
 // append lands between a snapshot's read of the table and its emptying of
@@ -392,6 +426,8 @@ func (s *Server) requestSnapshot() {
 func (s *Server) committer(ctx context.Context) error {
 	t := time.NewTicker(s.cfg.SnapshotEvery)
 	defer t.Stop()
+	waits := time.NewTicker(250 * time.Millisecond)
+	defer waits.Stop()
 	dirty := false
 	for {
 		select {
@@ -423,7 +459,10 @@ func (s *Server) committer(ctx context.Context) error {
 				}
 			}
 			s.mu.Unlock()
+			s.release()
 			dirty = true
+		case <-waits.C:
+			s.release()
 		case <-s.snapshot:
 			if err := s.writeSnapshot(); err != nil {
 				return err

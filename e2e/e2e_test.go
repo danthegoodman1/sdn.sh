@@ -101,8 +101,12 @@ var fastClocks = []string{"--lease-ttl", "6s", "--drain-grace", "2s", "--quarant
 // counting as failure.
 func mustNotReach(t *testing.T, ns string, addr netip.AddrPort, why string) {
 	t.Helper()
+	start := time.Now()
 	if got, err := lab.Dial(ns, addr, 1500*time.Millisecond); err == nil {
 		t.Errorf("%s: reached %v, which answered %q", why, addr, got)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Logf("%s: the check took %v", why, d)
 	}
 }
 
@@ -169,6 +173,8 @@ func TestTwoHostsReachEachOtherThroughARelayAndNothingElse(t *testing.T) {
 	if err := l.Admin.Revoke(ctx, webIf.Interface); err != nil {
 		t.Fatal(err)
 	}
+	revoked := time.Now()
+	defer func() { t.Logf("revocation took effect within %v", time.Since(revoked)) }()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		_, err := lab.Dial(webIf.Namespace, netip.AddrPortFrom(dbIf.Addr6, 5432), time.Second)

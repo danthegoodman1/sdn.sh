@@ -109,6 +109,27 @@ func recv(c *net.UDPConn, d time.Duration) ([]byte, netip.AddrPort) {
 
 func data(s string) []byte { return append([]byte{4, 0, 0, 0}, s...) }
 
+// drain reads until nothing arrives for a while.
+func drain(c *net.UDPConn) {
+	for {
+		if got, _ := recv(c, 200*time.Millisecond); got == nil {
+			return
+		}
+	}
+}
+
+// spoofed reports whether an attacker's datagram reaches c within the
+// time a waiting packet could take.
+func spoofed(c *net.UDPConn) bool {
+	deadline := time.Now().Add(2500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got, _ := recv(c, 200*time.Millisecond); string(got) == string(data("spoof")) {
+			return true
+		}
+	}
+	return false
+}
+
 // register sends registrations until the relay forwards a probe datagram
 // from the other side, which shows both directions committed.
 func waitForward(t *testing.T, from, to *net.UDPConn, port netip.AddrPort, want netip.AddrPort) {
@@ -135,16 +156,22 @@ func TestARelayForwardsOnlyBetweenRegisteredEndpointsAndRemembersThem(t *testing
 
 	regA := regproto.Encode(e.keyA, e.ab, 100)
 	regB := regproto.Encode(e.keyB, e.ba, 200)
-	// Before either registers, data goes nowhere.
+	// Before either registers, data waits: a direction's first packets
+	// race its registrations.
 	send(t, a, e.ab, data("early"))
 	if got, _ := recv(b, 200*time.Millisecond); got != nil {
 		t.Fatal("forwarded before registration")
 	}
 	send(t, a, e.ab, regA[:])
 	send(t, b, e.ba, regB[:])
+	// Once both register, the waiting packet goes on.
+	if got, from := recv(b, 2*time.Second); string(got) != string(data("early")) || from != e.ba {
+		t.Fatalf("the waiting packet: %q from %v", got, from)
+	}
 	// A sends to its port; B receives it from the peer port, where B sends.
 	waitForward(t, a, b, e.ab, e.ba)
 	waitForward(t, b, a, e.ba, e.ab)
+	drain(b)
 
 	// An unregistered sender on A's port reaches nobody, and a replay of
 	// A's registration from the attacker moves nothing.
@@ -152,14 +179,17 @@ func TestARelayForwardsOnlyBetweenRegisteredEndpointsAndRemembersThem(t *testing
 	send(t, attacker, e.ab, regA[:])
 	time.Sleep(100 * time.Millisecond)
 	send(t, attacker, e.ab, data("spoof"))
-	if got, _ := recv(b, 300*time.Millisecond); got != nil {
-		t.Fatalf("forwarded an attacker's packet: %q", got)
+	if spoofed(b) {
+		t.Fatal("forwarded an attacker's packet")
 	}
 	// A registration under the other direction's key fails too.
 	wrong := regproto.Encode(e.keyB, e.ab, 300)
 	send(t, attacker, e.ab, wrong[:])
 	time.Sleep(100 * time.Millisecond)
 	waitForward(t, a, b, e.ab, e.ba)
+	if spoofed(b) {
+		t.Fatal("a registration under the wrong key let an attacker's packet through")
+	}
 
 	// Restart from disk: both directions still forward without registering
 	// again.
@@ -169,11 +199,12 @@ func TestARelayForwardsOnlyBetweenRegisteredEndpointsAndRemembersThem(t *testing
 	_, cancel, done = start(t, dir, cp)
 	defer func() { cancel(); <-done }()
 	waitForward(t, a, b, e.ab, e.ba)
+	drain(b)
 	// The persisted counter still rejects the old registration's replay.
 	send(t, attacker, e.ab, regA[:])
 	time.Sleep(100 * time.Millisecond)
 	send(t, attacker, e.ab, data("spoof"))
-	if got, _ := recv(b, 300*time.Millisecond); got != nil {
+	if spoofed(b) {
 		t.Fatal("a replay moved the endpoint after a restart")
 	}
 }

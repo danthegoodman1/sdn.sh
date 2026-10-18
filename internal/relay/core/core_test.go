@@ -237,3 +237,64 @@ func TestProbesEchoTheirOwnBytes(t *testing.T) {
 		t.Fatal("answered a non-probe")
 	}
 }
+
+func waitTable() *Table {
+	t := New(Config{EarlyHold: 5 * time.Second, EarlyMax: 16, WaitFor: 2 * time.Second, WaitMax: 2, WaitTotal: 16})
+	t.Load(t0, api.RelayState{Generation: 1, Ports: []api.RelayPort{
+		{Local: portAB, Peer: 7002, Advertised: advAB, Key: keyAB},
+		{Local: portBA, Peer: 7001, Advertised: advBA, Key: keyBA},
+	}})
+	return t
+}
+
+// TestAFirstPacketWaitsForTheRegistrationsItRaces: A's handshake arrives
+// before either registration commits, and goes on once both have.
+func TestAFirstPacketWaitsForTheRegistrationsItRaces(t *testing.T) {
+	tb := waitTable()
+	first := tb.Packet(t0, portAB, senderA, wg)
+	if first.Verdict != Wait {
+		t.Fatalf("a first packet: %+v", first)
+	}
+	register(t, tb, portAB, keyAB, advAB, senderA, 10)
+	if rel := tb.Release(t0); len(rel) != 0 {
+		t.Fatalf("released with the peer unregistered: %+v", rel)
+	}
+	register(t, tb, portBA, keyBA, advBA, senderB, 10)
+	rel := tb.Release(t0)
+	if len(rel) != 1 || rel[0].Token != first.Token || rel[0].Drop || rel[0].From != portBA || rel[0].To != senderB {
+		t.Fatalf("after both registered: %+v", rel)
+	}
+}
+
+// TestAWaitingPacketFromAnotherSourceNeverGoes: an attacker's packet waits
+// like any other, but the registration that commits names someone else, so
+// it expires instead of going on.
+func TestAWaitingPacketFromAnotherSourceNeverGoes(t *testing.T) {
+	tb := waitTable()
+	spoof := tb.Packet(t0, portAB, attacker, wg)
+	if spoof.Verdict != Wait {
+		t.Fatalf("an attacker's packet: %+v", spoof)
+	}
+	register(t, tb, portAB, keyAB, advAB, senderA, 10)
+	register(t, tb, portBA, keyBA, advBA, senderB, 10)
+	if rel := tb.Release(t0); len(rel) != 0 {
+		t.Fatalf("released an attacker's packet: %+v", rel)
+	}
+	rel := tb.Release(t0.Add(3 * time.Second))
+	if len(rel) != 1 || rel[0].Token != spoof.Token || !rel[0].Drop {
+		t.Fatalf("after the wait: %+v", rel)
+	}
+}
+
+func TestAPortHoldsAFewWaitingPacketsAtMost(t *testing.T) {
+	tb := waitTable()
+	for i := range 4 {
+		d := tb.Packet(t0, portAB, attacker, wg)
+		if want := i < 2; (d.Verdict == Wait) != want {
+			t.Fatalf("packet %d: %+v", i, d)
+		}
+	}
+	if tb.Waiting() != 2 {
+		t.Fatalf("%d waiting", tb.Waiting())
+	}
+}

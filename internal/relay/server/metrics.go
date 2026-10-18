@@ -19,6 +19,7 @@ type Metrics struct {
 	writeFailed    prometheus.Counter
 	dropped        *prometheus.CounterVec
 	registrations  *prometheus.CounterVec
+	waits          *prometheus.CounterVec
 	probes         prometheus.Counter
 	readBatch      prometheus.Histogram
 	fsync          prometheus.Histogram
@@ -46,6 +47,9 @@ func NewMetrics(reg prometheus.Registerer, perPortCap int) *Metrics {
 		registrations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "sdn_relay_registrations_total", Help: "Registrations by outcome.",
 		}, []string{"result"}),
+		waits: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sdn_relay_waiting_packets_total", Help: "Data packets that waited for a registration, by outcome.",
+		}, []string{"outcome"}),
 		probes: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "sdn_relay_probes_answered_total", Help: "Probes answered.",
 		}),
@@ -65,7 +69,7 @@ func NewMetrics(reg prometheus.Registerer, perPortCap int) *Metrics {
 		}),
 		perPort: &portCollector{cap: perPortCap},
 	}
-	reg.MustRegister(m.forwarded, m.forwardedBytes, m.writeFailed, m.dropped, m.registrations, m.probes,
+	reg.MustRegister(m.forwarded, m.forwardedBytes, m.writeFailed, m.dropped, m.registrations, m.waits, m.probes,
 		m.readBatch, m.fsync, m.ports, m.generation, m.perPort, rcvbufErrors{})
 	return m
 }

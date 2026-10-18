@@ -71,6 +71,7 @@ type Lab struct {
 	procs  []*Proc
 	units  []unitLog
 	lock   *os.File
+	born   time.Time
 }
 
 // lockPath is the lock every lab holds while it exists.
@@ -144,7 +145,7 @@ func New(opts Options) (*Lab, error) {
 		lock.Close()
 		return nil, fmt.Errorf("lab lock: %w", err)
 	}
-	l := &Lab{opts: opts, net: opts.Name + "net", nextIP: 10, Token: adminToken, lock: lock}
+	l := &Lab{opts: opts, net: opts.Name + "net", nextIP: 10, Token: adminToken, lock: lock, born: time.Now()}
 	l.Purge()
 	if err := l.underlay(); err != nil {
 		l.Close()
@@ -158,7 +159,7 @@ func New(opts Options) (*Lab, error) {
 }
 
 func (l *Lab) logf(format string, args ...any) {
-	fmt.Fprintf(l.opts.Log, "lab: "+format+"\n", args...)
+	fmt.Fprintf(l.opts.Log, "lab %6.3fs: "+format+"\n", append([]any{time.Since(l.born).Seconds()}, args...)...)
 }
 
 // sh runs a command and returns its error with its output.
@@ -428,7 +429,9 @@ func (r *Relay) Start() error {
 		return err
 	}
 	r.Proc = p
-	return waitHTTP(r.Telemetry+"/readyz", 10*time.Second, p)
+	err = waitHTTP(r.Telemetry+"/readyz", 10*time.Second, p)
+	r.lab.logf("%s ready", r.Name)
+	return err
 }
 
 // Host is one agent host.
@@ -507,7 +510,9 @@ func (h *Host) Start() error {
 		return err
 	}
 	h.Agent = p
-	return waitHTTP(h.Telemetry+"/readyz", 15*time.Second, p)
+	err = waitHTTP(h.Telemetry+"/readyz", 15*time.Second, p)
+	h.lab.logf("%s ready", h.Name)
+	return err
 }
 
 // NAT shapes the address translation in front of a host.

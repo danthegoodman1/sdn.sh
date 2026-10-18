@@ -40,6 +40,12 @@ type relayNode struct {
 	// diskFree is when the disk finishes the writes queued so far; writes
 	// complete in the order they were queued, as a group commit does.
 	diskFree time.Time
+	// waiting holds the packets the table keeps waiting, by token.
+	waiting map[uint64]waitingPacket
+}
+
+type waitingPacket struct {
+	p packet
 }
 
 func newRelay(w *World, idx int) *relayNode {
@@ -65,7 +71,9 @@ func (r *relayNode) boot() { r.start() }
 func (r *relayNode) start() {
 	r.inc++
 	r.up = true
-	r.table = relaycore.New(relaycore.Config{RegistrationRate: 50, EarlyHold: 5 * time.Second, EarlyMax: 1024})
+	r.table = relaycore.New(relaycore.Config{RegistrationRate: 50, EarlyHold: 5 * time.Second, EarlyMax: 1024,
+		WaitFor: 2 * time.Second, WaitMax: 8, WaitTotal: 1024})
+	r.waiting = map[uint64]waitingPacket{}
 	r.table.Restore(r.disk.state, r.disk.log)
 	r.w.logf("%s starts with %d ports", r.name, len(r.disk.state.Ports))
 	r.poll()
@@ -76,6 +84,7 @@ func (r *relayNode) start() {
 			return
 		}
 		r.disk = relayDisk{state: r.table.Persisted()}
+		r.release()
 		r.w.loop.After(time.Second, snapshot)
 	}
 	r.w.loop.After(time.Second, snapshot)
@@ -150,6 +159,7 @@ func (r *relayNode) persist(reg relaycore.Registration, raw *[regproto.Size]byte
 		}
 		r.disk.log = append(r.disk.log, reg)
 		committed := r.table.Commit(reg)
+		defer r.release()
 		if r.w.attacker != nil && reg.Endpoint.Addr() == r.w.attacker.addr {
 			r.w.fail("%s registered the attacker at %v for %v", r.name, reg.Endpoint, reg.Local)
 		}
@@ -198,12 +208,29 @@ func (r *relayNode) receive(src, dst netip.AddrPort, p packet) {
 			r.w.fail("%s forwarded to the attacker at %v", r.name, d.To)
 		}
 		r.w.underlay(netip.AddrPortFrom(r.advertised, d.From.Port()), d.To, p)
+	case relaycore.Wait:
+		r.waiting[d.Token] = waitingPacket{p: p}
 	case relaycore.Register:
 		var raw *[regproto.Size]byte
 		if src.Addr() != r.attackerAddr() {
 			raw = p.reg
 		}
 		r.persist(d.Registration, raw)
+	}
+}
+
+// release sends what the table lets through and forgets expired waits.
+func (r *relayNode) release() {
+	for _, rel := range r.table.Release(r.w.now()) {
+		wp, ok := r.waiting[rel.Token]
+		delete(r.waiting, rel.Token)
+		if !ok || rel.Drop {
+			continue
+		}
+		if r.w.attacker != nil && rel.To.Addr() == r.w.attacker.addr {
+			r.w.fail("%s released a waiting packet to the attacker at %v", r.name, rel.To)
+		}
+		r.w.underlay(netip.AddrPortFrom(r.advertised, rel.From.Port()), rel.To, wp.p)
 	}
 }
 

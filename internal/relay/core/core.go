@@ -46,11 +46,20 @@ type Config struct {
 	// for the port to arrive, and EarlyMax how many may wait.
 	EarlyHold time.Duration
 	EarlyMax  int
+	// WaitFor is how long a data packet waits for its sender's or its
+	// peer's registration to commit, WaitMax how many may wait on one
+	// port, and WaitTotal how many on the relay. A direction's first
+	// packets race its registrations; without the wait, a lost handshake
+	// initiation costs WireGuard a five-second retry.
+	WaitFor   time.Duration
+	WaitMax   int
+	WaitTotal int
 }
 
 // DefaultConfig returns production limits.
 func DefaultConfig() Config {
-	return Config{Rate: 0, Burst: 0, RegistrationRate: 20, EarlyHold: 5 * time.Second, EarlyMax: 4096}
+	return Config{Rate: 0, Burst: 0, RegistrationRate: 20, EarlyHold: 5 * time.Second, EarlyMax: 4096,
+		WaitFor: 2 * time.Second, WaitMax: 8, WaitTotal: 65536}
 }
 
 // Verdict is what to do with a packet.
@@ -65,6 +74,10 @@ const (
 	// Held is a registration for an unknown port, kept until the port
 	// arrives or the hold ends.
 	Held
+	// Wait is a data packet kept, under Decision.Token, until a
+	// registration lets it through or its wait ends. The shell keeps the
+	// bytes; Release says what to send.
+	Wait
 )
 
 // Reason says why a packet dropped, for metrics.
@@ -87,6 +100,16 @@ type Decision struct {
 	From, To netip.AddrPort
 	// Registration is set for Register.
 	Registration Registration
+	// Token names a Wait packet.
+	Token uint64
+}
+
+// Release is a waiting packet to send, or, with Drop set, one whose wait
+// ended.
+type Release struct {
+	Token    uint64
+	From, To netip.AddrPort
+	Drop     bool
 }
 
 // Registration is a verified endpoint claim. Key is the direction's key it
@@ -110,6 +133,11 @@ type Table struct {
 	ports      map[netip.AddrPort]*Dir
 	generation uint64
 	early      []early
+	// waiting holds data packets awaiting a registration, oldest first;
+	// expired holds the tokens of those whose wait ended.
+	waiting   []waiting
+	expired   []uint64
+	nextToken uint64
 	// Unknown counts packets to ports the table lacks.
 	Unknown uint64
 }
@@ -123,6 +151,14 @@ type Dir struct {
 	tokens   float64
 	regs     float64
 	last     time.Time
+}
+
+type waiting struct {
+	token uint64
+	at    time.Time
+	local netip.AddrPort
+	src   netip.AddrPort
+	bytes int
 }
 
 type early struct {
@@ -217,6 +253,11 @@ func (t *Table) Packet(now time.Time, local, src netip.AddrPort, b []byte) Decis
 		return Decision{Verdict: Register, Registration: r}
 	}
 	if !d.Endpoint.IsValid() || src != d.Endpoint {
+		// The sender's registration may still be committing; the packet
+		// goes nowhere unless one from this source commits.
+		if t.wait(now, local, src, len(b)) {
+			return Decision{Verdict: Wait, Reason: Unregistered, Token: t.nextToken}
+		}
 		d.Stats.Unregistered++
 		return Decision{Reason: Unregistered}
 	}
@@ -229,6 +270,9 @@ func (t *Table) Packet(now time.Time, local, src netip.AddrPort, b []byte) Decis
 	}
 	peer, ok := t.ports[netip.AddrPortFrom(local.Addr(), d.Peer)]
 	if !ok || !peer.Endpoint.IsValid() {
+		if ok && t.wait(now, local, src, len(b)) {
+			return Decision{Verdict: Wait, Reason: PeerAbsent, Token: t.nextToken}
+		}
 		d.Stats.PeerAbsent++
 		return Decision{Reason: PeerAbsent}
 	}
@@ -236,6 +280,68 @@ func (t *Table) Packet(now time.Time, local, src netip.AddrPort, b []byte) Decis
 	d.Stats.Bytes += uint64(len(b))
 	return Decision{Verdict: Forward, From: peer.Local, To: peer.Endpoint}
 }
+
+// wait keeps a data packet, if the port and the relay have room.
+func (t *Table) wait(now time.Time, local, src netip.AddrPort, n int) bool {
+	if t.cfg.WaitFor <= 0 || len(t.waiting) >= t.cfg.WaitTotal {
+		return false
+	}
+	t.expire(now)
+	count := 0
+	for _, w := range t.waiting {
+		if w.local == local {
+			count++
+		}
+	}
+	if count >= t.cfg.WaitMax {
+		return false
+	}
+	t.nextToken++
+	t.waiting = append(t.waiting, waiting{token: t.nextToken, at: now, local: local, src: src, bytes: n})
+	return true
+}
+
+// expire drops waits that ran out, keeping their tokens for Release.
+func (t *Table) expire(now time.Time) {
+	for len(t.waiting) > 0 && now.Sub(t.waiting[0].at) > t.cfg.WaitFor {
+		t.expired = append(t.expired, t.waiting[0].token)
+		t.waiting = t.waiting[1:]
+	}
+}
+
+// Release returns the waiting packets a registration has let through,
+// in the order they arrived, and those whose wait ended. A packet goes only
+// once its source is its direction's registered endpoint and the peer has
+// registered, exactly as Packet would forward it now.
+func (t *Table) Release(now time.Time) []Release {
+	t.expire(now)
+	var out []Release
+	for _, tok := range t.expired {
+		out = append(out, Release{Token: tok, Drop: true})
+	}
+	t.expired = t.expired[:0]
+	kept := t.waiting[:0]
+	for _, w := range t.waiting {
+		d, ok := t.ports[w.local]
+		if !ok {
+			out = append(out, Release{Token: w.token, Drop: true})
+			continue
+		}
+		peer, pok := t.ports[netip.AddrPortFrom(w.local.Addr(), d.Peer)]
+		if d.Endpoint.IsValid() && w.src == d.Endpoint && pok && peer.Endpoint.IsValid() {
+			d.Stats.Forwarded++
+			d.Stats.Bytes += uint64(w.bytes)
+			out = append(out, Release{Token: w.token, From: peer.Local, To: peer.Endpoint})
+			continue
+		}
+		kept = append(kept, w)
+	}
+	t.waiting = kept
+	return out
+}
+
+// Waiting reports how many packets wait, for metrics.
+func (t *Table) Waiting() int { return len(t.waiting) }
 
 // verify checks a registration and returns it, or why it fails.
 func (t *Table) verify(d *Dir, src netip.AddrPort, b []byte) (Registration, Reason) {

@@ -466,24 +466,58 @@ func TestAnElementUpdateMovesNewConnectionsOnly(t *testing.T) {
 	defer direct.Close()
 	readReply(t, direct)
 	// Flushing the old backend's address removes both connections'
-	// conntrack entries and destroys the socket addressed to it.
+	// conntrack entries and destroys both sockets: the one addressed to it,
+	// and the one addressed to the service whose entry it carried.
 	res, err := k.Run(kernel.Op{Kind: kernel.Flush, Namespace: a.ns, Addrs: []netip.Addr{b.addr}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Conntrack != 2 || res.Sockets != 1 {
-		t.Fatalf("flush removed %d entries and %d sockets, want 2 and 1", res.Conntrack, res.Sockets)
+	if res.Conntrack != 2 || res.Sockets != 2 {
+		t.Fatalf("flush removed %d entries and %d sockets, want 2 and 2", res.Conntrack, res.Sockets)
 	}
-	direct.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if _, err := direct.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("the socket addressed to the flushed backend lives on: %v", err)
+	for name, c := range map[string]net.Conn{"addressed to the flushed backend": direct, "through the service": held} {
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := c.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("the socket %s lives on: %v", name, err)
+		}
 	}
-	// The connection made through the service lost its entry, so its next
-	// segment translates afresh to the current backend, which resets it.
-	held.Write([]byte("again"))
-	held.SetReadDeadline(time.Now().Add(3 * time.Second))
-	if _, err := held.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("the service connection survived its backend's flush: %v", err)
+}
+
+// TestASweepKeepsConnectionsThroughALiveService sweeps a namespace as an
+// agent does after a restart: a connection through a service address whose
+// backend is still a peer survives, though the sweep keeps no service
+// address, and once that backend is no longer kept, the connection goes.
+func TestASweepKeepsConnectionsThroughALiveService(t *testing.T) {
+	k := newKernel(t)
+	a, b := pair(t, k, prng.New(9))
+	svc6, svc4 := netip.MustParseAddr("fd00::7"), netip.MustParseAddr("10.99.0.7")
+	serve(t, b.ns, netip.AddrPortFrom(b.addr, 5432), "db")
+	rules := serviceRules(svc6, svc4, []netip.Addr{b.addr}, nil, 5432, nil)
+	run(t, k, kernel.Op{Kind: kernel.ApplyRules, Namespace: a.ns, Rules: &nft.Transaction{Replace: rules}})
+	held, err := dial(t, a.ns, netip.AddrPortFrom(svc6, 5432), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	readReply(t, held)
+	prefixes := []netip.Prefix{netip.MustParsePrefix("fd00::/64"), netip.MustParsePrefix("10.99.0.0/16")}
+	keep := []netip.Addr{a.addr, a.a4, b.addr, b.a4}
+	res, err := k.Run(kernel.Op{Kind: kernel.Sweep, Namespace: a.ns, Addrs: keep, Prefixes: prefixes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Conntrack != 0 || res.Sockets != 0 {
+		t.Fatalf("a sweep keeping every live address removed %d entries and %d sockets", res.Conntrack, res.Sockets)
+	}
+	if _, err := held.Write([]byte("still here")); err != nil {
+		t.Fatalf("the connection broke: %v", err)
+	}
+	res, err = k.Run(kernel.Op{Kind: kernel.Sweep, Namespace: a.ns, Addrs: []netip.Addr{a.addr, a.a4}, Prefixes: prefixes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Conntrack != 1 || res.Sockets != 1 {
+		t.Fatalf("a sweep without the backend removed %d entries and %d sockets, want 1 and 1", res.Conntrack, res.Sockets)
 	}
 }
 

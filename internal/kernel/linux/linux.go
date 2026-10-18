@@ -176,8 +176,14 @@ func (k *Kernel) Run(op kernel.Op) (kernel.Result, error) {
 	}
 	h, err := k.open(op.Namespace)
 	if err != nil {
-		if errors.Is(err, kernel.ErrNoNamespace) && op.Kind == kernel.DeleteDevice {
+		switch {
+		case !errors.Is(err, kernel.ErrNoNamespace):
+		case op.Kind == kernel.DeleteDevice:
 			return kernel.Result{}, nil
+		case op.Kind == kernel.SetEgress && op.Egress == nil:
+			// The link went with the namespace; the host's filter stays
+			// until removed.
+			return kernel.Result{}, k.removeEgressIndex(op.EgressIndex)
 		}
 		return kernel.Result{}, err
 	}
@@ -201,14 +207,17 @@ func (k *Kernel) Run(op kernel.Op) (kernel.Result, error) {
 	case kernel.ApplyRules:
 		return kernel.Result{}, applyTransaction(h.nft, *op.Rules)
 	case kernel.SetEgress:
-		return kernel.Result{}, k.setEgress(h, op.Egress)
+		if err := k.setEgress(h, op.Egress); err != nil || op.Egress != nil {
+			return kernel.Result{}, err
+		}
+		return kernel.Result{}, k.removeEgressIndex(op.EgressIndex)
 	case kernel.Flush:
-		return flush(h, func(a netip.Addr) bool { return slices.Contains(op.Addrs, a) })
+		return flush(h, func(a netip.Addr) bool { return slices.Contains(op.Addrs, a) }, false)
 	case kernel.Sweep:
 		return flush(h, func(a netip.Addr) bool {
 			inside := slices.ContainsFunc(op.Prefixes, func(p netip.Prefix) bool { return p.Contains(a) })
 			return inside && !slices.Contains(op.Addrs, a)
-		})
+		}, true)
 	}
 	return kernel.Result{}, fmt.Errorf("unknown operation %q", op.Kind)
 }
@@ -393,32 +402,65 @@ func setPeers(h *nsHandles, name string, updates []kernel.PeerUpdate) error {
 	return nil
 }
 
-// flush deletes conntrack entries with any address match accepts, and
-// destroys sockets addressed to one.
-func flush(h *nsHandles, match func(netip.Addr) bool) (kernel.Result, error) {
+// flush deletes the conntrack entries whose addresses match selects, and
+// destroys the sockets those entries carried; translation leaves a client's
+// socket addressed to the service it dialed, so only its entry's original
+// tuple names it. A Flush names removed peers' addresses, so any address of
+// an entry selects it, and a socket addressed to one goes too. A Sweep keeps
+// what live peers account for, so it judges an entry by the addresses its
+// two ends send from — the original source, and the reply's source after
+// translation — and never by a service address a client dialed. Loopback is
+// the workload's own and is never flushed.
+func flush(h *nsHandles, match func(netip.Addr) bool, sweep bool) (kernel.Result, error) {
 	var r kernel.Result
+	cm := &conntrackMatch{match: match, senders: sweep, carried: map[flowTuple]bool{}}
 	for _, family := range []netlink.InetFamily{unix.AF_INET, unix.AF_INET6} {
-		n, err := h.nl.ConntrackDeleteFilters(netlink.ConntrackTable, family, conntrackMatch{match})
+		n, err := h.nl.ConntrackDeleteFilters(netlink.ConntrackTable, family, cm)
 		if err != nil {
 			return r, fmt.Errorf("conntrack: %w", err)
 		}
 		r.Conntrack += int(n)
 	}
-	n, err := h.diag.destroyMatching(match)
+	n, err := h.diag.destroyMatching(func(s sock) bool {
+		return cm.carried[flowTuple{s.proto, s.local, s.remote}] || !sweep && match(s.remote.Addr())
+	})
 	r.Sockets = n
 	return r, err
 }
 
-// conntrackMatch selects a flow by any of its four addresses.
-type conntrackMatch struct{ match func(netip.Addr) bool }
+// flowTuple is a flow's protocol and original source and destination, as a
+// socket that carries it sees them.
+type flowTuple struct {
+	proto    uint8
+	src, dst netip.AddrPort
+}
 
-func (c conntrackMatch) MatchConntrackFlow(f *netlink.ConntrackFlow) bool {
-	for _, ip := range []net.IP{f.Forward.SrcIP, f.Forward.DstIP, f.Reverse.SrcIP, f.Reverse.DstIP} {
-		if a, ok := netip.AddrFromSlice(ip); ok && c.match(a.Unmap()) {
+// conntrackMatch selects a flow by its addresses — every one, or with
+// senders set the two its ends send from — never a loopback one, and keeps
+// the original tuple of each flow it selects.
+type conntrackMatch struct {
+	match   func(netip.Addr) bool
+	senders bool
+	carried map[flowTuple]bool
+}
+
+func (c *conntrackMatch) MatchConntrackFlow(f *netlink.ConntrackFlow) bool {
+	ips := []net.IP{f.Forward.SrcIP, f.Reverse.SrcIP}
+	if !c.senders {
+		ips = append(ips, f.Forward.DstIP, f.Reverse.DstIP)
+	}
+	for _, ip := range ips {
+		if a, ok := netip.AddrFromSlice(ip); ok && !a.Unmap().IsLoopback() && c.match(a.Unmap()) {
+			c.carried[flowTuple{f.Forward.Protocol, tupleEnd(f.Forward.SrcIP, f.Forward.SrcPort), tupleEnd(f.Forward.DstIP, f.Forward.DstPort)}] = true
 			return true
 		}
 	}
 	return false
+}
+
+func tupleEnd(ip net.IP, port uint16) netip.AddrPort {
+	a, _ := netip.AddrFromSlice(ip)
+	return netip.AddrPortFrom(a.Unmap(), port)
 }
 
 // Snapshot lists named namespaces with prefix and held namespaces with a

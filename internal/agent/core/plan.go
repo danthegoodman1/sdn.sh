@@ -47,6 +47,9 @@ func (c *Core) plan(now time.Time, st *nsState, i *iface) []kernel.Op {
 	// Only reconciliation tracks drains; any other phase owes them nothing.
 	st.nextDrain = time.Time{}
 	if st.ref != "" {
+		if st.reaped {
+			return nil
+		}
 		return []kernel.Op{{Kind: kernel.Reap, Ref: st.ref, AliasPrefix: c.cfg.AliasPrefix()}}
 	}
 	if i == nil {
@@ -75,8 +78,8 @@ func (c *Core) plan(now time.Time, st *nsState, i *iface) []kernel.Op {
 	// holding the namespace would keep the device, and its host-side
 	// socket, alive.
 	var ops []kernel.Op
-	if st.egress != nil && st.exists {
-		ops = append(ops, kernel.Op{Kind: kernel.SetEgress, Namespace: st.name})
+	if !st.egressClear {
+		ops = append(ops, kernel.Op{Kind: kernel.SetEgress, Namespace: st.name, EgressIndex: egressIndex(st, i)})
 	}
 	if st.device {
 		ops = append(ops, kernel.Op{Kind: kernel.DeleteDevice, Namespace: st.name, Device: c.cfg.Device})
@@ -118,25 +121,6 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 	}
 	st.nextDrain = tgt.nextDrain
 	var ops []kernel.Op
-	if st.sweep && !ok {
-		// No state for the network: the interface was revoked and
-		// forgotten, holds no peer, and keeps no flow.
-		all := []netip.Prefix{netip.MustParsePrefix("::/0"), netip.MustParsePrefix("0.0.0.0/0")}
-		ops = append(ops, kernel.Op{Kind: kernel.Sweep, Namespace: st.name, Prefixes: all})
-	}
-	if st.sweep && ok {
-		keep := slices.Clone(x.Addrs())
-		for _, key := range slices.SortedFunc(maps.Keys(st.peers), compareKey) {
-			for _, a := range st.peers[key].Allowed {
-				keep = append(keep, a.Addr())
-			}
-		}
-		prefixes := []netip.Prefix{n.Prefix6}
-		if n.Prefix4.IsValid() {
-			prefixes = append(prefixes, n.Prefix4)
-		}
-		ops = append(ops, kernel.Op{Kind: kernel.Sweep, Namespace: st.name, Addrs: keep, Prefixes: prefixes})
-	}
 	if len(st.unflushed) > 0 {
 		ops = append(ops, kernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: slices.Clone(st.unflushed)})
 	}
@@ -144,17 +128,36 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 		l := tgt.link
 		ops = append(ops, kernel.Op{Kind: kernel.ConfigureLink, Namespace: st.name, Device: c.cfg.Device, Link: &l})
 	}
-	if want := egressFor(x, i.port); !want.Equal(st.egress) {
-		ops = append(ops, kernel.Op{Kind: kernel.SetEgress, Namespace: st.name, Egress: want})
+	if want := egressFor(x, i.port); !want.Equal(st.egress) || want == nil && !st.egressClear {
+		op := kernel.Op{Kind: kernel.SetEgress, Namespace: st.name, Egress: want}
+		if want == nil {
+			op.EgressIndex = egressIndex(st, i)
+		}
+		ops = append(ops, op)
 	}
-	var adds []kernel.PeerUpdate
+	// A peer that keeps some addresses and gains others takes them all
+	// before the rules change and drops the old ones after, with the
+	// removed peers, so no slot or source set ever names an address no
+	// peer holds. What a peer drops is flushed like a removed peer's.
+	var adds, removes []kernel.PeerUpdate
+	var flush []netip.Addr
 	want := map[model.Key]bool{}
 	for _, tp := range tgt.peers {
 		key := tp.peer.PublicKey
 		want[key] = true
 		inst, installed := st.peers[key]
-		u := kernel.PeerUpdate{PublicKey: key, Allowed: tp.peer.Allowed, Keepalive: tp.keepalive}
-		need := !installed || !slices.Equal(inst.Allowed, tp.peer.Allowed) || inst.Keepalive != tp.keepalive
+		allowed := tp.peer.Allowed
+		if installed {
+			allowed = slices.Compact(kernel.SortPrefixes(slices.Concat(inst.Allowed, tp.peer.Allowed)))
+			if dropped := without(inst.Allowed, tp.peer.Allowed); len(dropped) > 0 {
+				removes = append(removes, kernel.PeerUpdate{PublicKey: key, Allowed: tp.peer.Allowed, Keepalive: tp.keepalive})
+				for _, a := range dropped {
+					flush = append(flush, a.Addr())
+				}
+			}
+		}
+		u := kernel.PeerUpdate{PublicKey: key, Allowed: allowed, Keepalive: tp.keepalive}
+		need := !installed || !slices.Equal(inst.Allowed, allowed) || inst.Keepalive != tp.keepalive
 		chosen, hasChosen := st.chosen[key]
 		switch {
 		case !tp.endpoint.IsValid():
@@ -189,8 +192,6 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 	if tx := nft.Diff(st.rules, tgt.rules); !tx.Empty() {
 		ops = append(ops, kernel.Op{Kind: kernel.ApplyRules, Namespace: st.name, Rules: &tx})
 	}
-	var removes []kernel.PeerUpdate
-	var flush []netip.Addr
 	for _, key := range slices.SortedFunc(maps.Keys(st.peers), compareKey) {
 		if want[key] {
 			continue
@@ -206,7 +207,54 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 			kernel.Op{Kind: kernel.SetPeers, Namespace: st.name, Device: c.cfg.Device, Peers: removes},
 			kernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: flush})
 	}
+	if st.sweep {
+		ops = append(ops, sweep(st.name, n, x, tgt, ok))
+	}
 	return ops
+}
+
+// sweep removes, after a restart lost track of what earlier batches
+// removed, every flow that no peer the batch leaves installed accounts for.
+// It runs last, so those peers are the target's. With no state for the
+// network, the interface was revoked and forgotten and keeps no flow at
+// all.
+func sweep(name string, n *api.NetworkState, x *api.Interface, tgt target, ok bool) kernel.Op {
+	if !ok {
+		all := []netip.Prefix{netip.MustParsePrefix("::/0"), netip.MustParsePrefix("0.0.0.0/0")}
+		return kernel.Op{Kind: kernel.Sweep, Namespace: name, Prefixes: all}
+	}
+	keep := slices.Clone(x.Addrs())
+	for _, tp := range tgt.peers {
+		for _, a := range tp.peer.Allowed {
+			keep = append(keep, a.Addr())
+		}
+	}
+	prefixes := []netip.Prefix{n.Prefix6}
+	if n.Prefix4.IsValid() {
+		prefixes = append(prefixes, n.Prefix4)
+	}
+	return kernel.Op{Kind: kernel.Sweep, Namespace: name, Addrs: keep, Prefixes: prefixes}
+}
+
+// without lists the prefixes of a that b lacks.
+func without(a, b []netip.Prefix) []netip.Prefix {
+	var out []netip.Prefix
+	for _, p := range a {
+		if !slices.Contains(b, p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// egressIndex is the index of the host filter a namespace's egress may
+// have left: the installed link's, or else the interface's listen port,
+// which every grant uses.
+func egressIndex(st *nsState, i *iface) uint16 {
+	if st.egress != nil {
+		return st.egress.Index
+	}
+	return i.port
 }
 
 // egressFor is a live interface's egress grant, or nil.
@@ -276,16 +324,23 @@ func (c *Core) BatchDone(now time.Time, namespace string, id uint64, done int, e
 		c.believe(st, op)
 	}
 	st.dirty = true
+	c.rearm(st)
 	if err == nil {
 		st.failures = 0
 		c.registerFresh(now, st)
-		c.rearm(st)
 		return
 	}
 	c.Stats.Failures++
 	st.failures++
 	st.retryAt = now.Add(c.backoff(st.failures))
 	failed := b.Ops[done]
+	if errors.Is(err, kernel.ErrNoNamespace) {
+		// The namespace went behind the agent's back; looking tears the
+		// interface down.
+		st.observe = true
+		c.emit(Observe{Namespace: st.name})
+		return
+	}
 	switch failed.Kind {
 	case kernel.CreateDevice:
 		if errors.Is(err, kernel.ErrPortInUse) {
@@ -349,6 +404,7 @@ func (c *Core) believe(st *nsState, op kernel.Op) {
 		st.exists, st.device, st.egress = false, false, nil
 	case kernel.SetEgress:
 		st.egress = op.Egress.Clone()
+		st.egressClear = op.Egress == nil
 	case kernel.ConfigureLink:
 		l := *op.Link
 		st.link = &l
@@ -358,6 +414,8 @@ func (c *Core) believe(st *nsState, op kernel.Op) {
 		} else {
 			st.rules = nil
 		}
+	case kernel.Reap:
+		st.reaped = true
 	case kernel.Sweep:
 		st.sweep = false
 	case kernel.Flush:
@@ -376,6 +434,11 @@ func (c *Core) believe(st *nsState, op kernel.Op) {
 				continue
 			}
 			p, existed := st.peers[u.PublicKey]
+			for _, a := range without(p.Allowed, u.Allowed) {
+				if !slices.Contains(st.unflushed, a.Addr()) {
+					st.unflushed = append(st.unflushed, a.Addr())
+				}
+			}
 			p.PublicKey, p.Allowed, p.Keepalive = u.PublicKey, u.Allowed, u.Keepalive
 			if u.Endpoint.IsValid() {
 				p.Endpoint = u.Endpoint
@@ -401,6 +464,14 @@ func (c *Core) Observed(now time.Time, ns kernel.Namespace, err error) {
 		st.exists, st.device, st.egress = false, false, nil
 		st.peers = map[model.Key]kernel.Peer{}
 		st.link, st.rules = nil, nil
+		if i, ok := c.ifaces[st.iface]; ok && (i.phase == ready || i.phase == configuring) {
+			// The namespace went behind the agent's back, and its device
+			// with it or into a namespace only a process holds: the key is
+			// gone either way, and so is the interface.
+			i.phase = detaching
+			c.emit(WriteJournal{Entry: c.entry(i)})
+			c.scan()
+		}
 		return
 	}
 	if err != nil {
@@ -410,12 +481,22 @@ func (c *Core) Observed(now time.Time, ns kernel.Namespace, err error) {
 	}
 	st.exists = true
 	st.egress = ns.Egress.Clone()
+	if st.egress != nil {
+		st.egressClear = false
+	}
 	dev, hasDev := findDevice(ns, c.cfg.Device)
 	st.device = hasDev
+	before := st.peers
 	st.peers = map[model.Key]kernel.Peer{}
 	for _, p := range dev.Peers {
 		st.peers[p.PublicKey] = p
+		if _, known := before[p.PublicKey]; !known {
+			// Installed by an operation that failed partway: it registers
+			// as any new peer does.
+			st.fresh[p.PublicKey] = true
+		}
 	}
+	defer c.registerFresh(now, st)
 	for _, key := range slices.SortedFunc(maps.Keys(st.chosen), compareKey) {
 		if _, ok := st.peers[key]; !ok {
 			delete(st.chosen, key)

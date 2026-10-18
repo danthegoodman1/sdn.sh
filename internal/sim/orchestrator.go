@@ -66,8 +66,10 @@ type orchestrator struct {
 	w   *World
 	rng *prng.Rand
 	// egress draws internet grants, on a stream of its own so the other
-	// draws stay as they were.
+	// draws stay as they were; unnamer draws which namespace loses its
+	// name, likewise.
 	egress    *prng.Rand
+	unnamer   *prng.Rand
 	networks  []*netIntent
 	ifaces    map[model.InterfaceID]*ifIntent
 	attaching map[string]*pendingAttach
@@ -90,7 +92,7 @@ const retryAfter = 500 * time.Millisecond
 
 func newOrchestrator(w *World) *orchestrator {
 	return &orchestrator{
-		w: w, rng: prng.Stream(w.seed, "orchestrator"), egress: prng.Stream(w.seed, "egress"),
+		w: w, rng: prng.Stream(w.seed, "orchestrator"), egress: prng.Stream(w.seed, "egress"), unnamer: prng.Stream(w.seed, "unname"),
 		ifaces: map[model.InterfaceID]*ifIntent{}, attaching: map[string]*pendingAttach{},
 	}
 }
@@ -427,6 +429,31 @@ func (o *orchestrator) gone(x *ifIntent, stray bool) {
 	}
 	x.host.kernel.Unhold(x.held)
 	x.held = nil
+}
+
+// unname deletes the name of a workload's namespace while the workload
+// still holds it, as an operator's `ip netns del` would. The interface is
+// lost: its agent must notice, release it, and reap the device left in the
+// held namespace. The workload exits a while later.
+func (o *orchestrator) unname(h *hostNode) {
+	var held []*ifIntent
+	for _, id := range sortedKeys(o.ifaces) {
+		if x := o.ifaces[id]; x.host == h && x.state == attached && x.held != nil {
+			held = append(held, x)
+		}
+	}
+	if len(held) == 0 {
+		return
+	}
+	x := held[o.unnamer.Index(len(held))]
+	h.kernel.Unname(x.ns)
+	h.unnamed[x.ns] = true
+	o.w.summary.Unnamed++
+	o.w.logf("an operator deletes %s's namespace name while its workload holds it", x.id)
+	delete(o.ifaces, x.id)
+	ns := x.held
+	x.held = nil
+	o.w.loop.After(o.unnamer.Duration(time.Second, 20*time.Second), func() { h.kernel.Unhold(ns) })
 }
 
 func (o *orchestrator) revoke(x *ifIntent) {

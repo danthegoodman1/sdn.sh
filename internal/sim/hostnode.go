@@ -69,6 +69,8 @@ type hostNode struct {
 	tickAt   time.Time
 	tickSeq  int
 	opFail   *prng.Rand
+	// unnamed holds the namespaces an operator deleted the names of.
+	unnamed map[string]bool
 }
 
 func newHost(w *World, idx int) *hostNode {
@@ -85,6 +87,7 @@ func newHost(w *World, idx int) *hostNode {
 		requests: map[agentcore.RequestID]func(api.LocalInterface, error){},
 		probes:   map[uint64]model.RelayID{},
 		opFail:   prng.Stream(w.seed, fmt.Sprintf("opfail-%d", idx)),
+		unnamed:  map[string]bool{},
 	}
 	r := prng.Stream(w.seed, fmt.Sprintf("foreign-%d", idx))
 	for range w.opts.ForeignPorts {
@@ -276,6 +279,11 @@ func (h *hostNode) carry(a agentcore.Action) {
 			ns.Name = name
 			h.core.Observed(now(), ns, err)
 		})
+	case agentcore.Scan:
+		h.later(0, func() {
+			snap, err := h.kernel.Snapshot(h.cfg.Prefix, h.cfg.AliasPrefix())
+			h.core.Scanned(now(), snap, err)
+		})
 	}
 }
 
@@ -304,6 +312,7 @@ func (h *hostNode) runBatch(b agentcore.RunBatch, i, inc int) {
 		h.w.logf("%s %s: %v", h.name, op, err)
 		h.w.checkMoves(h)
 		h.w.checkTables(h, op.Namespace)
+		h.w.checkFlushed(h)
 		if err != nil {
 			h.core.BatchDone(h.w.now(), b.Namespace, b.ID, i, err)
 			h.drive()

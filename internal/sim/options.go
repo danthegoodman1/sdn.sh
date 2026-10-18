@@ -46,6 +46,7 @@ type Options struct {
 	RebootPermille     uint64 // per second per host
 	NATRebindPermille  uint64 // per second per host
 	StrayPermille      uint64 // per detach: a stray process keeps the namespace
+	UnnamePermille     uint64 // per second per host: an operator deletes a live workload's namespace name
 	ForeignPorts       int    // listen ports other software holds per host
 	// Attacker sends to relay ports and replays registrations it saw.
 	Attacker bool
@@ -89,13 +90,16 @@ func Swarm(seed uint64) Options {
 		o.StrayPermille = r.Below(300)
 		o.ForeignPorts = int(r.Below(4))
 		o.Attacker = r.Percent(50)
+		// Drawn on a stream of its own, so the draws above stay as they
+		// were.
+		o.UnnamePermille = prng.Stream(seed, "unname-option").Below(8)
 	}
 	return o
 }
 
 func (o Options) String() string {
-	return fmt.Sprintf("hosts=%d relays=%d networks=%d services=%d ipv4=%d%% rules=%d%% faults=%v+%v loss=%d%% partition=%d‰ crash=%d‰/op opfail=%d‰ relaycrash=%d‰ cpcrash=%d‰ reboot=%d‰ rebind=%d‰ stray=%d‰ foreign=%d attacker=%v prefix4=%v",
+	return fmt.Sprintf("hosts=%d relays=%d networks=%d services=%d ipv4=%d%% rules=%d%% faults=%v+%v loss=%d%% partition=%d‰ crash=%d‰/op opfail=%d‰ relaycrash=%d‰ cpcrash=%d‰ reboot=%d‰ rebind=%d‰ stray=%d‰ unname=%d‰ foreign=%d attacker=%v prefix4=%v",
 		o.Hosts, o.Relays, o.Networks, o.Services, o.IPv4Percent, o.RulePercent, o.FaultTime, o.Quiesce,
 		o.LossPercent, o.PartitionPermille, o.AgentCrashPermille, o.OpFailPermille, o.RelayCrashPermille,
-		o.CPCrashPermille, o.RebootPermille, o.NATRebindPermille, o.StrayPermille, o.ForeignPorts, o.Attacker, o.Prefix4)
+		o.CPCrashPermille, o.RebootPermille, o.NATRebindPermille, o.StrayPermille, o.UnnamePermille, o.ForeignPorts, o.Attacker, o.Prefix4)
 }

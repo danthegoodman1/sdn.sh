@@ -39,6 +39,9 @@ type Kernel struct {
 	Fail func(op kernel.Op) error
 	// Moves records every allowed IP a SetPeers took from another peer.
 	Moves []Move
+	// Flushed records every flow a Flush or Sweep removed, with its
+	// namespace, until the simulator reads and clears it.
+	Flushed []Flushed
 	// Ran counts operations carried out.
 	Ran uint64
 	// EgressChains are the host's per-link egress filters, by index. One
@@ -49,11 +52,36 @@ type Kernel struct {
 	egressLinks map[uint16]*Netns
 }
 
+// flush removes every flow match selects, and its socket with it, as Linux
+// does: a Flush by the address the flow dialed or the address it was
+// translated to, a Sweep by the translated address alone, the one its far
+// end sends from. Loopback is never matched.
+func (k *Kernel) flush(ns *Netns, match func(netip.Addr) bool, sweep bool) kernel.Result {
+	var r kernel.Result
+	hit := func(a netip.Addr) bool { return a.IsValid() && !a.IsLoopback() && match(a) }
+	for _, id := range slices.Sorted(maps.Keys(ns.Flows)) {
+		f := ns.Flows[id]
+		if hit(f.Remote) || !sweep && hit(f.Dialed) {
+			k.Flushed = append(k.Flushed, Flushed{Namespace: ns.Name, Flow: *f})
+			delete(ns.Flows, id)
+			r.Conntrack++
+			r.Sockets++
+		}
+	}
+	return r
+}
+
 // Move is an allowed IP that changed peers on one device.
 type Move struct {
 	Namespace string
 	Prefix    netip.Prefix
 	From, To  model.Key
+}
+
+// Flushed is a flow a Flush or Sweep removed.
+type Flushed struct {
+	Namespace string
+	Flow      Flow
 }
 
 // Netns is one network namespace.
@@ -148,15 +176,33 @@ func (k *Kernel) Hold(name string) bool {
 }
 
 // Unhold records a process leaving a namespace. A namespace with no name
-// and no process dies, and its devices with it.
+// and no process dies, and its devices with it. A namespace this kernel no
+// longer holds, as one from before a reboot, is gone already.
 func (k *Kernel) Unhold(ns *Netns) {
 	if ns.Held > 0 {
 		ns.Held--
 	}
-	if ns.Held == 0 && ns.Name == "" {
+	if ns.Held == 0 && ns.Name == "" && k.anon[ns.Ref] == ns {
 		k.destroy(ns)
 		delete(k.anon, ns.Ref)
 	}
+}
+
+// Unname deletes a namespace's name, as `ip netns del` does; a namespace a
+// process holds lives on without one.
+func (k *Kernel) Unname(name string) {
+	ns, ok := k.named[name]
+	if !ok {
+		return
+	}
+	delete(k.named, name)
+	if ns.Held == 0 {
+		k.destroy(ns)
+		return
+	}
+	k.nextRef++
+	ns.Name, ns.Ref = "", fmt.Sprintf("ns-%d", k.nextRef)
+	k.anon[ns.Ref] = ns
 }
 
 // PortOwner returns the device bound to a host UDP port.
@@ -276,18 +322,7 @@ func (k *Kernel) Run(op kernel.Op) (kernel.Result, error) {
 		}
 		return kernel.Result{}, nil
 	case kernel.DeleteNamespace:
-		ns, ok := k.named[op.Namespace]
-		if !ok {
-			return kernel.Result{}, nil
-		}
-		delete(k.named, op.Namespace)
-		if ns.Held == 0 {
-			k.destroy(ns)
-			return kernel.Result{}, nil
-		}
-		k.nextRef++
-		ns.Name, ns.Ref = "", fmt.Sprintf("ns-%d", k.nextRef)
-		k.anon[ns.Ref] = ns
+		k.Unname(op.Namespace)
 		return kernel.Result{}, nil
 	case kernel.Reap:
 		ns, ok := k.anon[op.Ref]
@@ -303,7 +338,11 @@ func (k *Kernel) Run(op kernel.Op) (kernel.Result, error) {
 	}
 	ns, ok := k.named[op.Namespace]
 	if !ok {
-		if op.Kind == kernel.DeleteDevice {
+		switch {
+		case op.Kind == kernel.DeleteDevice:
+			return kernel.Result{}, nil
+		case op.Kind == kernel.SetEgress && op.Egress == nil:
+			k.removeEgressFilter(op.EgressIndex)
 			return kernel.Result{}, nil
 		}
 		return kernel.Result{}, kernel.ErrNoNamespace
@@ -318,6 +357,9 @@ func (k *Kernel) Run(op kernel.Op) (kernel.Result, error) {
 		return kernel.Result{}, nil
 	case kernel.SetEgress:
 		k.setEgress(ns, op.Egress)
+		if op.Egress == nil {
+			k.removeEgressFilter(op.EgressIndex)
+		}
 		return kernel.Result{}, nil
 	case kernel.ApplyRules:
 		rs, err := nft.Apply(ns.Rules, *op.Rules)
@@ -327,27 +369,12 @@ func (k *Kernel) Run(op kernel.Op) (kernel.Result, error) {
 		ns.Rules = rs
 		return kernel.Result{}, nil
 	case kernel.Flush:
-		var r kernel.Result
-		for _, id := range slices.Sorted(maps.Keys(ns.Flows)) {
-			if slices.Contains(op.Addrs, ns.Flows[id].Remote) {
-				delete(ns.Flows, id)
-				r.Conntrack++
-				r.Sockets++
-			}
-		}
-		return r, nil
+		return k.flush(ns, func(a netip.Addr) bool { return slices.Contains(op.Addrs, a) }, false), nil
 	case kernel.Sweep:
-		var r kernel.Result
-		for _, id := range slices.Sorted(maps.Keys(ns.Flows)) {
-			remote := ns.Flows[id].Remote
-			inside := slices.ContainsFunc(op.Prefixes, func(p netip.Prefix) bool { return p.Contains(remote) })
-			if inside && !slices.Contains(op.Addrs, remote) {
-				delete(ns.Flows, id)
-				r.Conntrack++
-				r.Sockets++
-			}
-		}
-		return r, nil
+		return k.flush(ns, func(a netip.Addr) bool {
+			inside := slices.ContainsFunc(op.Prefixes, func(p netip.Prefix) bool { return p.Contains(a) })
+			return inside && !slices.Contains(op.Addrs, a)
+		}, true), nil
 	}
 	d, ok := ns.Devices[op.Device]
 	if !ok {
@@ -405,6 +432,26 @@ func (k *Kernel) destroy(ns *Netns) {
 // setEgress installs, changes or removes a namespace's egress link and its
 // host filter. A link left at the same index by another namespace is
 // replaced, as the Linux implementation deletes a stale host side.
+// EgressLinked reports whether an egress index's link exists.
+func (k *Kernel) EgressLinked(idx uint16) bool {
+	_, ok := k.egressLinks[idx]
+	return ok
+}
+
+// removeEgressFilter removes the host's filter and link for an index, as a
+// removal that names it does on Linux: deleting the host end of the pair
+// takes the end in the namespace with it, wherever that namespace is.
+func (k *Kernel) removeEgressFilter(idx uint16) {
+	if idx == 0 {
+		return
+	}
+	if ns, ok := k.egressLinks[idx]; ok {
+		ns.Egress = nil
+		delete(k.egressLinks, idx)
+	}
+	delete(k.EgressChains, idx)
+}
+
 func (k *Kernel) setEgress(ns *Netns, cfg *kernel.EgressConfig) {
 	if ns.Egress != nil && (cfg == nil || ns.Egress.Index != cfg.Index) {
 		delete(k.EgressChains, ns.Egress.Index)

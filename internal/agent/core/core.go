@@ -163,6 +163,10 @@ type SendProbe struct {
 // Observed.
 type Observe struct{ Namespace string }
 
+// Scan asks for a snapshot of the kernel, which comes back through Scanned,
+// to find devices the agent made in namespaces only a process holds.
+type Scan struct{}
+
 func (RunBatch) isAction()         {}
 func (CallAttach) isAction()       {}
 func (CallRelease) isAction()      {}
@@ -172,6 +176,7 @@ func (Reply) isAction()            {}
 func (SendRegistration) isAction() {}
 func (SendProbe) isAction()        {}
 func (Observe) isAction()          {}
+func (Scan) isAction()             {}
 
 type phase int
 
@@ -234,18 +239,22 @@ type nsState struct {
 	name  string
 	iface model.InterfaceID
 	// ref names an unnamed namespace a process holds, which only Reap
-	// clears.
+	// clears; reaped records that it has, so the namespace is forgotten.
 	ref    string
+	reaped bool
 	exists bool
 	device bool
 	link   *kernel.LinkConfig
-	// egress is the namespace's egress link as installed, nil for none.
-	egress *kernel.EgressConfig
-	peers  map[model.Key]kernel.Peer
-	rules  *nft.Ruleset
-	chosen map[model.Key]netip.AddrPort
-	drain  map[model.Key]time.Time
-	fresh  map[model.Key]bool
+	// egress is the namespace's egress link as installed, nil for none;
+	// egressClear records that the host holds no filter for its index
+	// either, since none was installed or a removal ran.
+	egress      *kernel.EgressConfig
+	egressClear bool
+	peers       map[model.Key]kernel.Peer
+	rules       *nft.Ruleset
+	chosen      map[model.Key]netip.AddrPort
+	drain       map[model.Key]time.Time
+	fresh       map[model.Key]bool
 	// unflushed holds addresses of removed peers whose flows have yet to
 	// be flushed; sweep asks for a sweep of every flow no installed peer
 	// accounts for, after a restart lost track.
@@ -269,7 +278,7 @@ type nsState struct {
 
 func newNS(name string, id model.InterfaceID) *nsState {
 	return &nsState{
-		name: name, iface: id, dirty: true,
+		name: name, iface: id, dirty: true, egressClear: true,
 		peers:  map[model.Key]kernel.Peer{},
 		chosen: map[model.Key]netip.AddrPort{},
 		drain:  map[model.Key]time.Time{},
@@ -311,6 +320,9 @@ type Core struct {
 	resends    map[string]*resend
 	lastProbe  time.Time
 	lastResync time.Time
+	// scanning records a Scan awaiting its answer, and rescan one wanted
+	// meanwhile.
+	scanning, rescan bool
 	// Stats counts what the core decided, for metrics.
 	Stats Stats
 	// Debug, when set, receives a line per reconcile plan.

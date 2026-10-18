@@ -27,6 +27,11 @@ const (
 	relayDataOld = "if !d.Endpoint.IsValid() || src != d.Endpoint {"
 	// applyRules is the agent's nftables transaction within a batch.
 	applyRules = "\tif tx := nft.Diff(st.rules, tgt.rules); !tx.Empty() {\n\t\tops = append(ops, kernel.Op{Kind: kernel.ApplyRules, Namespace: st.name, Rules: &tx})\n\t}\n"
+	// removeUnwanted opens the agent's loop over installed peers the target
+	// drops.
+	removeUnwanted = "\tfor _, key := range slices.SortedFunc(maps.Keys(st.peers), compareKey) {\n\t\tif want[key] {\n"
+	// destroyFlushed is the kernel's destruction of a flush's sockets.
+	destroyFlushed = "n, err := h.diag.destroyMatching(func(s sock) bool {\n\t\treturn cm.carried[flowTuple{s.proto, s.local, s.remote}] || !sweep && match(s.remote.Addr())\n\t})"
 	// appendLog is the relay committer's write of registrations to its log.
 	appendLog = "\t\t\tif err := s.disk.Append(batch); err != nil {\n\t\t\t\treturn fmt.Errorf(\"registration log: %w\", err)\n\t\t\t}\n"
 )
@@ -139,14 +144,26 @@ var Mutants = []Mutant{
 		ID:     "kernel-flush-skips-conntrack",
 		Breaks: "a flush deletes the conntrack entries translated to a removed peer's address",
 		Edits: []Edit{{linuxKernel,
-			"n, err := h.nl.ConntrackDeleteFilters(netlink.ConntrackTable, family, conntrackMatch{match})",
+			"n, err := h.nl.ConntrackDeleteFilters(netlink.ConntrackTable, family, cm)",
 			"_ = family\n\t\tn, err := uint(0), error(nil)"}},
 		Catch: []string{"kernel"},
 	},
 	{
 		ID:     "kernel-flush-skips-socket-destroy",
 		Breaks: "a flush destroys the sockets addressed to a removed peer (SOCK_DESTROY), since flushing conntrack leaves them",
-		Edits:  []Edit{{linuxKernel, "n, err := h.diag.destroyMatching(match)", "n, err := 0, error(nil)"}},
+		Edits:  []Edit{{linuxKernel, destroyFlushed, "n, err := 0, error(nil)"}},
+		Catch:  []string{"kernel"},
+	},
+	{
+		ID:     "kernel-flush-spares-translated-sockets",
+		Breaks: "a flush destroys the sockets its conntrack entries carried, since a translated client's socket stays addressed to the service it dialed",
+		Edits:  []Edit{{linuxKernel, "return cm.carried[flowTuple{s.proto, s.local, s.remote}] || !sweep && match(s.remote.Addr())", "return !sweep && match(s.remote.Addr())"}},
+		Catch:  []string{"kernel"},
+	},
+	{
+		ID:     "kernel-sweep-judges-dialed-address",
+		Breaks: "a sweep judges a flow by the addresses its ends send from, so a connection through a live service survives it",
+		Edits:  []Edit{{linuxKernel, "\tif !c.senders {\n", "\tif true {\n"}},
 		Catch:  []string{"kernel"},
 	},
 	{
@@ -165,8 +182,8 @@ var Mutants = []Mutant{
 		ID:     "peer-removed-before-slots",
 		Breaks: "a batch removes a backend's slots before its peer, so no slot ever names an address without a peer",
 		Edits: []Edit{
-			{agentPlan, applyRules + "\tvar removes", "\tvar removes"},
-			{agentPlan, "\treturn ops\n}\n\n// egressFor is", applyRules + "\treturn ops\n}\n\n// egressFor is"},
+			{agentPlan, applyRules + removeUnwanted, removeUnwanted},
+			{agentPlan, "\tif st.sweep {\n", applyRules + "\tif st.sweep {\n"},
 		},
 		Catch: []string{"sim"},
 	},
@@ -231,5 +248,41 @@ var Mutants = []Mutant{
 			"if !slices.Contains(ch.Hosts, id) && !slices.ContainsFunc(p.nets, func(n model.NetworkID) bool { return slices.Contains(ch.Networks, n) }) {",
 			"if !slices.Contains(ch.Hosts, id) {"}},
 		Catch: []string{"sim"},
+	},
+	{
+		ID:     "sweep-forgets-live-peers",
+		Breaks: "a sweep keeps every flow a peer the batch leaves installed accounts for",
+		Edits:  []Edit{{agentPlan, "\tfor _, tp := range tgt.peers {\n\t\tfor _, a := range tp.peer.Allowed {\n\t\t\tkeep = append(keep, a.Addr())", "\tfor _, tp := range tgt.peers[:0] {\n\t\tfor _, a := range tp.peer.Allowed {\n\t\t\tkeep = append(keep, a.Addr())"}},
+		Catch:  []string{"sim"},
+	},
+	{
+		ID:     "shrunk-peer-not-flushed",
+		Breaks: "the addresses a peer drops, such as a machine a gateway stops fronting, are flushed like a removed peer's",
+		Edits:  []Edit{{agentPlan, "\t\t\t\tfor _, a := range dropped {\n\t\t\t\t\tflush = append(flush, a.Addr())\n\t\t\t\t}\n", ""}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "vanished-namespace-stays-ready",
+		Breaks: "an interface whose namespace vanishes behind the agent is torn down, since its key went with the device",
+		Edits:  []Edit{{agentPlan, "\t\t\ti.phase = detaching\n\t\t\tc.emit(WriteJournal{Entry: c.entry(i)})\n\t\t\tc.scan()\n", "\t\t\tc.scan()\n"}},
+		Catch:  []string{"agent-core", "sim"},
+	},
+	{
+		ID:     "held-namespace-reaped-repeatedly",
+		Breaks: "the agent reaps a namespace only a process holds once, then waits for the holder to let go",
+		Edits:  []Edit{{agentPlan, "\t\tif st.reaped {\n\t\t\treturn nil\n\t\t}\n", ""}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "active-relay-outlives-its-set",
+		Breaks: "a relay the network no longer lists stops being its active relay",
+		Edits:  []Edit{{agentLife, "\t}\n\tc.reselect()\n}\n", "\t}\n}\n"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "egress-filter-outlives-namespace",
+		Breaks: "tearing down an interface whose namespace is gone still removes its host egress filter, by index",
+		Edits:  []Edit{{agentPlan, "kernel.Op{Kind: kernel.SetEgress, Namespace: st.name, EgressIndex: egressIndex(st, i)}", "kernel.Op{Kind: kernel.SetEgress, Namespace: st.name}"}},
+		Catch:  []string{"sim"},
 	},
 }

@@ -17,6 +17,8 @@ import (
 // its set this agent's probes find up, or the first of the set when none is.
 // Each side chooses for itself; roaming reconciles the two, since a packet
 // arriving through another relay moves the receiver's endpoint there.
+// Every change to desired state reselects, so the relay it keeps is one the
+// set names.
 func (c *Core) activeRelay(n *api.NetworkState) model.RelayID {
 	if len(n.Relays) == 0 {
 		return ""
@@ -27,6 +29,10 @@ func (c *Core) activeRelay(n *api.NetworkState) model.RelayID {
 	id := c.chooseRelay(n)
 	c.active[n.Network] = id
 	return id
+}
+
+func inSet(n *api.NetworkState, id model.RelayID) bool {
+	return slices.ContainsFunc(n.Relays, func(r api.RelayRef) bool { return r.Relay == id })
 }
 
 func (c *Core) chooseRelay(n *api.NetworkState) model.RelayID {
@@ -99,7 +105,7 @@ func (c *Core) probe(now time.Time) {
 
 // reselect recomputes each network's active relay, and marks for
 // reconciliation every namespace whose relay changed, which rewrites its
-// relay peers' endpoints.
+// relay peers' endpoints. Leaving a relay that left the set is no failover.
 func (c *Core) reselect() {
 	for _, nid := range c.desired.NetworkIDs() {
 		n := c.desired.Networks[nid]
@@ -107,10 +113,11 @@ func (c *Core) reselect() {
 			continue
 		}
 		id := c.chooseRelay(n)
-		if prev, ok := c.active[nid]; ok && prev == id {
+		prev, ok := c.active[nid]
+		if ok && prev == id {
 			continue
 		}
-		if _, ok := c.active[nid]; ok {
+		if ok && inSet(n, prev) {
 			c.Stats.Failovers++
 		}
 		c.active[nid] = id
@@ -257,6 +264,7 @@ func (c *Core) Tick(now time.Time) {
 	c.resendDue(now)
 	if c.cfg.ResyncEvery > 0 && !now.Before(c.lastResync.Add(c.cfg.ResyncEvery)) {
 		c.lastResync = now
+		c.scan()
 		for _, name := range slices.Sorted(maps.Keys(c.ns)) {
 			st := c.ns[name]
 			if i, ok := c.ifaces[st.iface]; ok && i.phase == ready && !st.busy && !st.observe {

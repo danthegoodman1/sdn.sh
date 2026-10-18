@@ -117,6 +117,27 @@ func holdsReverse(h *hostNode, dev *kmodel.Device, endpoint netip.AddrPort) bool
 	return ok && other.Peers[dev.Private.Public()] != nil
 }
 
+// checkFlushed fails the run if a Flush or Sweep removed a flow whose
+// translated address a peer of the device still allows: the connection had
+// somewhere to go.
+func (w *World) checkFlushed(h *hostNode) {
+	for _, f := range h.kernel.Flushed {
+		ns, ok := h.kernel.Named(f.Namespace)
+		if !ok {
+			continue
+		}
+		dev, ok := ns.Devices[h.cfg.Device]
+		if !ok {
+			continue
+		}
+		if p, ok := dev.Route(f.Flow.Remote); ok {
+			w.fail("%s: %s flushed a flow to %v, dialed as %v, which peer %s still allows", h.name, f.Namespace, f.Flow.Remote, f.Flow.Dialed, w.byKey[p.PublicKey])
+			break
+		}
+	}
+	h.kernel.Flushed = nil
+}
+
 // checkTables fails the run if a namespace's table names an address its
 // device cannot route: a slot whose backend has no peer, or a source address
 // no peer holds. It runs after every kernel operation, since a batch must
@@ -407,6 +428,11 @@ func (w *World) checkSafety() {
 			s := settled[name]
 			ns, ok := h.kernel.Named(name)
 			if !ok {
+				if h.unnamed[name] {
+					// An operator deleted its name; the agent learns at its
+					// next look.
+					continue
+				}
 				w.fail("%s: settled namespace %s is gone", h.name, name)
 				return
 			}
@@ -499,6 +525,12 @@ func (w *World) checkLiveness() {
 				return
 			}
 			named = append(named, ns.Name)
+		}
+		for _, idx := range slices.Sorted(maps.Keys(h.kernel.EgressChains)) {
+			if !h.kernel.EgressLinked(idx) {
+				w.fail("%s: the egress filter for link %d outlives the link", h.name, idx)
+				return
+			}
 		}
 		var journaled, attached []string
 		for _, id := range sortedKeys(h.journal) {

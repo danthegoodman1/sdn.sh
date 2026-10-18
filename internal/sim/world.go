@@ -42,7 +42,7 @@ type Summary struct {
 	Attaches, Detaches, Revokes, Rules    int
 	EgressGrants                          int
 	AgentCrashes, RelayCrashes, CPCrashes int
-	Reboots, Rebinds, Strays              int
+	Reboots, Rebinds, Strays, Unnamed     int
 	FlowsOK, FlowsDenied                  int
 	Batches, Conflicts, Failovers         uint64
 	Registrations                         uint64
@@ -50,9 +50,9 @@ type Summary struct {
 }
 
 func (s Summary) String() string {
-	return fmt.Sprintf("seed %d: %d events; %d attaches, %d detaches, %d revokes, %d rule changes, %d egress grants; crashes agent %d relay %d cp %d, reboots %d, rebinds %d, strays %d; flows ok %d denied %d; batches %d, conflicts %d, failovers %d, registrations %d, attacker sent %d",
+	return fmt.Sprintf("seed %d: %d events; %d attaches, %d detaches, %d revokes, %d rule changes, %d egress grants; crashes agent %d relay %d cp %d, reboots %d, rebinds %d, strays %d, unnamed %d; flows ok %d denied %d; batches %d, conflicts %d, failovers %d, registrations %d, attacker sent %d",
 		s.Seed, s.Events, s.Attaches, s.Detaches, s.Revokes, s.Rules, s.EgressGrants, s.AgentCrashes, s.RelayCrashes, s.CPCrashes,
-		s.Reboots, s.Rebinds, s.Strays, s.FlowsOK, s.FlowsDenied, s.Batches, s.Conflicts, s.Failovers, s.Registrations, s.AttackerSent)
+		s.Reboots, s.Rebinds, s.Strays, s.Unnamed, s.FlowsOK, s.FlowsDenied, s.Batches, s.Conflicts, s.Failovers, s.Registrations, s.AttackerSent)
 }
 
 // World is one simulated deployment.
@@ -265,6 +265,9 @@ func (w *World) scheduleFaults() {
 			}
 			if w.opts.NATRebindPermille > 0 && w.faults.Permille(w.opts.NATRebindPermille) {
 				h.rebind()
+			}
+			if w.opts.UnnamePermille > 0 && w.orch.unnamer.Permille(w.opts.UnnamePermille) {
+				w.orch.unname(h)
 			}
 			w.net.MaybePartition(h.node())
 		}

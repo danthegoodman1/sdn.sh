@@ -157,7 +157,10 @@ func prefixMatch(p netip.Prefix) []expr.Any {
 func (k *Kernel) setEgress(h *nsHandles, cfg *kernel.EgressConfig) error {
 	k.egressMu.Lock()
 	defer k.egressMu.Unlock()
-	cur, _ := k.observeEgress(h)
+	cur, err := k.observeEgress(h)
+	if err != nil {
+		return err
+	}
 	if cur != nil && (cfg == nil || cur.Index != cfg.Index) {
 		if err := k.removeEgress(cur.Index); err != nil {
 			return err
@@ -275,6 +278,17 @@ func (k *Kernel) grantEgress(cfg *kernel.EgressConfig) error {
 	return k.rootNL.LinkSetAlias(l, egressAlias+formatRules(cfg.Rules))
 }
 
+// removeEgressIndex removes the host's filter and link for an index, when
+// one is named.
+func (k *Kernel) removeEgressIndex(idx uint16) error {
+	if idx == 0 {
+		return nil
+	}
+	k.egressMu.Lock()
+	defer k.egressMu.Unlock()
+	return k.removeEgress(idx)
+}
+
 // removeEgress deletes a link's grant and the link. Each step tolerates
 // finding its object gone, so a removal a crash cut short completes.
 func (k *Kernel) removeEgress(idx uint16) error {
@@ -296,19 +310,29 @@ func (k *Kernel) removeEgress(idx uint16) error {
 	if err := c.Flush(); err != nil && !errors.Is(err, unix.ENOENT) {
 		return fmt.Errorf("egress chain %d: %w", idx, err)
 	}
-	if l, err := k.rootNL.LinkByName(egressLink(idx)); err == nil {
-		if err := k.rootNL.LinkDel(l); err != nil {
-			return err
-		}
+	l, err := k.rootNL.LinkByName(egressLink(idx))
+	switch {
+	case notFound(err):
+		return nil
+	case err != nil:
+		return err
 	}
-	return nil
+	return k.rootNL.LinkDel(l)
+}
+
+func notFound(err error) bool {
+	var nf netlink.LinkNotFoundError
+	return errors.As(err, &nf)
 }
 
 // observeEgress reads a namespace's egress link and its grant.
 func (k *Kernel) observeEgress(h *nsHandles) (*kernel.EgressConfig, error) {
 	l, err := h.nl.LinkByName(egressNSLink)
-	if err != nil {
+	switch {
+	case notFound(err):
 		return nil, nil
+	case err != nil:
+		return nil, err
 	}
 	idx, err := strconv.ParseUint(strings.TrimPrefix(l.Attrs().Alias, egressAlias), 10, 16)
 	if err != nil || !strings.HasPrefix(l.Attrs().Alias, egressAlias) {
@@ -316,9 +340,12 @@ func (k *Kernel) observeEgress(h *nsHandles) (*kernel.EgressConfig, error) {
 	}
 	cfg := &kernel.EgressConfig{Index: uint16(idx)}
 	host, err := k.rootNL.LinkByName(egressLink(cfg.Index))
-	if err != nil {
+	switch {
+	case notFound(err):
 		// The host side is gone, so the pair is: nothing to report.
 		return nil, nil
+	case err != nil:
+		return nil, err
 	}
 	rules, err := parseRules(strings.TrimPrefix(host.Attrs().Alias, egressAlias))
 	if err != nil {

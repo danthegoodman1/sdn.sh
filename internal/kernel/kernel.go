@@ -119,6 +119,10 @@ type Op struct {
 	// Egress configures SetEgress: the namespace's link to the host's
 	// egress NAT and the flows it may open, or nil to remove the link.
 	Egress *EgressConfig `json:"egress,omitempty"`
+	// EgressIndex names, for a SetEgress that removes, the host's filter
+	// to remove with the link; it outlives a namespace deleted without it,
+	// so it goes even when the namespace is gone.
+	EgressIndex uint16 `json:"egress_index,omitempty"`
 	// Ref names the namespace Reap clears.
 	Ref string `json:"ref,omitempty"`
 	// AliasPrefix limits Reap to devices this agent made.

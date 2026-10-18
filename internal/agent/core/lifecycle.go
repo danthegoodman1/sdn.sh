@@ -50,6 +50,7 @@ func (c *Core) Start(now time.Time, journal []JournalEntry, snap kernel.Snapshot
 		delete(byName, e.Namespace)
 		st.exists = ok
 		st.egress = observed.Egress.Clone()
+		st.egressClear = ok && observed.Egress == nil
 		dev, hasDev := findDevice(observed, c.cfg.Device)
 		if e.Detaching || !hasDev || !dev.HasKey || dev.PublicKey != e.PublicKey {
 			// A journaled interface whose device is gone lost its key with
@@ -68,10 +69,53 @@ func (c *Core) Start(now time.Time, journal []JournalEntry, snap kernel.Snapshot
 		st := newNS(name, id)
 		st.exists = true
 		st.egress = byName[name].Egress.Clone()
+		st.egressClear = st.egress == nil
 		_, st.device = findDevice(byName[name], c.cfg.Device)
 		c.ns[name] = st
 	}
 	c.lastRegister, c.lastProbe, c.lastResync = now, now, now
+}
+
+// scan asks for a Scan, or for another once the one in flight answers.
+func (c *Core) scan() {
+	if c.scanning {
+		c.rescan = true
+		return
+	}
+	c.scanning = true
+	c.emit(Scan{})
+}
+
+// Scanned takes the snapshot a Scan asked for. A namespace only a process
+// holds that carries a device of the agent's is reaped, as at Start. A scan
+// that failed waits for the next resync.
+func (c *Core) Scanned(now time.Time, snap kernel.Snapshot, err error) {
+	c.scanning = false
+	if c.rescan {
+		c.rescan = false
+		c.scan()
+	}
+	if err != nil {
+		return
+	}
+	for _, ns := range snap.Namespaces {
+		if ns.Name != "" {
+			continue
+		}
+		if _, ok := c.ns["ref:"+ns.Ref]; ok {
+			continue
+		}
+		st := newNS("", "")
+		st.ref = ns.Ref
+		c.ns["ref:"+ns.Ref] = st
+		for _, d := range ns.Devices {
+			if id, ok := kernel.AliasInterface(c.cfg.AliasPrefix(), d.Alias); ok {
+				if _, held := c.ifaces[id]; !held {
+					c.releaseLater(id)
+				}
+			}
+		}
+	}
 }
 
 func findDevice(ns kernel.Namespace, name string) (kernel.Device, bool) {
@@ -250,6 +294,10 @@ func (c *Core) AttachDone(now time.Time, id model.InterfaceID, resp *api.AttachR
 	c.desired.Merge(n)
 	i.phase = configuring
 	c.ns[i.ns].dirty = true
+	// The answer carries the network at a newer revision, which other
+	// namespaces on the host reconcile too, such as a co-located backend
+	// that now peers with this interface.
+	c.refresh()
 }
 
 func (c *Core) attachRequest(i *iface) api.AttachRequest {
@@ -330,6 +378,14 @@ func (c *Core) State(now time.Time, u api.StateUpdate) error {
 			}
 		}
 	}
+	c.refresh()
+	return nil
+}
+
+// refresh marks for reconciliation every namespace whose network desired
+// state holds at another revision than the one it reconciled, and
+// recomputes active relays, since a network's relay set may have changed.
+func (c *Core) refresh() {
 	for _, name := range slices.Sorted(maps.Keys(c.ns)) {
 		st := c.ns[name]
 		i, ok := c.ifaces[st.iface]
@@ -341,7 +397,7 @@ func (c *Core) State(now time.Time, u api.StateUpdate) error {
 			st.dirty = true
 		}
 	}
-	return nil
+	c.reselect()
 }
 
 // Live lists the interfaces whose leases the agent renews.

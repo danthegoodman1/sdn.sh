@@ -212,6 +212,7 @@ func Layers(o options) map[string]Layer {
 		goTest("relay-server", "./internal/relay/server"),
 		goTest("cp", "./internal/cp"),
 		goTest("cpserver", "./internal/cpserver"),
+		goTest("agent-core", "./internal/agent/core"),
 		goTest("sim", "./internal/sim"),
 		{Name: "kernel", Root: true, Steps: []Step{
 			{Args: []string{"mkdir", "-p", ".mutants"}},

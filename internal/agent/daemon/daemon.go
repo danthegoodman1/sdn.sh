@@ -360,6 +360,14 @@ func (d *Daemon) carry(a agentcore.Action) {
 		d.runBatch(a)
 	case agentcore.Observe:
 		d.observe(a.Namespace)
+	case agentcore.Scan:
+		go func() {
+			snap, err := d.kern.Snapshot(d.cfg.Core.Prefix, d.cfg.Core.AliasPrefix())
+			if err != nil {
+				d.log.Warn().Err(err).Msg("kernel scan failed")
+			}
+			d.post(func() { d.core.Scanned(d.now(), snap, err) })
+		}()
 	case agentcore.CallAttach:
 		d.callAttach(a.Request)
 	case agentcore.CallRelease:
@@ -521,26 +529,42 @@ func (d *Daemon) pollLoop(ctx context.Context) {
 			backoff = min(backoff*2, 15*time.Second)
 			continue
 		}
-		backoff = time.Second
 		d.m.polls.WithLabelValues("ok").Inc()
 		received := time.Now()
-		d.post(func() {
+		rejected, err := query(d, ctx, func() error {
 			if err := d.core.State(d.now(), u); err != nil {
 				d.log.Error().Err(err).Uint64("generation", u.Generation).Msg("desired state rejected")
-				return
+				return err
 			}
 			d.m.generation.Set(float64(d.core.Generation()))
 			if len(u.Networks) > 0 {
 				d.log.Info().Uint64("generation", u.Generation).Int("networks", len(u.Networks)).
 					Dur("queued", time.Since(received)).Msg("desired state received")
 			}
+			return nil
 		})
+		if err != nil {
+			return
+		}
+		if rejected == nil {
+			backoff = time.Second
+			continue
+		}
+		// The same generation would come back at once; wait before asking.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, 15*time.Second)
 	}
 }
 
 // renewLoop renews live leases at a third of the soonest lease's remaining
 // term, and at least every RenewEvery, so a control plane with short leases
-// needs no agent setting to match.
+// needs no agent setting to match. The term comes from the renewal's answer:
+// desired state carries the expiry the network was compiled with, which goes
+// stale while the network is idle.
 func (d *Daemon) renewLoop(ctx context.Context) {
 	wait := time.Duration(0)
 	for {
@@ -550,39 +574,25 @@ func (d *Daemon) renewLoop(ctx context.Context) {
 		case <-time.After(wait):
 		}
 		wait = d.cfg.RenewEvery
-		type live struct {
-			ids      []model.InterfaceID
-			earliest time.Time
-		}
-		l, err := query(d, ctx, func() live {
-			var out live
-			out.ids = d.core.Live()
-			for _, id := range out.ids {
-				if _, i, ok := d.core.Desired().Interface(id); ok && !i.Expires.IsZero() &&
-					(out.earliest.IsZero() || i.Expires.Before(out.earliest)) {
-					out.earliest = i.Expires
-				}
-			}
-			return out
-		})
+		ids, err := query(d, ctx, d.core.Live)
 		if err != nil {
 			return
 		}
-		if len(l.ids) == 0 {
+		if len(ids) == 0 {
 			wait = min(wait, time.Second)
 			continue
 		}
-		resp, err := d.cp.Renew(ctx, l.ids)
+		resp, err := d.cp.Renew(ctx, ids)
 		d.m.cpCalls.WithLabelValues("renew", callResult(err)).Inc()
 		if err != nil {
-			d.log.Warn().Err(err).Int("interfaces", len(l.ids)).Msg("lease renewal failed")
+			d.log.Warn().Err(err).Int("interfaces", len(ids)).Msg("lease renewal failed")
 			wait = time.Second
 			continue
 		}
-		if lost := len(l.ids) - len(resp.Expires); lost > 0 {
+		if lost := len(ids) - len(resp.Expires); lost > 0 {
 			d.log.Warn().Int("interfaces", lost).Msg("leases no longer live at the control plane")
 		}
-		earliest := l.earliest
+		var earliest time.Time
 		for _, exp := range resp.Expires {
 			if earliest.IsZero() || exp.Before(earliest) {
 				earliest = exp

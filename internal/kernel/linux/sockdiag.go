@@ -153,9 +153,10 @@ func netlinkError(b []byte) error {
 	return unix.Errno(-code)
 }
 
-// destroyMatching destroys every TCP and UDP socket, in both families, whose
-// remote address match accepts, and returns how many went.
-func (d *sockDiag) destroyMatching(match func(netip.Addr) bool) (int, error) {
+// destroyMatching destroys every connected TCP and UDP socket, in both
+// families, that match accepts, and returns how many went. A socket with a
+// loopback peer is the workload's own and never matches.
+func (d *sockDiag) destroyMatching(match func(sock) bool) (int, error) {
 	n := 0
 	for _, family := range []uint8{unix.AF_INET, unix.AF_INET6} {
 		for _, proto := range []uint8{unix.IPPROTO_TCP, unix.IPPROTO_UDP} {
@@ -164,7 +165,7 @@ func (d *sockDiag) destroyMatching(match func(netip.Addr) bool) (int, error) {
 				return n, err
 			}
 			for _, s := range socks {
-				if !s.remote.Addr().IsValid() || s.remote.Addr().IsUnspecified() || !match(s.remote.Addr()) {
+				if !s.remote.Addr().IsValid() || s.remote.Addr().IsUnspecified() || s.remote.Addr().IsLoopback() || !match(s) {
 					continue
 				}
 				// A socket that closed between the dump and now is fine.

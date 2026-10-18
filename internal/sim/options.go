@@ -4,6 +4,7 @@ package sim
 
 import (
 	"fmt"
+	"net/netip"
 	"time"
 
 	"sdn.sh/internal/prng"
@@ -48,6 +49,9 @@ type Options struct {
 	ForeignPorts       int    // listen ports other software holds per host
 	// Attacker sends to relay ports and replays registrations it saw.
 	Attacker bool
+	// Prefix4 is every network's IPv4 prefix. One small enough to run out
+	// makes the control plane reuse addresses once their quarantine ends.
+	Prefix4 netip.Prefix
 }
 
 // Swarm draws a run's options from its seed.
@@ -70,6 +74,7 @@ func Swarm(seed uint64) Options {
 		UnderlayDelayMin: 100 * time.Microsecond,
 		UnderlayDelayMax: time.Duration(r.Range(1, 20)) * time.Millisecond,
 		OpDelayMax:       time.Duration(r.Range(1, 5)) * time.Millisecond,
+		Prefix4:          netip.MustParsePrefix("10.42.0.0/24"),
 	}
 	if r.Percent(80) {
 		o.LossPercent = r.Below(10)
@@ -89,8 +94,8 @@ func Swarm(seed uint64) Options {
 }
 
 func (o Options) String() string {
-	return fmt.Sprintf("hosts=%d relays=%d networks=%d services=%d ipv4=%d%% rules=%d%% faults=%v+%v loss=%d%% partition=%d‰ crash=%d‰/op opfail=%d‰ relaycrash=%d‰ cpcrash=%d‰ reboot=%d‰ rebind=%d‰ stray=%d‰ foreign=%d attacker=%v",
+	return fmt.Sprintf("hosts=%d relays=%d networks=%d services=%d ipv4=%d%% rules=%d%% faults=%v+%v loss=%d%% partition=%d‰ crash=%d‰/op opfail=%d‰ relaycrash=%d‰ cpcrash=%d‰ reboot=%d‰ rebind=%d‰ stray=%d‰ foreign=%d attacker=%v prefix4=%v",
 		o.Hosts, o.Relays, o.Networks, o.Services, o.IPv4Percent, o.RulePercent, o.FaultTime, o.Quiesce,
 		o.LossPercent, o.PartitionPermille, o.AgentCrashPermille, o.OpFailPermille, o.RelayCrashPermille,
-		o.CPCrashPermille, o.RebootPermille, o.NATRebindPermille, o.StrayPermille, o.ForeignPorts, o.Attacker)
+		o.CPCrashPermille, o.RebootPermille, o.NATRebindPermille, o.StrayPermille, o.ForeignPorts, o.Attacker, o.Prefix4)
 }

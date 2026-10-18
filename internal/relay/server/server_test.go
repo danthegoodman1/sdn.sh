@@ -14,6 +14,7 @@ import (
 	"sdn.sh/internal/api"
 	"sdn.sh/internal/model"
 	"sdn.sh/internal/regproto"
+	relaycore "sdn.sh/internal/relay/core"
 )
 
 // fakeCP serves one port table and parks every later poll.
@@ -206,6 +207,33 @@ func TestARelayForwardsOnlyBetweenRegisteredEndpointsAndRemembersThem(t *testing
 	send(t, attacker, e.ab, data("spoof"))
 	if spoofed(b) {
 		t.Fatal("a replay moved the endpoint after a restart")
+	}
+}
+
+// TestARegistrationTheLogFailsToHoldMovesNoEndpoint breaks the registration
+// log before a registration reaches the committer: the relay stops rather
+// than commit an endpoint a crash would forget.
+func TestARegistrationTheLogFailsToHoldMovesNoEndpoint(t *testing.T) {
+	e := newEdge(t)
+	srv, err := New(DefaultConfig(), &fakeCP{st: e.st}, t.TempDir(), NewMetrics(prometheus.NewRegistry(), 16), zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.table.Load(time.Now(), e.st)
+	srv.disk.Close()
+	reg := regproto.Encode(e.keyA, e.ab, 1)
+	d := srv.table.Packet(time.Now(), e.ab, netip.MustParseAddrPort("127.0.0.1:40000"), reg[:])
+	if d.Verdict != relaycore.Register {
+		t.Fatalf("the registration did not verify: %+v", d)
+	}
+	srv.enqueue(d.Registration)
+	if err := srv.committer(context.Background()); err == nil {
+		t.Fatal("the committer carried on past a failed append")
+	}
+	for _, dir := range srv.Dirs() {
+		if dir.Endpoint.IsValid() {
+			t.Fatalf("%v committed endpoint %v, which the log never held", dir.Local, dir.Endpoint)
+		}
 	}
 }
 

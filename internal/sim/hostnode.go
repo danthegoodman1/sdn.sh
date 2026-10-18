@@ -252,6 +252,7 @@ func (h *hostNode) carry(a agentcore.Action) {
 	case agentcore.CallRelease:
 		h.callRelease(a.Interfaces)
 	case agentcore.WriteJournal:
+		h.w.checkJournal(h, a.Entry)
 		h.journal[a.Entry.Interface] = a.Entry
 	case agentcore.DeleteJournal:
 		delete(h.journal, a.Interface)
@@ -301,6 +302,7 @@ func (h *hostNode) runBatch(b agentcore.RunBatch, i, inc int) {
 		_, err := h.kernel.Run(op)
 		h.w.logf("%s %s: %v", h.name, op, err)
 		h.w.checkMoves(h)
+		h.w.checkTables(h, op.Namespace)
 		if err != nil {
 			h.core.BatchDone(h.w.now(), b.Namespace, b.ID, i, err)
 			h.drive()

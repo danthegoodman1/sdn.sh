@@ -3,14 +3,18 @@
 package sim
 
 import (
+	"bytes"
 	"cmp"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/netip"
 	"slices"
 	"time"
 
+	agentcore "sdn.sh/internal/agent/core"
 	"sdn.sh/internal/api"
+	"sdn.sh/internal/compile"
 	"sdn.sh/internal/cp"
 	"sdn.sh/internal/kernel"
 	"sdn.sh/internal/kernel/kmodel"
@@ -26,6 +30,65 @@ func (w *World) checkMoves(h *hostNode) {
 	if len(h.kernel.Moves) > 0 {
 		m := h.kernel.Moves[0]
 		w.fail("%s: allowed IP %v moved from %s to %s in %s", h.name, m.Prefix, w.byKey[m.From], w.byKey[m.To], m.Namespace)
+	}
+}
+
+// checkTables fails the run if a namespace's table names an address its
+// device cannot route: a slot whose backend has no peer, or a source address
+// no peer holds. It runs after every kernel operation, since a batch must
+// leave every state between its operations safe.
+func (w *World) checkTables(h *hostNode, name string) {
+	ns, ok := h.kernel.Named(name)
+	if !ok || ns.Rules == nil {
+		return
+	}
+	dev, ok := ns.Devices[h.cfg.Device]
+	if !ok {
+		return
+	}
+	var own []netip.Prefix
+	if dev.Link != nil {
+		own = dev.Link.Addrs
+	}
+	routed := func(a netip.Addr) bool {
+		if _, ok := dev.Route(a); ok {
+			return true
+		}
+		return holds(own, a)
+	}
+	for _, m := range ns.Rules.Maps {
+		for slot, a := range m.Slots {
+			if !routed(a) {
+				w.fail("%s: slot %d of %s in %s names %v, which no peer holds", h.name, slot, m.Name, name, a)
+				return
+			}
+		}
+	}
+	for _, s := range ns.Rules.Sets {
+		for _, a := range s.Addrs {
+			if _, ok := dev.Route(a); !ok {
+				w.fail("%s: source set %s in %s names %v, which no peer holds", h.name, s.Name, name, a)
+				return
+			}
+		}
+	}
+}
+
+// checkJournal fails the run if a journal entry carries the private key of
+// any device on the host: keys live in the kernel alone.
+func (w *World) checkJournal(h *hostNode, e agentcore.JournalEntry) {
+	b, err := json.Marshal(e)
+	if err != nil {
+		w.fail("%s: journal entry for %s does not encode: %v", h.name, e.Interface, err)
+		return
+	}
+	for _, ns := range h.kernel.All() {
+		for _, d := range ns.DeviceList() {
+			if bytes.Contains(b, []byte(d.Private.String())) {
+				w.fail("%s: the journal entry for %s holds the private key of %s's device", h.name, e.Interface, ns.Name)
+				return
+			}
+		}
 	}
 }
 
@@ -431,7 +494,7 @@ func (w *World) probeAll() {
 			}
 			if _, peer := e.peers[y.key]; !peer {
 				probes = append(probes, probe{w.open(x, y.addr6, model.TCP, 80), false, fmt.Sprintf("%s to unconnected %s", x.id, y.id)})
-				if x.addr4.IsValid() && y.addr4.IsValid() {
+				if x.addr4.IsValid() && y.addr4.IsValid() && !w.heldByAnother(x.network, rev, y.id, y.addr4) {
 					probes = append(probes, probe{w.open(x, y.addr4, model.TCP, 80), false, fmt.Sprintf("%s to unconnected %s over IPv4", x.id, y.id)})
 				}
 				continue
@@ -454,6 +517,19 @@ func (w *World) probeAll() {
 			w.summary.FlowsDenied++
 		}
 	}
+}
+
+// heldByAnother reports whether a connected interface other than id holds
+// addr at a revision. A revoked interface's workload keeps running, and once
+// the quarantine ends its IPv4 address may belong to another interface, which
+// a probe to the address would reach.
+func (w *World) heldByAnother(net model.NetworkID, rev uint64, id model.InterfaceID, addr netip.Addr) bool {
+	for _, i := range w.cp.snaps[net][rev] {
+		if i.ID != id && i.Addr4 == addr && compile.Connected(i) {
+			return true
+		}
+	}
+	return false
 }
 
 // permitsPort reports whether a rule lets a reach b on a TCP port.

@@ -135,7 +135,7 @@ func (o *orchestrator) setup() {
 		// spaces are the norm.
 		req := api.CreateNetwork{
 			Name: n.name, Relays: relays,
-			Prefix6: netip.MustParsePrefix("fd00:5d4e::/64"), Prefix4: netip.MustParsePrefix("10.42.0.0/24"),
+			Prefix6: netip.MustParsePrefix("fd00:5d4e::/64"), Prefix4: w.opts.Prefix4,
 		}
 		o.admin(func(tx store.Tx) error {
 			rec, err := w.cp.plane.CreateNetwork(tx, now, req)

@@ -1,6 +1,9 @@
 package sim
 
-import "testing"
+import (
+	"net/netip"
+	"testing"
+)
 
 func runSeed(t *testing.T, seed uint64) {
 	t.Helper()
@@ -33,6 +36,27 @@ func TestAFailedReleaseIsRetried(t *testing.T) { runSeed(t, 2) }
 // Seed 8: the kernel reports allowed IPs IPv4 first and desired state lists
 // IPv6 first, so every resync rewrote every peer.
 func TestAResyncFindsNoDriftInPrefixOrder(t *testing.T) { runSeed(t, 8) }
+
+// Seeds 55, 235 and 247 on a /28, where IPv4 addresses come back from
+// quarantine: an agent learned of an address's new owner while it still held
+// the previous one as a peer, and waited for the holder to go before
+// installing the new owner. The runs count the waits, so seeds that stop
+// reaching the path fail here rather than pass without testing it.
+func TestAPeerWaitsForTheHolderOfItsAddress(t *testing.T) {
+	var conflicts uint64
+	for _, seed := range []uint64{55, 235, 247} {
+		o := Swarm(seed)
+		o.Prefix4 = netip.MustParsePrefix("10.42.0.0/28")
+		s, err := NewWith(seed, o).Run()
+		if err != nil {
+			t.Fatal(err)
+		}
+		conflicts += s.Conflicts
+	}
+	if conflicts == 0 {
+		t.Fatal("no agent waited for an address's holder")
+	}
+}
 
 // Seed 6135: a pair lost and regained policy while one host lagged; its
 // packets through the old edge's ports roamed the other side onto a port

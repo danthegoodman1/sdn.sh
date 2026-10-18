@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# Runs one of the steps CI runs, or all of them. The workflow in
+# .github/workflows/ci.yml calls this script, so a step that fails there
+# fails the same way here.
+#
+#   scripts/ci check              build, vet, and gofmt
+#   scripts/ci test               unit tests, the determinism check, the
+#                                 simulator's fixed and regression seeds, and
+#                                 the mutant list
+#   scripts/ci postgres           store, control-plane and server tests on the
+#                                 Postgres database SDN_TEST_POSTGRES names
+#   scripts/ci sim [SEED [N]]     N simulator seeds (default 500) from SEED
+#                                 (default the commit hash: GITHUB_SHA, or HEAD)
+#   scripts/ci kernel             kernel tests, as root, in a fresh network
+#                                 namespace
+#   scripts/ci e2e [FLAGS...]     end-to-end tests in a namespace lab, as root
+#   scripts/ci terraform          fmt and validate deploy/aws, when it exists
+#   scripts/ci all                every step above; postgres only when
+#                                 SDN_TEST_POSTGRES is set
+#
+# The kernel and e2e steps use sudo unless run as root.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+as_root() {
+	if [ "$(id -u)" -eq 0 ]; then
+		"$@"
+	else
+		sudo "$@"
+	fi
+}
+
+step() {
+	echo "::group::scripts/ci $*"
+	local start=$SECONDS
+	"step_$1" "${@:2}"
+	echo "::endgroup::"
+	echo "scripts/ci $1: ok in $((SECONDS - start))s"
+}
+
+step_check() {
+	go build ./...
+	go vet ./...
+	local unformatted
+	unformatted=$(gofmt -l .)
+	if [ -n "$unformatted" ]; then
+		echo "gofmt would rewrite:" >&2
+		echo "$unformatted" >&2
+		return 1
+	fi
+}
+
+step_test() {
+	go test ./...
+}
+
+step_postgres() {
+	: "${SDN_TEST_POSTGRES:?names no Postgres database}"
+	go test -count=1 ./internal/store/... ./internal/cp/... ./internal/cpserver/...
+}
+
+step_sim() {
+	local seed=${1:-${GITHUB_SHA:-$(git rev-parse HEAD)}}
+	local count=${2:-500}
+	go run ./cmd/sdn-sim --seeds "$count" "$seed"
+}
+
+step_kernel() {
+	local work
+	work=$(mktemp -d)
+	go test -c -o "$work/linux.test" ./internal/kernel/linux
+	# The tests find their package's files relative to the working
+	# directory, and need a network namespace holding only loopback.
+	(cd internal/kernel/linux && as_root unshare --net "$work/linux.test" -test.v -test.timeout 10m)
+	rm -rf "$work"
+}
+
+step_e2e() {
+	scripts/e2e "$@"
+}
+
+step_terraform() {
+	if [ ! -d deploy/aws ]; then
+		echo "no deploy/aws; nothing to check"
+		return 0
+	fi
+	terraform -chdir=deploy/aws fmt -check -recursive
+	terraform -chdir=deploy/aws init -backend=false -input=false
+	terraform -chdir=deploy/aws validate
+}
+
+if [ $# -eq 0 ]; then
+	sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'
+	exit 2
+fi
+
+case $1 in
+all)
+	step check
+	step test
+	if [ -n "${SDN_TEST_POSTGRES:-}" ]; then
+		step postgres
+	else
+		echo "scripts/ci postgres: skipped, SDN_TEST_POSTGRES is unset"
+	fi
+	step sim
+	step kernel
+	step e2e
+	step terraform
+	;;
+check | test | postgres | sim | kernel | e2e | terraform)
+	step "$@"
+	;;
+*)
+	echo "scripts/ci: unknown step $1" >&2
+	exit 2
+	;;
+esac

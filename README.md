@@ -1,213 +1,367 @@
 # sdn.sh
 
-Per-workload network identity for short-lived workloads, across hosts in different places, with nothing on the path between two workloads able to read a packet.
+Per-workload WireGuard networking across hosts. Each workload gets its own key and address and reaches a peer on another host 44 ms after it attaches. Services resolve by name with no proxy, and relays carry the traffic without being able to read it.
 
-Each workload gets an ordinary interface and ordinary sockets, its own key, and its own address for as long as it runs. Encryption happens at both edges in kernel WireGuard; the relays between hosts forward ciphertext and hold no key that can read or forge it.
-
-**Status:** built — control plane, host agent, relay and CLI — tested end to end on one machine and benchmarked on an EC2 fleet. [SPEC.md](SPEC.md) is the design and holds every measurement, [PLAN.md](PLAN.md) the phased build and what each phase has proven, [AGENTS.md](AGENTS.md) the working rules.
+Workloads keep ordinary interfaces and sockets. Encryption happens at both ends in kernel WireGuard, and each receiver's kernel enforces policy.
 
 ## Contents
 
-- [On a real fleet](#on-a-real-fleet)
-- [In use](#in-use)
 - [What sets it apart](#what-sets-it-apart)
-- [What it doesn't](#what-it-doesnt)
-- [Alternatives](#alternatives)
-- [The shape of it](#the-shape-of-it)
+- [Performance](#performance)
+- [Quick start](#quick-start)
 - [How it works](#how-it-works)
   - [The interface](#the-interface)
   - [The relay](#the-relay)
+  - [Failover](#failover)
   - [Services and selection](#services-and-selection)
   - [Policy](#policy)
   - [Leases and keys](#leases-and-keys)
   - [Convergence](#convergence)
-- [Measured](#measured)
+- [Operator guide](#operator-guide)
+  - [Tuning](#tuning)
+- [Alternatives](#alternatives)
 - [Known limits](#known-limits)
 - [Development](#development)
 
-## On a real fleet
+## What sets it apart
 
-Measured on 4-vCPU EC2 instances in one placement group; the figures, the method and the substrate are in [SPEC.md](SPEC.md#the-fleet-on-ec2).
+- **A key per workload, scoped to a lease.** The agent mints a keypair at attach and discards it at detach. Every peer checks a decrypted packet's source against the one address per family that key holds, so a host speaks only as the interfaces it holds now. See [Leases and keys](#leases-and-keys).
+- **Revocation runs through peers.** Removing a key from its peers cuts an interface off whether or not its own host cooperates. See [Leases and keys](#leases-and-keys).
+- **Relays that can't read traffic.** A relay forwards ciphertext and holds no key that decrypts or forges it. Each edge sends through one relay of its network's set, so more relays carry more traffic, and a dead relay's edges spread over the rest. See [The relay](#the-relay).
+- **Load balancing with no balancer.** Each client picks a backend per connection in its own namespace. A change lands in one nftables transaction, so no client sees a partial set of backends, and established connections drain. See [Services and selection](#services-and-selection).
+- **Service discovery with no discovery service.** Attaching a workload to a service registers it, and each workload resolves names through its own agent. There is no Consul, sidecar or client library.
+- **Overlapping address spaces.** Two networks can use the same addresses, because no two networks share a kernel object.
+- **Nothing needs inbound reachability.** Workloads behind NAT work, including NAT that gives them a new address on restart. See [The relay](#the-relay).
 
-- **A dead relay costs under a second.** Kill the relay an edge sends through, and its established TCP connections stall for less than a second and carry on, with no reconnect; new connections get through sooner still. Each edge the relay carried moves to its own next relay, so the load spreads over the survivors.
-- **Relays add throughput until the hosts run out of encryption.** Every edge sends through one relay of its network's set, chosen by hashing the edge, so a network's edges spread over all its relays. Two relays carried twice what one did; with three, the relays had CPU to spare while every core on the receiving hosts was busy decrypting, and the network carried more than plain TCP between one pair of hosts.
-- **A relay forwards for less than half a gateway's CPU.** It moves ciphertext without decrypting it, where a gateway that terminates WireGuard does two crypto operations per byte.
-- **A service change reaches every client within a quarter of a second**, under attach churn, and replacing a backend takes tens of milliseconds. Each client moves in a single nftables transaction while its established connections drain.
-- **A workload's first connection lands in under 100 milliseconds** from its attach, with its own key, device, peers and nftables table built for it.
-- **A thousand interfaces fit on one 4-vCPU host**, each a WireGuard device with its own key.
+## Performance
 
-## In use
+Nine c6i.xlarge instances (4 vCPU, up to 12.5 Gb/s) in one placement group in us-east-1: four hosts, three relays, a control plane on Postgres, and a middle box for the gateway comparison. Plain TCP between two hosts carries 12.4 Gb/s.
 
-You attach workloads to a service, and every workload that policy allows reaches them by the service's name.
+| Event | Result |
+|---|---|
+| A new workload's first connection to a peer on another host, 20 peers | 44 ms p50, 54 ms max |
+| A backend replaced, until every client reaches the new one | 34–41 ms p50, 45–53 ms p99 |
+| One of two backends removed, rewriting half of each client's slots | 111–144 ms p50, 152–175 ms p99 |
+| A relay killed: an open TCP connection stalls | 0.82 s, then carries on |
+| A relay killed: the next new connection | 0.22–0.26 s |
+| Attaches and detaches across four hosts, 4 workers each | 47 pairs a second, no failures |
+| Interfaces on one host | 1,000, at 841 KiB each |
+
+Service changes ran under attach churn, with 30 clients over the four hosts. Ranges span two runs.
+
+| One edge, 8 streams | Throughput | Middle box busy | Traffic per CPU-second | Round trip p50, idle / loaded |
+|---|--:|--:|--:|--:|
+| Plain TCP | 12,410 Mb/s | | | 0.07 / 0.20 ms |
+| Through a relay | 2,394 Mb/s | 1.2 cores | 2.09 Gb | 0.22 / 4.8 ms |
+| Through a WireGuard gateway | 2,805 Mb/s | 3.0 cores | 0.94 Gb | 0.26 / 3.3 ms |
+
+| Relays | 24 edges at once | Relay CPU busy | Receiving hosts' CPU busy |
+|--:|--:|--:|--:|
+| 1 | 6.2 Gb/s | 94% | 58–67% |
+| 2 | 14.1 Gb/s | 86–94% | 93–94% |
+| 3 | 14.5 Gb/s | 58–72% | 99% |
+
+Each edge streams one TCP connection, from two sending hosts to two receiving hosts.
+
+- **A dead relay costs an open connection 0.82 s.** Keys, sessions and conntrack live at the ends, so TCP retransmits across the switch and the connection carries on. Each edge the relay carried moves to its own next relay, so the survivors share its load.
+- **Relays add throughput until the hosts run out of CPU.** One relay fills its CPU at 6.2 Gb/s. Two carry 14.1 Gb/s, more than plain TCP between one pair of hosts. With three, the receiving hosts spend every core decrypting and the relays have CPU to spare.
+- **A relay costs less than half a gateway's CPU.** It forwards ciphertext, where a gateway decrypts and re-encrypts every byte. On one edge the gateway carries 17% more by using three cores; the relay reads each edge on one.
+- **A detach tells the control plane first.** Deleting a WireGuard device waits a grace period for each peer it holds: about a second under churn for a backend with 30 peers. Clients leave a departing backend while its device is deleted, which took a replacement from 1,037 ms to 34–41 ms.
+- **Short windows.** A c6i.xlarge's network bursts to 12.5 Gb/s above a lower baseline, so each throughput test runs 10 seconds.
+
+`bin/sdn-lab run --env aws --plan all` reruns the test on a fleet from [deploy/README.md](deploy/README.md). [SPEC.md](SPEC.md#the-fleet-on-ec2) records every figure with its method.
+
+## Quick start
+
+One Linux machine with kernel WireGuard, nftables, `sudo` and `jq`. Start a control plane with an in-memory store, and an agent:
+
+```console
+go build -o bin/ ./cmd/sdn-cp ./cmd/sdn-agent ./cmd/sdnctl
+export SDN_ADMIN_TOKEN=$(openssl rand -hex 16)
+bin/sdn-cp --listen 127.0.0.1:8443 &
+bin/sdnctl host create h1 > host.json
+sudo bin/sdn-agent --cp http://127.0.0.1:8443 --credentials host.json --egress=false &
+```
+
+`--egress=false` leaves the host's IPv4 forwarding and egress filter alone. Drop it on a host that serves internet egress grants.
+
+Create a network where `web` may reach `db` on port 8080, and attach a workload to each:
+
+```console
+bin/sdnctl network create shop
+bin/sdnctl service create shop db
+bin/sdnctl service create shop web
+bin/sdnctl rule create shop web db --proto tcp --ports 8080
+sudo bin/sdnctl attach db-1 shop db > db.json
+sudo bin/sdnctl attach web-1 shop web > web.json
+```
+
+Each attach answers with the workload's namespace, address, interface and resolver. Serve from `db-1` and dial it by name from `web-1`:
+
+```console
+echo "hello from db-1" > index.html
+sudo ip netns exec $(jq -r .namespace db.json) python3 -m http.server 8080 --bind :: &
+sudo ip netns exec $(jq -r .namespace web.json) curl http://db.shop.internal:8080/              # hello from db-1
+sudo ip netns exec $(jq -r .namespace web.json) curl --max-time 2 http://db.shop.internal:8081/   # refused by policy
+sudo pkill -f "http.server 8080"
+sudo bin/sdnctl detach $(jq -r .interface web.json)
+sudo bin/sdnctl detach $(jq -r .interface db.json)
+```
+
+Inside the namespace, `127.0.0.53` is the agent's resolver, which Ubuntu's `/etc/resolv.conf` already names. A runtime writes the workload's `resolv.conf` from the attach answer, whose search domain lets `db` alone resolve.
+
+`scripts/e2e` runs the same daemons with a relay and several hosts, each in a namespace of its own.
+
+## How it works
+
+An agent on each host builds a workload's whole network before the workload starts. The control plane holds networks, services, policy and leases, and pushes each host the changes it needs. Relays forward ciphertext between hosts.
+
+```mermaid
+sequenceDiagram
+  participant R as Runtime
+  participant A as Agent
+  participant C as Control plane
+  participant P as Peer's agent
+  participant L as Relay
+  R->>A: attach db-1 to shop/db
+  A->>A: mint a keypair, create a namespace and a device inside it
+  A->>C: attach: public key, listen port
+  C-->>A: addresses, peers, relay ports
+  C-->>P: the new peer (long poll)
+  A->>A: peers, addresses, routes, nftables, resolver
+  A->>L: register each direction, from the listen port
+  L-->>A: acknowledged
+  A-->>R: the namespace, ready
+```
+
+### The interface
+
+The agent creates the WireGuard device directly into the workload's namespace. A device keeps its encrypted socket in the namespace that created it, so plaintext lands in the workload and ciphertext leaves through the host, with no namespace move. A move waits on an RCU grace period under the RTNL lock and barely overlaps under concurrency: at 64 attaches at once, creating in place ran 8.5 times as many a second on a c6i.xlarge.
+
+Each peer's `AllowedIPs` holds exactly that peer's address in each family. WireGuard checks every decrypted packet's source against it, so no peer can send as an address it was not granted.
+
+The namespace is the unit of isolation, so a workload can be a container, a VM behind a TAP, or a process under `ip netns exec`.
+
+### The relay
+
+A relay has one port for each direction of each policy edge, so the port a packet arrives on names its sender. The agent registers each direction with an authenticated datagram sent from the interface's own listen port, which also holds the NAT mapping WireGuard uses. The relay forwards a packet from a direction's registered endpoint to the other direction's endpoint, from the other direction's port. That is where the receiver expects its peer, so WireGuard's roaming keeps both ends pointing at the relay. A data packet never moves an endpoint.
+
+```mermaid
+flowchart LR
+  subgraph H1["host 1"]
+    W["web-1's namespace<br/>plaintext"] -->|encrypt| S1["web-1's UDP socket<br/>host namespace"]
+  end
+  subgraph R["relay"]
+    P1["port 10001<br/>names web-1"] --> P2["sends from port 10002<br/>which names db-1"]
+  end
+  subgraph H2["host 2"]
+    S2["db-1's UDP socket"] -->|"decrypt, check the source"| D["db-1's namespace"]
+  end
+  S1 -->|ciphertext| P1
+  P2 -->|ciphertext| S2
+```
+
+Every relay in a network's set carries traffic. Each edge sends through the relay with the highest rendezvous-hash weight for its two interfaces, among those its agent's probes find up. Both ends compute the same weights, so they choose the same relay, and a network's edges spread evenly over its relays.
+
+The relay batches reads and writes with `recvmmsg` and `sendmmsg` and keeps no crypto, conntrack or per-flow state. Two interfaces on the same host skip it over loopback, still encrypted.
+
+### Failover
+
+Agents probe every relay of their networks every 200 ms. After three misses in a row, each edge the relay carried moves to its own next relay, where both ends have registered already. When the relay answers again, its edges move back.
+
+```mermaid
+sequenceDiagram
+  participant A as Both ends' agents
+  participant R1 as Relay r1
+  participant R2 as Relay r2
+  Note over A,R2: the edge sends through r1, its heaviest relay, and is registered at r1 and r2
+  A->>R1: probe every 200 ms
+  Note over R1: r1 dies
+  A--xR1: three probes unanswered
+  A->>A: repoint the edge to r2, its next relay
+  A->>R2: the next packet
+  R2->>A: forwarded to the other end
+```
+
+A restarted relay reloads its ports and registrations from disk and forwards again within milliseconds.
+
+### Services and selection
 
 ```mermaid
 flowchart LR
   subgraph N["network: shop"]
     W["web-1<br/>connects to db:5432"]
-    subgraph S["service db · 10.42.0.7"]
-      D1["db-a · 10.42.0.21<br/>host 1"]
-      D2["db-b · 10.42.0.22<br/>host 2"]
+    subgraph S["service db · fd00::100"]
+      D1["db-a · fd00::21<br/>host 1"]
+      D2["db-b · fd00::22<br/>host 2"]
     end
   end
   W -->|one connection| D1
   W -.->|the next| D2
 ```
 
-1. Create a network. It costs nothing until something attaches to it.
-2. Declare a service, `db`. It gets a name and an address that last as long as the service does.
-3. Attach workloads to it. Each attach mints an interface with its own address and key, and the interface joins the service's backends.
-4. Allow the flow: `allow web -> db tcp/5432`. Policy denies everything it does not name.
-5. A workload attached to `web` connects to `db:5432` with an ordinary socket. The name resolves to the service address, and each new connection goes straight to one of `db`'s interfaces, chosen inside the client's own namespace, with no proxy or load balancer between them.
-
-Replacing, adding or removing a `db` workload changes which interfaces stand behind the name. Clients keep dialing the same name and address.
-
-## What sets it apart
-
-- **A key per workload, scoped to a lease.** The agent mints a keypair at attach and discards it at detach, and every peer validates a decrypted packet's source against the addresses that key was granted, one per family. A host speaks as the interfaces it currently holds and as nothing else — not as one it used to hold, and not as one its neighbour holds. See [Leases and keys](#leases-and-keys).
-- **Revocation runs through peers, not through the holder.** Removing a key from the peers that hold it makes an interface unreachable whether or not its own host cooperates, so a fence does not depend on reaching the thing being fenced. See [Leases and keys](#leases-and-keys).
-- **Two networks can use the same addresses.** No translation, no tenant tag, no second encapsulation layer, because no two networks share a kernel object. See [The interface](#the-interface).
-- **An interface per workload is affordable.** Kernel WireGuard costs a netdev and a peer table per interface rather than a userspace daemon, and a device created straight into the workload's namespace keeps its socket on the host, which takes the one operation that does not scale off the attach path. See [Measured](#measured).
-- **Selection with no load-balancer hop.** A client picks a service's backend in its own namespace, in one nftables transaction, so no client ever sees a partial set of backends and established connections drain rather than break. See [Services and selection](#services-and-selection).
-- **Service discovery without a discovery service.** Attaching a workload to a service registers it, and each client resolves the name through its own agent, so there is no Consul to run, no sidecar and no client library. A backend counts as healthy while its lease is live and its interface is up. See [In use](#in-use).
-- **Nothing needs inbound reachability.** One relay port per direction of a policy edge, with endpoints learned from traffic, so workloads behind NAT that change public address on restart still work and NAT traversal never enters the picture. See [The relay](#the-relay).
-
-## What it doesn't
-
-**A relay that forwards ciphertext without holding a key is not unusual.** Tailscale's DERP, Nebula's relays and NetBird all do it. The measured advantage is against designs that terminate WireGuard in the middle — a gateway that decrypts and re-encrypts does two crypto operations per byte and becomes its network's ceiling — not against the better overlays. Treat the relay as table stakes and the identity model as the argument.
-
-It is also not a lock, does not migrate connections, and runs on Linux hosts only. See [Known limits](#known-limits).
-
-## Alternatives
-
-| Option | Choose it when |
-|---|---|
-| **Tailscale** | You need one client on every OS, including laptops and Windows, with NAT traversal solved. Its userspace data plane costs a daemon per node, and DERP already relays ciphertext without keys. |
-| **Nebula** | You want a mature, self-hosted mesh with host certificates and lighthouse discovery, and host-level identity is the right granularity. |
-| **Netmaker / NetBird** | You want managed WireGuard between machines you administer, with a dashboard and gateways. |
-| **Cilium cluster mesh** | Your workloads are Kubernetes pods and you want policy and identity inside that model. |
-| **SPIFFE with a service mesh** | You want workload identity and mTLS at L7, you can change how applications dial, and you do not need overlapping L3 address spaces. |
-| **A cloud VPC** | Every workload runs in one provider's region and you want no agent. |
-| **Plain WireGuard, hub and spoke** | One operator, one network, a few hosts, and a gateway's throughput is enough. |
-
-## The shape of it
-
-```text
-Network    address space, isolation boundary, policy, lifetime
-Service    stable name and addresses; the unit you name and policy references
-Interface  one attached workload: its own addresses, keypair and lease
-Lease      a binding of (interface, public key, host) with a TTL
-```
-
-A service holds zero or more interfaces and its address outlives all of them. An interface's address lives exactly as long as its lease, so replacing a workload mints a new interface under the same service address: the service is what moves, the interface is what gets replaced.
-
-A network holding no attached interface on a host costs that host nothing, so ten thousand networks are ten thousand control-plane rows and no kernel objects.
-
-## How it works
-
-### The interface
-
-The agent mints the interface's keypair, then builds the whole data plane before the workload exists: a kernel WireGuard device created **directly into the workload's namespace**, one peer per policy-connected interface with that interface's addresses as its only `AllowedIPs` entries, then the addresses, routes, MTU, an nftables table and a stub resolver — and finally the namespace handed over without `CAP_NET_ADMIN`.
-
-Creating into the namespace rather than creating and moving matters because the device records the *requesting* socket's namespace as the one its encrypted socket belongs to. The plaintext side lands in the workload while ciphertext leaves through the host, and the namespace move — which waits on an RCU grace period inside the RTNL lock, and so barely overlaps under concurrency — leaves the attach path entirely.
-
-`AllowedIPs` carrying one address per family per peer is the identity enforcement: WireGuard validates the source of every decrypted packet against the sending peer's entry, so no peer can send as an address it was not granted. That the namespace is the unit of isolation is also why two networks can share an address space — nothing is shared between them to collide.
-
-### The relay
-
-One port per **directed** policy edge, so the port a packet arrives on names its sender. Each direction's endpoint is set only by an authenticated registration datagram, which the agent sends from the interface's own listen port, so it also holds the NAT mapping WireGuard uses. A data packet from the registered endpoint is forwarded to the peer direction's endpoint, sent from the peer direction's port — which is exactly where the receiver addresses the sender, so WireGuard's roaming keeps both sides pointing at the relay. A data packet never moves an endpoint. The relay acknowledges each registration it commits, and the agent lets a workload send toward a new peer only once that edge's relay has, so a first packet never meets a port the relay has yet to bind. Every relay in a network's set carries traffic: each edge sends through the relay its two interfaces hash to, so a network's throughput grows with its relays, and a dead relay's edges spread over the rest.
-
-Directed ports exist so the relay never has to recognise a sender by address. A host behind NAT has no outbound address the control plane can know in advance, many have none that is stable, and two interfaces can share one NAT address — which an address-based scheme cannot disambiguate at all.
-
-No crypto, no conntrack, no per-flow state: one table lookup, one endpoint record, and a send. Reads and writes must be batched, because a per-packet syscall loop overflows its receive queue and carries less than a terminating gateway. Two interfaces on the same host skip the relay over loopback, still encrypted, and direct paths are an endpoint change rather than a different architecture.
-
-### Services and selection
-
-Because relays carry ciphertext, nothing in the middle can read an inner destination address, so selection happens in the client's own namespace:
+A service has a name and an address that last as long as it does. Relays carry ciphertext, so nothing in the middle can read a destination, and each client picks a backend in its own namespace:
 
 ```text
 table inet sdn {
-  map db_slots { typeof numgen random mod 1024 : ip daddr; }
+  map db_slots { typeof numgen random mod 1024 : ip6 daddr; }
   chain services {
     type nat hook output priority dstnat;
-    ip daddr 10.42.0.7 tcp dport 5432 dnat to numgen random mod 1024 map @db_slots
+    ip6 daddr fd00::100 tcp dport 5432 dnat to numgen random mod 1024 map @db_slots
   }
 }
 ```
 
-The slot count is fixed for the service's life, so a backend change replaces only the entries whose backend moved, atomically, and disturbs only its own slots. Conntrack pins each connection to its chosen backend and untranslates the replies, so the application sees responses from the address it dialed while the server replies from its own interface address — which is also its identity to the policy engine. A service address lives only in clients' namespaces: never assigned to an interface, announced, or routed.
+The slot count stays fixed, so a backend change rewrites only the slots whose backend moved. Conntrack pins each connection to its backend and translates the replies, so the application sees answers from the address it dialed. IPv6 is always on; IPv4 is opt-in per service.
 
 ### Policy
 
-Policy is written against services and compiled per interface into a peer set and nftables rules, default deny. An interface receives a peer only where policy permits a flow, so **the policy graph is the peer graph** and an interface's peer count is its policy degree rather than the network's size. `AllowedIPs` answers whether a peer may speak as an address; nftables answers whether a flow may happen. Both run in the destination's kernel.
+Policy names services, and denies every flow it does not name: `sdnctl rule create shop web db --proto tcp --ports 5432` lets `web` reach `db` on one port. An interface gets a peer only where policy permits a flow, so its peer count is its policy degree, whatever the network's size. `AllowedIPs` decides whether a peer may speak as an address, and nftables decides whether a flow may happen. Both run in the receiver's kernel.
 
 ### Leases and keys
 
-A lease binds `(interface, public key, host)` with a TTL the agent renews. The agent mints the keypair; the private half never leaves the host and the control plane only ever sees public keys.
+A lease binds an interface, its public key and its host, and the agent renews it. Private keys never leave the host; the control plane sees public keys only.
 
-Identity and confidentiality are separable, and only confidentiality depends on who holds the key. Because enforcement lives at the receiver, a host speaks as the interfaces it currently holds and as nothing else. The gain over a host-keyed mesh is scope and lifetime: authorization covers one interface for one lease instead of everything a host ever runs.
-
-Revocation removes a key from its *peers*, so it needs nothing from the holder — which is also what lets an agent hold its configuration through a control-plane outage without weakening the fence.
+Revocation removes a key from its peers, so it needs nothing from the holder. That also lets an agent keep its configuration through a control-plane outage of any length: teardown follows the workload, and the fence holds.
 
 ### Convergence
 
-A change produces one message per host holding a policy-connected interface, and each namespace applies it as a single transaction, with peer installation ordered around that transaction so every intermediate state is safe: add the peer before its slots, remove its slots before the peer. A revocation skips the grace period and removes both at once.
+A change sends one message to each host with a policy-connected interface. Each namespace applies it in one transaction, ordered so every intermediate state is safe:
 
-So a single-instance service flips atomically per client. Across clients the change is eventually consistent, and that window is the cost of a change.
+| Change | Order |
+|---|---|
+| Add a backend | Install its peer, then add its slots |
+| Remove a backend | Remove its slots; after a grace period, remove its peer, flush its conntrack entries and destroy the sockets addressed to it |
+| Revoke an interface | Remove its slots, peer, conntrack entries and sockets at once |
 
-## Measured
+Each client flips in one step. Across clients the change is eventually consistent, and each agent reports how long its namespaces took to settle (`sdn_agent_convergence_seconds`).
 
-Every figure, its methodology, and the substrate that produced it live in [SPEC.md](SPEC.md#measured) — in one place, so they cannot drift. `cmd/hostbench` reproduces the kernel costs. What the measurements decided:
+## Operator guide
 
-- **A device created directly into the workload namespace keeps its socket on the host**, verified by traffic rather than inspection: two devices created into two namespaces handshook through the host's loopback, and neither namespace has a path to the other. That removes the namespace move from the attach path, which is worth several times the attach rate.
-- **Netdev concurrency depends on the operation.** Destroys overlap almost perfectly; namespace moves barely overlap at all, because a destroy defers its grace period past `rtnl_unlock` while a move holds RTNL across its own.
-- **Peer installation runs under RTNL**, so it is one lane per host that does not widen with cores, and it serializes against device, address and route work. Removal costs from a quarter of an addition to about the same, depending on the host, so a detach is budgeted like an attach. That ceiling, not the device work, is what bounds attach rate.
-- **Relaying ciphertext costs the middle box 2–3× less CPU per byte than terminating WireGuard** on the same machine against the same hosts. On one edge the gateway carries a little more by spending more cores, so the CPU cost is the result, and a network gets its throughput by spreading edges over relays.
-- **A detach tells the control plane before it deletes the device.** Deleting a WireGuard device waits a grace period for each peer it holds, so a backend that released itself only after teardown kept its clients for about a second; releasing first brought a replacement down to tens of milliseconds.
-- **Two networks on one address space** each reached their own peer at the same address, across NAT that gave the hosts different public addresses, and with two senders sharing one address.
+### Requirements
+
+- **Hosts:** Linux with kernel WireGuard, nftables and `CONFIG_INET_DIAG_DESTROY`, which the agent checks at start. Run workloads without `CAP_NET_ADMIN` and `CAP_NET_RAW`.
+- **Control plane:** Postgres, or `--store memory` for a test.
+- **Relays:** raise `net.core.rmem_max` to at least `--socket-buffer` (8 MiB by default), or the kernel caps each socket's buffer.
+
+`deploy/hostprep.sh` installs the packages, sets the sysctls and checks the kernel. `deploy/systemd` has a unit for each daemon.
+
+### Starting a fleet
+
+```console
+sdn-cp --store postgres://sdn@db/sdn --admin-token-file /etc/sdn/admin-token
+export SDN_CP=http://10.0.1.10:8443 SDN_ADMIN_TOKEN=...
+
+sdnctl relay create r1 --address 10.0.1.20 --ports 10000-60000 --probe-port 7000 > relay.json
+sdn-relay --cp $SDN_CP --credentials relay.json --state /var/lib/sdn/relay --probe 10.0.1.20:7000   # on r1
+
+sdnctl host create h1 > host.json
+sdn-agent --cp $SDN_CP --credentials host.json                                                     # on h1
+
+sdnctl network create shop --relays r1,r2,r3
+```
+
+`--tls-cert` and `--tls-key` serve the control plane over TLS, and `--ca-file` pins its CA on agents and relays.
+
+A runtime attaches a workload through the agent's socket, `/run/sdn/agent.sock` (`sdnctl attach NAME NETWORK SERVICE`), and starts the workload in the namespace the answer names, with a `resolv.conf` naming the answer's resolver and search domain.
+
+### Changing the fleet
+
+- **Add a relay:** create and start it, then name it in a network's `--relays`. A network's relay set is fixed when the network is created.
+- **Lose a relay:** its edges move to their next relays within a second, and back when it returns.
+- **Remove a host:** `sdnctl host delete h1` revokes its interfaces at once.
+- **Revoke an interface:** `sdnctl interface revoke IFACE` removes its key from every peer, with no grace period.
+- **Restart an agent:** traffic continues, since the kernel holds the data plane, and DNS queries wait in the socket buffer under systemd. The agent adopts its interfaces from its journal and the kernel.
+
+### Monitoring
+
+Each daemon serves `/metrics`, `/healthz` and `/readyz` on its `--telemetry` address: `:9090` for the control plane, `:9091` for an agent, `:9092` for a relay. `deploy/monitoring` has a Prometheus config and a Grafana dashboard.
+
+| Metric | Shows |
+|---|---|
+| `sdn_agent_convergence_seconds` | Time from a commit to each namespace settling on it |
+| `sdn_agent_relay_up{relay}`, `sdn_agent_relay_peers{relay}` | Which relays the agent finds up, and how many edges each carries |
+| `sdn_agent_interfaces{phase}`, `sdn_agent_peers` | Interfaces by phase, and the peers their devices hold |
+| `sdn_relay_forwarded_bytes_total`, `sdn_relay_dropped_packets_total{reason}` | Traffic forwarded and dropped |
+| `sdn_relay_udp_rcvbuf_errors_total` | Datagrams the host dropped on full receive queues; a climbing count means the relay is falling behind |
+| `sdn_cp_requests_total`, `sdn_cp_store_transactions_total` | API requests and store transactions by result |
+| `sdn_cp_relay_ports`, `sdn_cp_ipv4_quarantined` | Relay ports in use and in quarantine, and IPv4 addresses waiting for reuse |
+
+### Tuning
+
+**Relays per network.** One edge uses one relay core, and a relay carries about 2 Gb/s per busy core. On 4-vCPU machines two relays carried twice what one did, and a third left the receiving hosts' encryption as the limit.
+
+**Drain grace.** `--drain-grace` (30 s) is how long clients keep a departing backend's peer so established flows can finish. A `cutover` service skips it.
+
+**IPv4.** A service opts in with `--ipv4`. A released IPv4 address waits `--quarantine4` (2 minutes) after its interface drains, and a released relay port waits `--port-quarantine` (5 minutes).
+
+## Alternatives
+
+Relaying ciphertext is common: Tailscale's DERP, Nebula's relays and NetBird all do it. The measured advantage is over designs that terminate WireGuard in the middle. The case for sdn.sh is the identity model: a key per workload, scoped to its lease.
+
+| Option | Choose it when |
+|---|---|
+| **Tailscale** | You need one client on every OS, including laptops and Windows, with NAT traversal solved. Its userspace data plane costs a daemon per node. |
+| **Nebula** | You want a mature, self-hosted mesh with host certificates and lighthouse discovery, and host-level identity is fine-grained enough. |
+| **Netmaker / NetBird** | You want managed WireGuard between machines you administer, with a dashboard and gateways. |
+| **Cilium cluster mesh** | Your workloads are Kubernetes pods and you want policy and identity inside that model. |
+| **SPIFFE with a service mesh** | You want workload identity and mTLS at L7, can change how applications dial, and need no overlapping L3 address spaces. |
+| **A cloud VPC** | Every workload runs in one provider's region and you want no agent. |
+| **Plain WireGuard, hub and spoke** | One operator, one network, a few hosts, and a gateway's throughput is enough. |
 
 ## Known limits
 
-- **Not a lock.** Address exclusivity and data exclusivity are different problems. A service needing a single writer fences in its storage layer.
-- **A relay is trusted for availability.** It holds a per-direction secret to verify the agent's registration datagram, and nothing that decrypts or forges traffic, but it can still drop or misdeliver. Verifying a WireGuard handshake's `mac1` instead was considered and rejected, because a captured handshake replays from any address and at any relay.
-- **A host's token admits it to every network.** Identity stays per interface, so a compromised host speaks only as the interfaces it holds, but it can attach new ones to any service and reach whatever policy grants that service. Scoping hosts to networks is open.
-- **One control plane orders every change.** Every write takes the next revision from one row, so attaches, releases and policy changes serialize across networks. Shorter transactions raise that ceiling; removing it is open.
-- **The relay's socket model caps its edge count.** One socket per directed port puts a userspace process far below the port space. `sk_lookup` fixes only the receive side, so the real answer is XDP or TC.
-- **A partition keeps an island alive.** A partition isolating a revoked interface together with some of its clients serves stale state until it reconnects.
-- **No connection migrates.** A workload that moves breaks its established connections and clients reconnect.
-- **IPv4 addresses and relay ports need a quarantine, on different clocks.** Every service has IPv6, where a network's `/64` never needs to reuse an address; IPv4 is opt-in per service because at 100 attaches a second a `/16` exhausts in about 11 minutes, so both IPv4 addresses and ports get reused. An address needs only to outlast convergence once its holder drains, provided each host removes the old peer and clears its conntrack and sockets first. Relay ports need to outlast stale senders, which makes them the scarcer pool.
-- **Linux hosts, L3 only.** No broadcast, multicast or Ethernet-level attachment. A laptop or Windows host joins through a gateway interface.
-- **A `CAP_NET_ADMIN` workload loses sender-side policy.** It keeps its identity, since the receiver enforces it, and loses only the local layer that would have stopped it from trying.
-- **A flat network is bounded by arithmetic.** Relay ports scale with policy edges, so a fully connected network runs out long before a sparse one does. Segmenting it is the answer.
-- **The MTU lever is path-dependent.** Raising the overlay MTU is worth several times the throughput per CPU, but only where the underlay carries large frames — within a datacenter, or between co-located interfaces. Across the internet the path stays near 1500 whatever the overlay asks for.
+- **Not a lock.** A service that needs a single writer fences in its storage layer.
+- **Relays are trusted for availability.** A relay can drop or misdeliver packets, though it can never read or forge them.
+- **A host's token admits it to every network.** A compromised host speaks only as the interfaces it holds, but can attach new ones to any service.
+- **One control plane orders every change.** Every write takes the next revision from one row, so attaches, releases and policy changes serialize across networks.
+- **The relay's socket model caps its edges.** One socket per directed port; the next step is XDP or TC.
+- **A partition keeps an island alive.** A revoked interface cut off together with some of its clients keeps serving them until the partition heals.
+- **No connection migrates.** A workload that moves breaks its connections, and clients reconnect.
+- **Linux hosts, L3 only.** A laptop joins through a gateway interface with a stock WireGuard client.
+- **A `CAP_NET_ADMIN` workload loses sender-side policy.** It keeps its identity, since the receiver enforces it.
+- **A flat network runs out of relay ports.** Ports scale with policy edges, so segment a fully connected network.
 
 ## Development
 
-[SPEC.md](SPEC.md) is the design contract, [PLAN.md](PLAN.md) the phased build plan, [AGENTS.md](AGENTS.md) the working rules, and [deploy/README.md](deploy/README.md) the benchmark fleet.
+[SPEC.md](SPEC.md) is the design contract and records every measurement. [PLAN.md](PLAN.md) is the phased build plan, [AGENTS.md](AGENTS.md) the working rules.
 
 | Program | What it is |
 |---|---|
-| `cmd/sdn-cp` | The control plane: networks, services, policy, leases, relays and edge ports over a transactional store, with long polls for agents and relays. `--store memory` or a Postgres URL. |
-| `cmd/sdn-agent` | The host agent: builds each workload's namespace, device, peers, nftables table, stub resolver and egress link, renews leases, registers at relays and fails over between them. |
-| `cmd/sdn-relay` | The ciphertext relay: one port per directed edge, batched reads and writes, endpoints moved only by authenticated registrations, persisted to its own disk. |
-| `cmd/sdnctl` | The CLI: operator commands against the control plane, a development machine's config, and attach and detach through the local agent. |
-| `cmd/sdn-sim` | The deterministic simulator: a seed draws a whole deployment, its faults and its workload, and replays exactly. |
-| `cmd/sdn-lab`, `cmd/sdn-bench` | The benchmark driver and its load tool, against namespaces on this machine or a fleet on EC2. |
-| `cmd/hostbench` | The kernel-cost harness behind every per-operation figure in the spec. Runs as root, names everything it creates `hb-*`, and sweeps only that prefix before starting. |
-| `cmd/relay` | The prototype relay that learned endpoints from traffic, kept for the relay-against-gateway comparison. |
+| `cmd/sdn-cp` | The control plane: networks, services, policy, leases, relays and edge ports over a transactional store, with long polls for agents and relays. |
+| `cmd/sdn-agent` | The host agent: each workload's namespace, device, peers, nftables table, resolver and egress link. |
+| `cmd/sdn-relay` | The ciphertext relay. |
+| `cmd/sdnctl` | The CLI: operator commands, attach and detach through the local agent, and development machines' configs. |
+| `cmd/sdn-sim` | The deterministic simulator. |
+| `cmd/sdn-lab`, `cmd/sdn-bench` | The benchmark driver and its load tool, on this machine or a fleet on EC2. |
+| `cmd/hostbench` | Kernel costs: device placement, netdev and peer concurrency. Runs as root and names everything `hb-*`. |
+| `cmd/relay` | The prototype relay, kept for the relay-against-gateway comparison. |
+
+### Testing
 
 ```console
-go build ./... && go vet ./... && go test ./...      # unit tests, the determinism check, a simulator seed range
-go run ./cmd/sdn-sim --seeds 10000 1                # a simulator sweep
-scripts/ci all                                      # every CI step, root tests and end-to-end included
-scripts/e2e -test.run TestTwoHosts                  # the daemons in namespaces, as root
-scripts/lab run --env local --plan all              # every benchmark plan against this machine
-go run ./scripts/mutants -root                      # plant each known bug and check a test catches it
+go build ./... && go vet ./... && go test ./...   # unit tests, the determinism check, a simulator seed range
+scripts/ci all                                   # every CI step; kernel and e2e tests run as root
+scripts/e2e -test.run TestTwoHosts               # the daemons in namespaces, as root
+SDN_TEST_POSTGRES=postgres://... go test ./internal/store/... ./internal/cp/...
 ```
 
-Reproducing the measurements:
+### Simulator
 
-- **Kernel costs** need one Linux host with kernel WireGuard, namespaces and nftables, and root. The substrate is *not* incidental for anything bound by an RCU grace period: the same operations measured 2–3× apart between a KVM guest on 6.8 and a microVM on 6.18, in both directions. Report which.
-- **Throughput** needs three machines in one datacenter and a plain-TCP underlay ceiling measured in the same run. Without the ceiling the numbers mean nothing — a path that reads as a design limit is often 95% of the network. A cross-region relay reports the geography instead.
-- **The relay-against-gateway comparison** must run both roles on the same machine against the same hosts, or it compares hardware rather than architectures.
-- Raise `net.core.rmem_max` before measuring the relay, or its receive buffer is silently capped, and watch `nstat -az | grep -i UdpRcvbufErrors` — a climbing count means it is dropping and every figure below it measures that.
-- **Purge stray state between runs.** `ip netns del` only removes the name: a namespace a process still holds keeps its WireGuard device alive and keepaliving, which will quietly claim a relay direction and contaminate the run. Check `/proc/*/ns/net` for namespaces outside the host's.
+A seed fixes the whole run: the deployment, its faults and its workload. The control plane, relays and agents run their real cores against models of the kernel and the network, and an attacker replays what it captures. At every instant each settled namespace must hold exactly what policy says it should; at the end, permitted flows must connect and forbidden ones must fail. Pass a run's seed back to replay it exactly.
+
+```console
+go run ./cmd/sdn-sim --seeds 10000 1   # seeds 1 to 10,000 on every core
+go run ./cmd/sdn-sim --trace 42        # replay seed 42 with its last events
+```
+
+`go run ./scripts/mutants -root` plants known bugs one at a time and reports which tests catch each.
+
+### Benchmarks
+
+`scripts/lab run --env local --plan all` runs every benchmark plan on this machine, with namespaces standing in for hosts. Every host there shares one kernel, so its figures show mechanisms; fleet figures come from EC2 ([deploy/README.md](deploy/README.md)). `sudo ./hostbench` measures one host's kernel costs.
+
+- **Measure the plain-TCP ceiling in the same run.** A path that reads as a design limit is often 95% of the network.
+- **Run the relay and the gateway on the same machine** against the same hosts, or the comparison measures hardware.
+- **Raise `net.core.rmem_max` on a relay**, and watch `nstat -az | grep -i UdpRcvbufErrors`: a climbing count means it is dropping.
+- **Purge stray state between runs.** `ip netns del` removes only the name; a namespace a process still holds keeps its device keepaliving. `ls -l /proc/*/ns/net` finds them.

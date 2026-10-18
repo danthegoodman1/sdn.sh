@@ -1,6 +1,6 @@
 # sdn.sh
 
-`SPEC.md` is the design contract and holds every measurement. Read it before changing behavior, and when code and spec disagree, fix one of them in the same change. `PLAN.md` is the build plan: work in its order and update its ledgers with evidence. `README.md` carries the positioning; numbers live in `SPEC.md` only, so they cannot drift between the two.
+`SPEC.md` is the design contract and holds every measurement. Read it before changing behavior, and when code and spec disagree, fix one of them in the same change. `PLAN.md` is the build plan: work in its order and update its ledgers with evidence. `README.md` carries the positioning and the fleet's headline figures, copied from `SPEC.md`, which keeps each with its method and substrate; a run that changes a headline figure updates both.
 
 ## Core rules
 

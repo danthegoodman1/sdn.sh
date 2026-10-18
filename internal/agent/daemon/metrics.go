@@ -27,6 +27,8 @@ type Metrics struct {
 	interfaces    *prometheus.GaugeVec
 	namespaces    *prometheus.GaugeVec
 	peers         prometheus.Gauge
+	relayPeers    *prometheus.GaugeVec
+	relayUp       *prometheus.GaugeVec
 }
 
 // NewMetrics registers the agent's metrics.
@@ -95,10 +97,16 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		peers: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "sdn_agent_peers", Help: "Peers the agent's devices hold, as it believes them.",
 		}),
+		relayPeers: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "sdn_agent_relay_peers", Help: "Peers whose endpoint, as the agent last wrote or observed it, is a path through each relay, which shows how its edges spread.",
+		}, []string{"relay"}),
+		relayUp: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "sdn_agent_relay_up", Help: "1 for each relay of the held networks the agent's probes find up, 0 for one they find down.",
+		}, []string{"relay"}),
 	}
 	reg.MustRegister(m.kernelOps, m.kernelSeconds, m.batches, m.batchSeconds, m.nftSize, m.flushed, m.cpCalls,
 		m.polls, m.generation, m.registrations, m.probes, m.probeRTT, m.localCalls, m.localSeconds, m.core, m.convergence,
-		m.interfaces, m.namespaces, m.peers)
+		m.interfaces, m.namespaces, m.peers, m.relayPeers, m.relayUp)
 	return m
 }
 
@@ -110,6 +118,19 @@ func (m *Metrics) census(c agentcore.Census) {
 	m.namespaces.WithLabelValues("named").Set(float64(c.Namespaces))
 	m.namespaces.WithLabelValues("held").Set(float64(c.Held))
 	m.peers.Set(float64(c.Peers))
+	// A relay that leaves every held network leaves both gauges.
+	m.relayPeers.Reset()
+	for r, n := range c.RelayPeers {
+		m.relayPeers.WithLabelValues(string(r)).Set(float64(n))
+	}
+	m.relayUp.Reset()
+	for r, up := range c.RelaysUp {
+		v := 0.0
+		if up {
+			v = 1
+		}
+		m.relayUp.WithLabelValues(string(r)).Set(v)
+	}
 }
 
 func (m *Metrics) coreStat(event string, delta uint64) {

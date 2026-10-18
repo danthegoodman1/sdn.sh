@@ -15,35 +15,28 @@ import (
 	"sdn.sh/internal/regproto"
 )
 
-// activeRelay returns the relay a network's peers send through: the first of
-// its set this agent's probes find up, or the first of the set when none is.
-// Each side chooses for itself; roaming reconciles the two, since a packet
-// arriving through another relay moves the receiver's endpoint there.
-// Every change to desired state reselects, so the relay it keeps is one the
-// set names.
-func (c *Core) activeRelay(n *api.NetworkState) model.RelayID {
-	if len(n.Relays) == 0 {
-		return ""
-	}
-	if id, ok := c.active[n.Network]; ok {
-		return id
-	}
-	id := c.chooseRelay(n)
-	c.active[n.Network] = id
-	return id
-}
-
-func inSet(n *api.NetworkState, id model.RelayID) bool {
-	return slices.ContainsFunc(n.Relays, func(r api.RelayRef) bool { return r.Relay == id })
-}
-
-func (c *Core) chooseRelay(n *api.NetworkState) model.RelayID {
-	for _, r := range n.Relays {
-		if h, ok := c.relays[r.Relay]; !ok || h.up {
-			return r.Relay
+// edgeRelay chooses the relay path a peer's traffic takes: of the peer's
+// paths, the one through the relay of highest weight for the edge
+// (model.RelayWeight) among those this agent's probes find up, or of them
+// all when none is. Both ends weigh the same, so they choose the same relay
+// while their probes agree, and roaming reconciles them when they differ,
+// since a packet arriving through another relay moves the receiver's
+// endpoint there. A relay's loss moves only the edges it carried, each to
+// its own next relay, so a network's traffic spreads over every relay in
+// its set and a dead relay's over the survivors.
+func (c *Core) edgeRelay(self model.InterfaceID, p api.Peer) (api.RelayPath, bool) {
+	var best api.RelayPath
+	var bestW uint64
+	bestUp, found := false, false
+	for _, rp := range p.Relays {
+		h, probed := c.relays[rp.Relay]
+		up := !probed || h.up
+		w := model.RelayWeight(self, p.Interface, rp.Relay)
+		if !found || up && !bestUp || up == bestUp && (w > bestW || w == bestW && rp.Relay < best.Relay) {
+			best, bestW, bestUp, found = rp, w, up, true
 		}
 	}
-	return n.Relays[0].Relay
+	return best, found
 }
 
 // ProbeReply takes a relay's answer to a probe.
@@ -59,7 +52,7 @@ func (c *Core) ProbeReply(now time.Time, relay model.RelayID, nonce uint64) {
 	h.lastReply = now
 	if !h.up {
 		h.up = true
-		c.reselect()
+		c.relaysChanged(map[model.RelayID]bool{relay: true})
 	}
 }
 
@@ -88,7 +81,7 @@ func (c *Core) probe(now time.Time) {
 			c.emit(SendProbe{Relay: r.Relay, To: r.Probe, Nonce: c.nonce})
 		}
 	}
-	changed := false
+	down := map[model.RelayID]bool{}
 	for _, id := range slices.Sorted(maps.Keys(c.relays)) {
 		h := c.relays[id]
 		if !seen[id] {
@@ -97,43 +90,41 @@ func (c *Core) probe(now time.Time) {
 		}
 		if h.up && now.Sub(h.lastReply) > time.Duration(c.cfg.ProbeMisses)*c.cfg.ProbeEvery {
 			h.up = false
-			changed = true
-		}
-	}
-	if changed {
-		c.reselect()
-	}
-}
-
-// reselect recomputes each network's active relay, and marks for
-// reconciliation every namespace whose relay changed, which rewrites its
-// relay peers' endpoints. Leaving a relay that left the set is no failover.
-func (c *Core) reselect() {
-	for _, nid := range c.desired.NetworkIDs() {
-		n := c.desired.Networks[nid]
-		if len(n.Relays) == 0 {
-			continue
-		}
-		id := c.chooseRelay(n)
-		prev, ok := c.active[nid]
-		if ok && prev == id {
-			continue
-		}
-		if ok && inSet(n, prev) {
+			down[id] = true
 			c.Stats.Failovers++
 		}
-		c.active[nid] = id
-		for _, name := range slices.Sorted(maps.Keys(c.ns)) {
-			st := c.ns[name]
-			if i, ok := c.ifaces[st.iface]; ok && i.network == nid {
-				st.dirty = true
-			}
+	}
+	if len(down) > 0 {
+		c.relaysChanged(down)
+	}
+}
+
+// relaysChanged marks for reconciliation every namespace whose network names
+// a relay that went down or came back, which moves the endpoints of the
+// edges that relay's health decides.
+func (c *Core) relaysChanged(ids map[model.RelayID]bool) {
+	for _, name := range slices.Sorted(maps.Keys(c.ns)) {
+		st := c.ns[name]
+		i, ok := c.ifaces[st.iface]
+		if !ok {
+			continue
+		}
+		n, ok := c.desired.Networks[i.network]
+		if ok && slices.ContainsFunc(n.Relays, func(r api.RelayRef) bool { return ids[r.Relay] }) {
+			st.dirty = true
 		}
 	}
 }
 
-// Active returns each network's active relay, for metrics and tests.
-func (c *Core) Active() map[model.NetworkID]model.RelayID { return maps.Clone(c.active) }
+// RelaysUp reports which relays of the held networks this agent's probes
+// find up, for status and metrics.
+func (c *Core) RelaysUp() map[model.RelayID]bool {
+	out := map[model.RelayID]bool{}
+	for _, id := range slices.Sorted(maps.Keys(c.relays)) {
+		out[id] = c.relays[id].up
+	}
+	return out
+}
 
 // registerFresh registers every relay peer a batch just installed or moved,
 // and schedules each direction's registration again at every relay that has

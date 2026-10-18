@@ -32,6 +32,7 @@ const (
 	relayDisk   = "internal/relay/server/disk.go"
 	simCP       = "internal/sim/cpnode.go"
 	kmodelGo    = "internal/kernel/kmodel/kmodel.go"
+	modelWeight = "internal/model/relayweight.go"
 )
 
 // Code that more than one edit moves or matches.
@@ -297,10 +298,10 @@ var Mutants = []Mutant{
 		Catch:  []string{"agent-core"},
 	},
 	{
-		ID:     "active-relay-outlives-its-set",
-		Breaks: "a relay the network no longer lists stops being its active relay",
-		Edits:  []Edit{{agentLife, "\t}\n\tc.reselect()\n}\n", "\t}\n}\n"}},
-		Catch:  []string{"agent-core"},
+		ID:     "moved-path-left-in-place",
+		Breaks: "an edge whose relay leaves the set, or fails, moves its endpoint to the relay it now chooses",
+		Edits:  []Edit{{agentPlan, "\t\tcase chosen != tp.endpoint:\n", "\t\tcase chosen != tp.endpoint && false:\n"}},
+		Catch:  []string{"agent-core", "e2e"},
 	},
 	{
 		ID:     "egress-filter-outlives-namespace",
@@ -645,5 +646,35 @@ var Mutants = []Mutant{
 		Breaks: "refreshing the egress filter from what it holds leaves one rule per prefix",
 		Edits:  []Edit{{linuxEgress, "\treturn slices.Compact(kernel.SortPrefixes(all))\n", "\treturn all\n"}},
 		Catch:  []string{"kernel"},
+	},
+	{
+		ID:     "relay-weight-one-sided",
+		Breaks: "both ends of an edge weigh a relay the same, so they choose the same relay",
+		Edits:  []Edit{{modelWeight, "\tif b < a {\n\t\ta, b = b, a\n\t}\n", ""}},
+		Catch:  []string{"model", "e2e"},
+	},
+	{
+		ID:     "relay-chosen-per-network",
+		Breaks: "each edge chooses its relay by its own weight, so a network's edges spread over its relays",
+		Edits:  []Edit{{agentRelays, "w := model.RelayWeight(self, p.Interface, rp.Relay)", "w := model.RelayWeight(\"\", \"\", rp.Relay)"}},
+		Catch:  []string{"agent-core", "e2e"},
+	},
+	{
+		ID:     "relay-choice-ignores-health",
+		Breaks: "an edge sends through a relay its agent's probes find up",
+		Edits:  []Edit{{agentRelays, "\t\tup := !probed || h.up\n", "\t\tup := !probed || h.up || true\n"}},
+		Catch:  []string{"agent-core", "e2e"},
+	},
+	{
+		ID:     "relay-loss-not-replanned",
+		Breaks: "a relay's loss moves the edges it carried",
+		Edits:  []Edit{{agentRelays, "\tif len(down) > 0 {\n\t\tc.relaysChanged(down)\n\t}\n", ""}},
+		Catch:  []string{"agent-core", "e2e"},
+	},
+	{
+		ID:     "relay-return-not-replanned",
+		Breaks: "a relay that answers again takes back the edges whose heaviest relay it is",
+		Edits:  []Edit{{agentRelays, "\t\th.up = true\n\t\tc.relaysChanged(map[model.RelayID]bool{relay: true})\n", "\t\th.up = true\n"}},
+		Catch:  []string{"agent-core"},
 	},
 }

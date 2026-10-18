@@ -330,7 +330,7 @@ func equalPorts(a, b []uint16) bool {
 	return true
 }
 
-func TestTrafficFailsOverWhenTheActiveRelayDies(t *testing.T) {
+func TestTrafficFailsOverWhenItsRelayDies(t *testing.T) {
 	l := newLab(t, "e2ec", fastClocks...)
 	ctx := context.Background()
 	r1 := must(l.AddRelay(ctx, "r1"))
@@ -344,20 +344,87 @@ func TestTrafficFailsOverWhenTheActiveRelayDies(t *testing.T) {
 	if _, err := lab.DialUntil(web.Namespace, dbAddr, 20*time.Second); err != nil {
 		t.Fatal(err)
 	}
+	// The one edge sends through one relay of the two.
+	carrier, other := r1, r2
 	if metric(must(lab.Metrics(r1.Telemetry)), "sdn_relay_forwarded_packets_total") == 0 {
-		t.Fatal("traffic did not start on the first relay of the set")
+		carrier, other = r2, r1
 	}
-	r1.Kill()
+	if metric(must(lab.Metrics(carrier.Telemetry)), "sdn_relay_forwarded_packets_total") == 0 {
+		t.Fatal("neither relay forwarded the edge's traffic")
+	}
+	carrier.Kill()
 	took, _, err := timeToReach(web.Namespace, dbAddr, 15*time.Second)
 	if err != nil {
 		t.Fatalf("no failover: %v", err)
 	}
-	t.Logf("failover: a new connection reached db %v after the active relay died", took)
-	if metric(must(lab.Metrics(r2.Telemetry)), "sdn_relay_forwarded_packets_total") == 0 {
-		t.Fatal("the standby relay forwarded nothing")
+	t.Logf("failover: a new connection reached db %v after %s died", took, carrier.Name)
+	if metric(must(lab.Metrics(other.Telemetry)), "sdn_relay_forwarded_packets_total") == 0 {
+		t.Fatalf("%s, the survivor, forwarded nothing", other.Name)
 	}
 	if took > 3*time.Second {
 		t.Errorf("failover took %v", took)
+	}
+}
+
+func TestANetworksEdgesSpreadOverItsRelays(t *testing.T) {
+	l := newLab(t, "e2en", fastClocks...)
+	ctx := context.Background()
+	r1 := must(l.AddRelay(ctx, "r1"))
+	r2 := must(l.AddRelay(ctx, "r2"))
+	h1 := must(l.AddHost(ctx, "h1"))
+	h2 := must(l.AddHost(ctx, "h2"))
+	svc := webDB(t, l, r1, r2)
+	for i := range 4 {
+		attachDB(t, h2, fmt.Sprintf("db-%d", i+1))
+	}
+	dbAddr := netip.AddrPortFrom(svc.Addr6, 5432)
+	var webs []api.LocalInterface
+	for i := range 4 {
+		web := must(h1.Attach(ctx, fmt.Sprintf("web-%d", i+1), "prod", "web"))
+		if _, err := lab.DialUntil(web.Namespace, dbAddr, 20*time.Second); err != nil {
+			t.Fatal(err)
+		}
+		webs = append(webs, web)
+	}
+	// Sixteen edges over two relays, all on one with odds of 2 in 65,536;
+	// each web dials until it has reached every backend, so every edge
+	// carries traffic.
+	for _, web := range webs {
+		reached := map[string]bool{}
+		for try := 0; len(reached) < 4 && try < 200; try++ {
+			if got, err := lab.Dial(web.Namespace, dbAddr, time.Second); err == nil {
+				reached[got] = true
+			}
+		}
+		if len(reached) < 4 {
+			t.Fatalf("%s reached only %v", web.Name, reached)
+		}
+	}
+	for _, r := range []*lab.Relay{r1, r2} {
+		if metric(must(lab.Metrics(r.Telemetry)), "sdn_relay_forwarded_packets_total") == 0 {
+			t.Fatalf("%s forwarded nothing; the network's edges all took the other relay", r.Name)
+		}
+	}
+	// Each end counts its peers on each relay, and both hosts see the same
+	// sixteen edges split the same way.
+	split := func(h *lab.Host) [2]float64 {
+		m := must(lab.Metrics(h.Telemetry))
+		return [2]float64{
+			metric(m, fmt.Sprintf(`sdn_agent_relay_peers{relay="%s"}`, r1.ID)),
+			metric(m, fmt.Sprintf(`sdn_agent_relay_peers{relay="%s"}`, r2.ID)),
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		a, b := split(h1), split(h2)
+		if a == b && a[0]+a[1] == 16 && a[0] > 0 && a[1] > 0 {
+			t.Logf("edges per relay: %s %v, %s %v", r1.Name, a[0], r2.Name, a[1])
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("peers per relay: h1 %v, h2 %v; want the same split of 16 edges over both", a, b)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 
@@ -806,10 +873,19 @@ func TestEveryDaemonReportsWhatItDoes(t *testing.T) {
 		check{cpm, `sdn_cp_lease_events_total{event="attached"}`, 2},
 		check{cpm, `sdn_cp_store_transactions_total{op="attach",result="ok"}`, 2},
 		check{cpm, `sdn_cp_pushes_total`, 1},
-		check{r1.Telemetry, `sdn_relay_forwarded_packets_total`, 1},
 		check{r1.Telemetry, `sdn_relay_registrations_total{result="accepted"}`, 2},
 		check{r1.Telemetry, `sdn_relay_ports`, 2},
+		check{r2.Telemetry, `sdn_relay_registrations_total{result="accepted"}`, 2},
+		check{r2.Telemetry, `sdn_relay_ports`, 2},
 	)
+	// The one edge sends through one relay of the two.
+	carrier := r1
+	if metric(must(lab.Metrics(r1.Telemetry)), "sdn_relay_forwarded_packets_total") == 0 {
+		carrier = r2
+	}
+	expect("after an attach", check{carrier.Telemetry, `sdn_relay_forwarded_packets_total`, 1},
+		check{h1.Telemetry, fmt.Sprintf(`sdn_agent_relay_peers{relay="%s"}`, carrier.ID), 1},
+		check{h1.Telemetry, fmt.Sprintf(`sdn_agent_relay_up{relay="%s"}`, carrier.ID), 1})
 	if lines := h1.Agent.LogLines("attach"); len(lines) == 0 || lines[0]["interface"] != string(web.Interface) ||
 		lines[0]["namespace"] != web.Namespace || lines[0]["network"] != string(web.Network) || lines[0]["service"] != string(web.Service) {
 		t.Errorf("the agent's attach line: %v", lines)
@@ -817,7 +893,7 @@ func TestEveryDaemonReportsWhatItDoes(t *testing.T) {
 	if lines := l.CP().LogLines("interface attached"); len(lines) < 2 || lines[0]["host"] == nil || lines[0]["interface"] == nil || lines[0]["network"] == nil {
 		t.Errorf("the control plane's attach lines: %v", lines)
 	}
-	if lines := r1.Proc.LogLines("port table loaded"); len(lines) == 0 || lines[len(lines)-1]["generation"] == nil {
+	if lines := carrier.Proc.LogLines("port table loaded"); len(lines) == 0 || lines[len(lines)-1]["generation"] == nil {
 		t.Errorf("the relay's table lines: %v", lines)
 	}
 
@@ -827,12 +903,12 @@ func TestEveryDaemonReportsWhatItDoes(t *testing.T) {
 	expect("after a service change", check{h1.Telemetry, `sdn_agent_nft_transaction_size_count`, before + 1})
 
 	// A failover is counted and logged.
-	r1.Kill()
+	carrier.Kill()
 	if _, _, err := timeToReach(web.Namespace, dbAddr, 15*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	expect("after a failover", check{h1.Telemetry, `sdn_agent_core_events_total{event="failovers"}`, 1})
-	if lines := h1.Agent.LogLines("relay failover"); len(lines) == 0 || lines[0]["active"] == nil {
+	if lines := h1.Agent.LogLines("relay failover"); len(lines) == 0 || lines[0]["relays_up"] == nil {
 		t.Errorf("the agent's failover line: %v", lines)
 	}
 
@@ -848,7 +924,6 @@ func TestEveryDaemonReportsWhatItDoes(t *testing.T) {
 	if lines := l.CP().LogLines("interface revoked"); len(lines) != 1 || lines[0]["interface"] != string(db1.Interface) {
 		t.Errorf("the control plane's revocation line: %v", lines)
 	}
-	_ = r2
 }
 
 // TestTrafficOutlivesTheControlPlaneAndARestartRevokesNothing stops the

@@ -160,6 +160,7 @@ func runCmd(ctx context.Context, fs *flag.FlagSet, ef *envFlags, args []string) 
 	fs.IntVar(&o.Clients, "clients", 30, "converge: client interfaces, spread over the hosts")
 	fs.IntVar(&o.Concurrency, "concurrency", 4, "churn: workers per host")
 	fs.IntVar(&o.MaxIfaces, "max-interfaces", 1000, "density: the cap")
+	fs.IntVar(&o.Edges, "edges", 12, "spread: edges streaming at once")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

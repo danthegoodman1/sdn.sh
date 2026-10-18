@@ -11,7 +11,7 @@ import (
 // failoverRound is one relay kill.
 type failoverRound struct {
 	Killed  string   `json:"killed"`
-	After   string   `json:"active_after"`
+	After   string   `json:"moved_to"`
 	Flow    bench.RR `json:"established_flow"`
 	NewConn float64  `json:"new_connection_ms"`
 	Dial    bench.Dial
@@ -19,36 +19,32 @@ type failoverRound struct {
 	Failovers float64 `json:"failovers"`
 }
 
-// activeRelay names the relay n's agent sends a network's traffic to.
-func (r *run) activeRelay(n Node, network string) (string, error) {
-	var nets []api.Network
-	if err := r.ctl(r.env.CP(), &nets, "network", "list"); err != nil {
-		return "", err
-	}
+// edgeRelay names the relay n's agent sends its one edge through, as its
+// count of peers on each relay shows.
+func (r *run) edgeRelay(n Node) (string, error) {
 	var relays []api.RelayInfo
 	if err := r.ctl(r.env.CP(), &relays, "relay", "list"); err != nil {
 		return "", err
 	}
 	var st struct {
-		Active map[string]string `json:"active_relays"`
+		Peers map[string]int `json:"relay_peers"`
 	}
 	if err := r.ctl(n, &st, "status"); err != nil {
 		return "", err
 	}
-	for _, nw := range nets {
-		if nw.Name != network {
-			continue
-		}
-		for _, rl := range relays {
-			if string(rl.ID) == st.Active[string(nw.ID)] {
-				return rl.Name, nil
-			}
+	var carrying []string
+	for _, rl := range relays {
+		if st.Peers[string(rl.ID)] > 0 {
+			carrying = append(carrying, rl.Name)
 		}
 	}
 	if r.env.DryRun() {
 		return r.env.Relays()[0].Name, nil
 	}
-	return "", fmt.Errorf("%s reports no active relay for %s: %v", n.Name, network, st.Active)
+	if len(carrying) != 1 {
+		return "", fmt.Errorf("%s's peers send through %v; want one relay carrying its one edge", n.Name, st.Peers)
+	}
+	return carrying[0], nil
 }
 
 func planFailover(r *run) error {
@@ -99,13 +95,13 @@ func planFailover(r *run) error {
 	var results []failoverRound
 	defer func() { r.data("failover", results) }()
 	for i := range rounds {
-		active, err := r.activeRelay(a, "failover")
+		carrying, err := r.edgeRelay(a)
 		if err != nil {
 			return err
 		}
-		victim, ok := byName[active]
+		victim, ok := byName[carrying]
 		if !ok {
-			return fmt.Errorf("%s's active relay %q is not in the set", a.Name, active)
+			return fmt.Errorf("%s's edge sends through %q, which is not in the set", a.Name, carrying)
 		}
 		f0, err := failovers()
 		if err != nil {
@@ -138,7 +134,7 @@ func planFailover(r *run) error {
 			return err
 		}
 		round.Failovers = f1 - f0
-		if round.After, err = r.activeRelay(a, "failover"); err != nil {
+		if round.After, err = r.edgeRelay(a); err != nil {
 			return err
 		}
 		r.check(round.Flow.Error == "", "round %d: the established flow broke: %s", i+1, round.Flow.Error)
@@ -148,8 +144,7 @@ func planFailover(r *run) error {
 		if err := r.env.StartRelay(r.ctx, victim); err != nil {
 			return err
 		}
-		// Let probes see the relay again before the next round kills the
-		// other one.
+		// Let probes see the relay again, which brings the edge back to it.
 		r.sleep(2 * time.Second)
 	}
 	t := Table{

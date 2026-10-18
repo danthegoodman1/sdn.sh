@@ -810,7 +810,7 @@ func (d *Daemon) censusLoop(ctx context.Context) {
 func (d *Daemon) noteStats() {
 	s := d.core.Stats
 	if s.Failovers > d.stats.Failovers {
-		d.log.Info().Interface("active", d.core.Active()).Uint64("failovers", s.Failovers-d.stats.Failovers).Msg("relay failover")
+		d.log.Info().Interface("relays_up", d.core.RelaysUp()).Uint64("relays_lost", s.Failovers-d.stats.Failovers).Msg("relay failover")
 	}
 	d.m.coreStat("conflicts", s.Conflicts-d.stats.Conflicts)
 	d.m.coreStat("preempted", s.Preempted-d.stats.Preempted)
@@ -844,16 +844,18 @@ func (d *Daemon) Interfaces(ctx context.Context) ([]api.LocalInterface, error) {
 
 // Status is the agent's state for diagnostics.
 type Status struct {
-	Generation uint64                            `json:"generation"`
-	Pending    []string                          `json:"pending,omitempty"`
-	Active     map[model.NetworkID]model.RelayID `json:"active_relays,omitempty"`
-	Stats      agentcore.Stats                   `json:"stats"`
+	Generation uint64                 `json:"generation"`
+	Pending    []string               `json:"pending,omitempty"`
+	RelaysUp   map[model.RelayID]bool `json:"relays_up,omitempty"`
+	RelayPeers map[model.RelayID]int  `json:"relay_peers,omitempty"`
+	Stats      agentcore.Stats        `json:"stats"`
 }
 
 // Status reports the agent's state.
 func (d *Daemon) Status(ctx context.Context) (Status, error) {
 	return query(d, ctx, func() Status {
-		return Status{Generation: d.core.Generation(), Pending: d.core.Pending(), Active: d.core.Active(), Stats: d.core.Stats}
+		c := d.core.Census()
+		return Status{Generation: d.core.Generation(), Pending: d.core.Pending(), RelaysUp: c.RelaysUp, RelayPeers: c.RelayPeers, Stats: d.core.Stats}
 	})
 }
 

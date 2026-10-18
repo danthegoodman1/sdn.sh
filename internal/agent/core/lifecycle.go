@@ -386,8 +386,7 @@ func (c *Core) State(now time.Time, u api.StateUpdate) error {
 }
 
 // refresh marks for reconciliation every namespace whose network desired
-// state holds at another revision than the one it reconciled, and
-// recomputes active relays, since a network's relay set may have changed.
+// state holds at another revision than the one it reconciled.
 func (c *Core) refresh() {
 	for _, name := range slices.Sorted(maps.Keys(c.ns)) {
 		st := c.ns[name]
@@ -400,7 +399,6 @@ func (c *Core) refresh() {
 			st.dirty = true
 		}
 	}
-	c.reselect()
 }
 
 // Live lists the interfaces whose leases the agent renews.

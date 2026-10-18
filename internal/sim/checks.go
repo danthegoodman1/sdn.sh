@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net/netip"
 	"slices"
+	"strings"
 	"time"
 
 	agentcore "sdn.sh/internal/agent/core"
@@ -563,6 +564,81 @@ func (w *World) checkLiveness() {
 		}
 	}
 	w.probeAll()
+	w.countRelayEdges()
+}
+
+// countRelayEdges counts, once the system has converged and carried the
+// liveness probes, the relay edges whose ends send through different
+// relays, and those whose ends agree on a relay other than the heaviest
+// both agents find up. Roaming owns the endpoint, so an edge whose ends'
+// probes once disagreed can stay where the last packet left it.
+func (w *World) countRelayEdges() {
+	relayAt := map[netip.Addr]model.RelayID{}
+	for _, r := range w.relays {
+		relayAt[r.advertised] = r.id
+	}
+	type end struct {
+		relay model.RelayID
+		set   []model.RelayID
+		up    map[model.RelayID]bool
+	}
+	sends := map[[2]model.InterfaceID]end{}
+	for _, h := range w.hosts {
+		if !h.up || h.core == nil {
+			continue
+		}
+		up := h.core.RelaysUp()
+		settled := h.core.Settled()
+		for _, name := range sortedKeys(settled) {
+			s := settled[name]
+			n, ok := h.core.Desired().Networks[s.Network]
+			ns, named := h.kernel.Named(name)
+			if !ok || !named {
+				continue
+			}
+			dev, ok := ns.Devices[h.cfg.Device]
+			if !ok {
+				continue
+			}
+			var set []model.RelayID
+			for _, r := range n.Relays {
+				set = append(set, r.Relay)
+			}
+			for _, p := range dev.PeerList() {
+				if r, ok := relayAt[p.Endpoint.Addr()]; ok {
+					sends[[2]model.InterfaceID{s.Interface, w.byKey[p.PublicKey]}] = end{r, set, up}
+				}
+			}
+		}
+	}
+	keys := slices.SortedFunc(maps.Keys(sends), func(a, b [2]model.InterfaceID) int {
+		return cmp.Or(strings.Compare(string(a[0]), string(b[0])), strings.Compare(string(a[1]), string(b[1])))
+	})
+	for _, k := range keys {
+		a := sends[k]
+		b, ok := sends[[2]model.InterfaceID{k[1], k[0]}]
+		if !ok || k[1] < k[0] {
+			continue
+		}
+		w.summary.RelayEdges++
+		if a.relay != b.relay {
+			w.summary.RelaySplit++
+			continue
+		}
+		var best model.RelayID
+		var weight uint64
+		for _, r := range a.set {
+			if !a.up[r] || !b.up[r] {
+				continue
+			}
+			if x := model.RelayWeight(k[0], k[1], r); best == "" || x > weight {
+				best, weight = r, x
+			}
+		}
+		if best != "" && a.relay != best {
+			w.summary.RelayDrift++
+		}
+	}
 }
 
 // probeAll opens a connection for every permitted service flow and for a

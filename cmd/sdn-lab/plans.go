@@ -29,6 +29,7 @@ type Options struct {
 	Clients     int
 	Concurrency int
 	MaxIfaces   int
+	Edges       int
 }
 
 func (o Options) param(name string) string {
@@ -51,6 +52,8 @@ func (o Options) param(name string) string {
 		return itoa(o.Concurrency)
 	case "max-interfaces":
 		return itoa(o.MaxIfaces)
+	case "edges":
+		return itoa(o.Edges)
 	}
 	return "?"
 }
@@ -76,10 +79,12 @@ var plans = []plan{
 		true, []string{"duration", "concurrency", "churn-degree"}, planChurn},
 	{"converge", "replace a service's backend under churn and time until every client's new connections reach the new one",
 		true, []string{"clients", "concurrency"}, planConverge},
-	{"failover", "kill the active relay mid-flow: the established flow's stall and a new connection's wait",
+	{"failover", "kill the relay an edge sends through, mid-flow: the established flow's stall and a new connection's wait",
 		true, []string{"rounds"}, planFailover},
 	{"density", "interfaces on one host until an attach fails, attach latency degrades, or the cap",
 		true, []string{"max-interfaces"}, planDensity},
+	{"spread", "many edges streaming at once through one relay, then two, then three: aggregate throughput and relay CPU by relay count",
+		true, []string{"duration", "edges"}, planSpread},
 }
 
 func findPlans(spec string) ([]plan, error) {

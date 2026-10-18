@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,7 +152,7 @@ func TestAMachineAPeerStopsFrontingIsFlushed(t *testing.T) {
 	}
 }
 
-func TestAnActiveRelayThatLeavesTheSetGivesUpThePath(t *testing.T) {
+func TestAPeersRelayAnswersAndBelongsToTheSet(t *testing.T) {
 	c, now := adopted(t)
 	relays := map[model.RelayID]int{"r1": 1, "r2": 2, "r3": 3}
 	update := func(rev uint64, ids ...model.RelayID) api.StateUpdate {
@@ -174,18 +175,127 @@ func TestAnActiveRelayThatLeavesTheSetGivesUpThePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	settle("r1", "r3")
-	if got := c.Active()["net-1"]; got != "r1" {
-		t.Fatalf("active relay %q, want r1, the one answering", got)
+	if got, want := c.ns["sdn-a"].peers[peer].Endpoint, ap("192.0.2.1:7000"); got != want {
+		t.Fatalf("peer endpoint %v, want r1's %v, the one relay of the set answering", got, want)
 	}
 	if err := c.State(now, update(4, "r2", "r3")); err != nil {
 		t.Fatal(err)
 	}
 	settle("r1", "r3")
-	if got := c.Active()["net-1"]; got != "r3" {
-		t.Fatalf("active relay %q after r1 left the set, want r3", got)
-	}
 	if got, want := c.ns["sdn-a"].peers[peer].Endpoint, ap("192.0.2.3:7000"); got != want {
-		t.Fatalf("peer endpoint %v, want r3's %v", got, want)
+		t.Fatalf("peer endpoint %v after r1 left the set, want r3's %v", got, want)
+	}
+}
+
+// spread is a core holding n adopted interfaces, if-0 in sdn-0 onward, each
+// with one remote peer if-p<i> whose paths run through every relay given.
+func spread(t *testing.T, n int, ids ...model.RelayID) (*Core, time.Time) {
+	t.Helper()
+	c, now, _ := adoptedMany(t, n)
+	net := api.NetworkState{Network: "net-1", Name: "n", Revision: 3, Prefix6: pfx("fd00::/64"), MTU: 1380}
+	for k, id := range ids {
+		net.Relays = append(net.Relays, api.RelayRef{Relay: id, Probe: ap(fmt.Sprintf("192.0.2.%d:9", k+1))})
+	}
+	for i := range n {
+		p := api.Peer{Interface: model.InterfaceID(fmt.Sprintf("if-p%d", i)), Service: "svc-2", PublicKey: model.Key{byte(100 + i)},
+			Allowed: []netip.Prefix{netip.PrefixFrom(netip.AddrFrom16([16]byte{0xfd, 14: 1, 15: byte(i)}), 128)}}
+		for k, id := range ids {
+			p.Relays = append(p.Relays, api.RelayPath{Relay: id, Send: netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, 0, 2, byte(k + 1)}), uint16(7000+i))})
+		}
+		net.Interfaces = append(net.Interfaces, api.Interface{ID: model.InterfaceID(fmt.Sprintf("if-%d", i)), Service: "svc-1", Kind: api.Workload,
+			PublicKey: model.Key{byte(20 + i)}, Addr6: netip.AddrFrom16([16]byte{0xfd, 15: byte(0x10 + i)}), ListenPort: uint16(40000 + i),
+			State: api.Live, Peers: []api.Peer{p}})
+	}
+	// The control plane lists interfaces in ID order, which lookups rely on.
+	slices.SortFunc(net.Interfaces, func(a, b api.Interface) int { return strings.Compare(string(a.ID), string(b.ID)) })
+	if err := c.State(now, api.StateUpdate{Host: "h1", Generation: 3, Networks: []api.NetworkState{net},
+		Present: []api.NetworkRef{{Network: "net-1", Revision: 3}}}); err != nil {
+		t.Fatal(err)
+	}
+	return c, now
+}
+
+// relayOf names the relay each namespace's one peer sends through.
+func relayOf(c *Core, n int) []model.RelayID {
+	out := make([]model.RelayID, n)
+	for i := range n {
+		st := c.ns[fmt.Sprintf("sdn-%d", i)]
+		for _, p := range st.peers {
+			out[i] = model.RelayID(fmt.Sprintf("r%d", p.Endpoint.Addr().As4()[3]))
+		}
+	}
+	return out
+}
+
+// heaviest is the relay of highest weight for an edge among ids.
+func heaviest(a, b model.InterfaceID, ids ...model.RelayID) model.RelayID {
+	var best model.RelayID
+	var w uint64
+	for _, id := range ids {
+		if x := model.RelayWeight(a, b, id); best == "" || x > w {
+			best, w = id, x
+		}
+	}
+	return best
+}
+
+func TestANetworksEdgesSpreadOverItsRelays(t *testing.T) {
+	const n = 30
+	c, now := spread(t, n, "r1", "r2", "r3")
+	for range 4 {
+		drive(c, now, succeed, "r1", "r2", "r3")
+	}
+	for i, r := range relayOf(c, n) {
+		self, other := model.InterfaceID(fmt.Sprintf("if-%d", i)), model.InterfaceID(fmt.Sprintf("if-p%d", i))
+		if want := heaviest(self, other, "r1", "r2", "r3"); r != want {
+			t.Fatalf("edge %s-%s sends through %s, want %s, its heaviest relay", self, other, r, want)
+		}
+	}
+	census := c.Census().RelayPeers
+	for _, r := range []model.RelayID{"r1", "r2", "r3"} {
+		if census[r] < n/6 {
+			t.Fatalf("relays carry %v of %d edges; want each a fair share", census, n)
+		}
+	}
+}
+
+func TestARelaysLossMovesOnlyItsEdgesAndItsReturnBringsThemBack(t *testing.T) {
+	const n = 30
+	c, now := spread(t, n, "r1", "r2", "r3")
+	settle := func(up ...model.RelayID) {
+		for range 10 {
+			now = now.Add(200 * time.Millisecond)
+			c.Tick(now)
+			drive(c, now, succeed, up...)
+		}
+	}
+	settle("r1", "r2", "r3")
+	before := relayOf(c, n)
+	failovers := c.Stats.Failovers
+	settle("r2", "r3")
+	if c.Stats.Failovers != failovers+1 {
+		t.Fatalf("counted %d failovers for one relay's loss", c.Stats.Failovers-failovers)
+	}
+	after := relayOf(c, n)
+	moved := map[model.RelayID]int{}
+	for i := range n {
+		self, other := model.InterfaceID(fmt.Sprintf("if-%d", i)), model.InterfaceID(fmt.Sprintf("if-p%d", i))
+		switch {
+		case before[i] != "r1" && after[i] != before[i]:
+			t.Fatalf("edge %d moved from %s to %s though r1 carried it not", i, before[i], after[i])
+		case before[i] == "r1":
+			if want := heaviest(self, other, "r2", "r3"); after[i] != want {
+				t.Fatalf("edge %d moved from r1 to %s, want %s, its next relay", i, after[i], want)
+			}
+			moved[after[i]]++
+		}
+	}
+	if moved["r2"] == 0 || moved["r3"] == 0 {
+		t.Fatalf("r1's edges moved to %v; want them spread over both survivors", moved)
+	}
+	settle("r1", "r2", "r3")
+	if back := relayOf(c, n); !slices.Equal(back, before) {
+		t.Fatalf("after r1 returned, edges send through %v, want %v", back, before)
 	}
 }
 

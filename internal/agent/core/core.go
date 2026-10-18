@@ -65,7 +65,7 @@ type Config struct {
 	// changes made behind the agent's back.
 	ResyncEvery time.Duration
 	// AckWait bounds how long a relay peer new to a namespace waits for
-	// the active relay to acknowledge the namespace's registration before
+	// its edge's relay to acknowledge the namespace's registration before
 	// a slot names it, and how long an attach waits on that, or on a
 	// co-located device, before its namespace is handed over.
 	AckWait time.Duration
@@ -273,13 +273,13 @@ type nsState struct {
 	sweep     bool
 	// awaiting names the interfaces the namespace waits on: co-located
 	// ones whose devices have yet to hold this namespace's interface as a
-	// peer, and relay peers new to the namespace whose active relay has yet
+	// peer, and relay peers new to the namespace whose edge's relay has yet
 	// to acknowledge its registration. Slots and keepalive toward them
 	// wait, and so does the handover. reverse holds the co-located ones,
 	// which only their own namespaces' batches release.
 	awaiting []model.InterfaceID
 	reverse  []model.InterfaceID
-	// acks holds each relay peer new to the namespace until the active
+	// acks holds each relay peer new to the namespace until its edge's
 	// relay acknowledges it or AckWait passes; ackBy is the earliest
 	// deadline among those still waiting.
 	acks    map[model.Key]*ackWait
@@ -307,7 +307,7 @@ func newNS(name string, id model.InterfaceID) *nsState {
 	}
 }
 
-// ackWait is a relay peer waiting for the active relay to acknowledge the
+// ackWait is a relay peer waiting for its edge's relay to acknowledge the
 // namespace's registration on path, the relay port the peer is sent to.
 type ackWait struct {
 	path  netip.AddrPort
@@ -341,7 +341,6 @@ type Core struct {
 	ifaces  map[model.InterfaceID]*iface
 	ns      map[string]*nsState
 	relays  map[model.RelayID]*relayHealth
-	active  map[model.NetworkID]model.RelayID
 	badPort map[uint16]bool
 	actions []Action
 	batches uint64
@@ -375,7 +374,10 @@ type Core struct {
 
 // Stats counts the core's decisions.
 type Stats struct {
-	Batches, Failures, Conflicts, Preempted, Registrations, Failovers uint64
+	Batches, Failures, Conflicts, Preempted, Registrations uint64
+	// Failovers counts relays this agent found down, each moving the edges
+	// it carried to their next relays.
+	Failovers uint64
 	// Acked counts acknowledgments that released a new peer's wait, and
 	// AckTimeouts waits that ended at AckWait instead.
 	Acked, AckTimeouts uint64
@@ -391,15 +393,35 @@ type Census struct {
 	// Namespaces counts the named namespaces the core tracks, and Held
 	// those only something else holds, awaiting their reap.
 	Namespaces, Held int
-	// Peers counts the peers the core believes its devices hold.
-	Peers int
+	// Peers counts the peers the core believes its devices hold, and
+	// RelayPeers those whose endpoint is a path through each relay of the
+	// held networks.
+	Peers      int
+	RelayPeers map[model.RelayID]int
+	// RelaysUp holds each relay of the held networks, and whether this
+	// agent's probes find it up.
+	RelaysUp map[model.RelayID]bool
 }
 
 // Census counts interfaces, namespaces and peers.
 func (c *Core) Census() Census {
-	out := Census{Interfaces: map[string]int{}}
+	out := Census{Interfaces: map[string]int{}, RelayPeers: map[model.RelayID]int{}, RelaysUp: c.RelaysUp()}
 	for p := creating; p <= orphan; p++ {
 		out.Interfaces[p.String()] = 0
+	}
+	via := map[netip.AddrPort]model.RelayID{}
+	for _, nid := range c.desired.NetworkIDs() {
+		n := c.desired.Networks[nid]
+		for _, r := range n.Relays {
+			out.RelayPeers[r.Relay] = 0
+		}
+		for _, x := range n.Interfaces {
+			for _, p := range x.Peers {
+				for _, rp := range p.Relays {
+					via[rp.Send] = rp.Relay
+				}
+			}
+		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(c.ifaces)) {
 		out.Interfaces[c.ifaces[id].phase.String()]++
@@ -412,6 +434,11 @@ func (c *Core) Census() Census {
 		}
 		out.Namespaces++
 		out.Peers += len(st.peers)
+		for _, key := range slices.SortedFunc(maps.Keys(st.peers), compareKey) {
+			if r, ok := via[st.peers[key].Endpoint]; ok {
+				out.RelayPeers[r]++
+			}
+		}
 	}
 	return out
 }
@@ -425,7 +452,6 @@ func New(cfg Config, rand io.Reader) *Core {
 		ifaces:  map[model.InterfaceID]*iface{},
 		ns:      map[string]*nsState{},
 		relays:  map[model.RelayID]*relayHealth{},
-		active:  map[model.NetworkID]model.RelayID{},
 		badPort: map[uint16]bool{},
 		resends: map[string]map[model.Key]*resend{},
 

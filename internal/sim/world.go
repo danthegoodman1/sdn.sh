@@ -47,12 +47,17 @@ type Summary struct {
 	Batches, Conflicts, Failovers         uint64
 	Registrations, Acked, AckTimeouts     uint64
 	AttackerSent                          int
+	// RelayEdges counts the relay edges live at the end; RelaySplit those
+	// whose two ends send through different relays, and RelayDrift those
+	// whose ends agree on a relay other than the heaviest both find up.
+	RelayEdges, RelaySplit, RelayDrift int
 }
 
 func (s Summary) String() string {
-	return fmt.Sprintf("seed %d: %d events; %d attaches, %d detaches, %d revokes, %d rule changes, %d egress grants; crashes agent %d relay %d cp %d, reboots %d, rebinds %d, strays %d, unnamed %d; flows ok %d denied %d; batches %d, conflicts %d, failovers %d, registrations %d, acked %d, ack timeouts %d, attacker sent %d",
+	return fmt.Sprintf("seed %d: %d events; %d attaches, %d detaches, %d revokes, %d rule changes, %d egress grants; crashes agent %d relay %d cp %d, reboots %d, rebinds %d, strays %d, unnamed %d; flows ok %d denied %d; batches %d, conflicts %d, failovers %d, registrations %d, acked %d, ack timeouts %d, attacker sent %d; relay edges %d, split %d, drifted %d",
 		s.Seed, s.Events, s.Attaches, s.Detaches, s.Revokes, s.Rules, s.EgressGrants, s.AgentCrashes, s.RelayCrashes, s.CPCrashes,
-		s.Reboots, s.Rebinds, s.Strays, s.Unnamed, s.FlowsOK, s.FlowsDenied, s.Batches, s.Conflicts, s.Failovers, s.Registrations, s.Acked, s.AckTimeouts, s.AttackerSent)
+		s.Reboots, s.Rebinds, s.Strays, s.Unnamed, s.FlowsOK, s.FlowsDenied, s.Batches, s.Conflicts, s.Failovers, s.Registrations, s.Acked, s.AckTimeouts, s.AttackerSent,
+		s.RelayEdges, s.RelaySplit, s.RelayDrift)
 }
 
 // World is one simulated deployment.

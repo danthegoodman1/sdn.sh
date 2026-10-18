@@ -222,6 +222,7 @@ func Layers(o options) map[string]Layer {
 		goTest("agent-cmd", "./cmd/sdn-agent"),
 		goTest("sim", "./internal/sim"),
 		goTest("kmodel", "./internal/kernel/kmodel"),
+		goTest("model", "./internal/model"),
 		{Name: "kernel", Root: true, Steps: []Step{
 			{Args: []string{"mkdir", "-p", ".mutants"}},
 			{Args: []string{"go", "test", "-c", "-o", ".mutants/linux.test", "./internal/kernel/linux"}},

@@ -34,7 +34,7 @@ type tpeer struct {
 	keepalive time.Duration
 	// awaiting marks a peer no slot names yet: a co-located one whose
 	// device has yet to hold the reverse peer, or a relay peer new to the
-	// namespace whose active relay has yet to acknowledge it.
+	// namespace whose relay has yet to acknowledge it.
 	awaiting bool
 }
 
@@ -105,7 +105,7 @@ func (c *Core) target(now time.Time, st *nsState, n *api.NetworkState, x *api.In
 				c.Stats.Conflicts++
 				continue
 			}
-			tp := c.tpeer(n, p)
+			tp := c.tpeer(x.ID, p)
 			switch {
 			case p.Draining:
 			case p.Loopback != 0:
@@ -203,8 +203,8 @@ func (c *Core) holdsReverse(st *nsState, p api.Peer) bool {
 }
 
 // awaitsAck reports whether a relay peer new to the namespace still waits
-// for the active relay to acknowledge the namespace's registration toward
-// it. A relay binds a new edge's port only once it loads the table naming
+// for the relay its edge sends through to acknowledge the namespace's
+// registration toward it. A relay binds a new edge's port only once it loads the table naming
 // it, which can trail the agent installing the peer, and a handshake
 // initiation sent to a port no socket holds is dropped; WireGuard then
 // waits five seconds before trying again. A peer installed before, such
@@ -252,7 +252,7 @@ func allowedOf(p api.Peer) []netip.Prefix {
 	return out
 }
 
-func (c *Core) tpeer(n *api.NetworkState, p api.Peer) tpeer {
+func (c *Core) tpeer(self model.InterfaceID, p api.Peer) tpeer {
 	p.Allowed = kernel.SortPrefixes(allowedOf(p))
 	tp := tpeer{peer: p}
 	if p.Keepalive {
@@ -263,15 +263,11 @@ func (c *Core) tpeer(n *api.NetworkState, p api.Peer) tpeer {
 		tp.accept = []netip.AddrPort{tp.endpoint}
 		return tp
 	}
-	active := c.activeRelay(n)
 	for _, rp := range p.Relays {
 		tp.accept = append(tp.accept, rp.Send)
-		if rp.Relay == active {
-			tp.endpoint = rp.Send
-		}
 	}
-	if !tp.endpoint.IsValid() && len(p.Relays) > 0 {
-		tp.endpoint = p.Relays[0].Send
+	if rp, ok := c.edgeRelay(self, p); ok {
+		tp.endpoint = rp.Send
 	}
 	return tp
 }

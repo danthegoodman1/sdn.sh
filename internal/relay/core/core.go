@@ -13,9 +13,11 @@
 //     success becomes a pending registration the shell makes durable before
 //     committing — a registration never moves an endpoint the relay could
 //     forget in a crash;
-//  3. otherwise forwards from the opposite direction's port to the endpoint
-//     that direction registered, and drops while either side has yet to
-//     register or E is not this direction's registered endpoint.
+//  3. otherwise, if E is this direction's registered endpoint and the
+//     opposite direction has registered, forwards from the opposite
+//     direction's port to the endpoint it registered;
+//  4. otherwise waits, briefly and in bounded numbers, for the registration
+//     that would admit it, and drops when the wait ends.
 //
 // A data packet never moves an endpoint, and a packet that loses an
 // endpoint race drops, so the relay reflects nothing to anyone who merely

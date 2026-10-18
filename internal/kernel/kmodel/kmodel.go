@@ -103,8 +103,8 @@ type Peer struct {
 // New returns a host with no namespaces.
 func New() *Kernel {
 	return &Kernel{
-		named:   map[string]*Netns{},
-		anon:    map[string]*Netns{},
+		named:        map[string]*Netns{},
+		anon:         map[string]*Netns{},
 		ports:        map[uint16]*Device{},
 		Foreign:      map[uint16]bool{},
 		EgressChains: map[uint16][]kernel.EgressRule{},

@@ -42,8 +42,11 @@ type Kernel struct {
 	handles map[string]*nsHandles
 }
 
-// nsHandles are the sockets held open inside one namespace.
+// nsHandles are the sockets held open inside one namespace. mu serializes
+// their use, since the agent observes a namespace while another goroutine
+// may be configuring it.
 type nsHandles struct {
+	mu   sync.Mutex
 	fd   netns.NsHandle
 	nl   *netlink.Handle
 	wg   *wgctrl.Client
@@ -149,7 +152,9 @@ func (k *Kernel) forget(name string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if h, ok := k.handles[name]; ok {
+		h.mu.Lock()
 		h.close()
+		h.mu.Unlock()
 		delete(k.handles, name)
 	}
 }
@@ -172,6 +177,8 @@ func (k *Kernel) Run(op kernel.Op) (kernel.Result, error) {
 		}
 		return kernel.Result{}, err
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	switch op.Kind {
 	case kernel.CreateDevice:
 		return kernel.Result{}, k.createDevice(h, op.Device, *op.Create)
@@ -438,6 +445,8 @@ func (k *Kernel) Namespace(name, aliasPrefix string) (kernel.Namespace, error) {
 	if err != nil {
 		return kernel.Namespace{Name: name}, err
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	devs, err := observe(h, "")
 	return kernel.Namespace{Name: name, Devices: devs}, err
 }

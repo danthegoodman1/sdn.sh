@@ -161,7 +161,12 @@ func TestRestoreReplaysTheLog(t *testing.T) {
 	register(t, tb, portAB, keyAB, advAB, senderA, 10)
 	st := tb.Persisted()
 	again := New(DefaultConfig())
-	again.Restore(st, []Registration{{Local: portBA, Endpoint: senderB, Counter: 4}})
+	again.Restore(st, []Registration{
+		{Local: portBA, Endpoint: senderB, Counter: 4, Key: keyBA},
+		// A claim verified under a key the port no longer has commits to
+		// nothing.
+		{Local: portAB, Endpoint: attacker, Counter: 11, Key: model.Secret{9}},
+	})
 	if dir, _ := again.Dir(portAB); dir.Endpoint != senderA || dir.Counter != 10 {
 		t.Fatal("restore lost a registration")
 	}

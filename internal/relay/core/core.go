@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"sdn.sh/internal/api"
+	"sdn.sh/internal/model"
 	"sdn.sh/internal/regproto"
 )
 
@@ -88,11 +89,14 @@ type Decision struct {
 	Registration Registration
 }
 
-// Registration is a verified endpoint claim.
+// Registration is a verified endpoint claim. Key is the direction's key it
+// verified under, so a claim made durable after its port was reallocated
+// commits to nothing.
 type Registration struct {
 	Local    netip.AddrPort `json:"local"`
 	Endpoint netip.AddrPort `json:"endpoint"`
 	Counter  uint64         `json:"counter"`
+	Key      model.Secret   `json:"key"`
 }
 
 // Counters are one direction's packet counts.
@@ -244,13 +248,13 @@ func (t *Table) verify(d *Dir, src netip.AddrPort, b []byte) (Registration, Reas
 		d.Stats.Replayed++
 		return Registration{}, Replay
 	}
-	return Registration{Local: d.Local, Endpoint: src, Counter: counter}, ""
+	return Registration{Local: d.Local, Endpoint: src, Counter: counter, Key: d.Key}, ""
 }
 
 // Commit applies a durable registration, unless a later one won meanwhile.
 func (t *Table) Commit(r Registration) bool {
 	d, ok := t.ports[r.Local]
-	if !ok || r.Counter <= d.Counter {
+	if !ok || r.Key != d.Key || r.Counter <= d.Counter {
 		return false
 	}
 	d.Counter, d.Endpoint = r.Counter, r.Endpoint
@@ -295,7 +299,7 @@ func (t *Table) Persisted() State {
 	for _, d := range t.Dirs() {
 		st.Ports = append(st.Ports, d.RelayPort)
 		if d.Counter > 0 {
-			st.Registrations = append(st.Registrations, Registration{Local: d.Local, Endpoint: d.Endpoint, Counter: d.Counter})
+			st.Registrations = append(st.Registrations, Registration{Local: d.Local, Endpoint: d.Endpoint, Counter: d.Counter, Key: d.Key})
 		}
 	}
 	return st

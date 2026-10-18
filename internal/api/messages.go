@@ -119,6 +119,17 @@ type Credentials struct {
 	Token string `json:"token"`
 }
 
+// RelayInfo describes a relay to an operator.
+type RelayInfo struct {
+	ID        model.RelayID  `json:"id"`
+	Name      string         `json:"name"`
+	Addresses []RelayAddress `json:"addresses"`
+	PortLo    uint16         `json:"port_lo"`
+	PortHi    uint16         `json:"port_hi"`
+	ProbePort uint16         `json:"probe_port"`
+	Revision  uint64         `json:"revision"`
+}
+
 // RelayAddress is one address a relay serves edges on: the local address it
 // binds and the address agents send to, which differ behind a cloud NAT.
 type RelayAddress struct {

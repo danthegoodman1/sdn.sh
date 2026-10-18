@@ -38,6 +38,13 @@ type Store interface {
 	View(ctx context.Context, fn func(ReadTx) error) error
 }
 
+// Watcher is a store that reports commits made through any handle, so
+// every control-plane replica wakes its long polls for the others' writes.
+type Watcher interface {
+	// Watch calls fn for each commit until ctx ends or the feed breaks.
+	Watch(ctx context.Context, fn func(Change)) error
+}
+
 // Change says what a committed transaction touched, so long polls for the
 // hosts and relays it affects wake.
 type Change struct {

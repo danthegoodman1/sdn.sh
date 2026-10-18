@@ -31,7 +31,10 @@ var errDown error = &api.Error{Code: api.CodeUnavailable, Message: "no answer"}
 type hostPoll struct {
 	since  uint64
 	parked time.Time
-	reply  func(api.StateUpdate)
+	// nets are the networks the host held when it parked, which the
+	// server's hub watches alongside the host itself.
+	nets  []model.NetworkID
+	reply func(api.StateUpdate)
 }
 
 type relayPoll struct {
@@ -160,7 +163,7 @@ func (c *cpNode) update(fn func(store.Tx) error) (store.Change, error) {
 	}
 	if !ch.Empty() {
 		c.checkPorts()
-		c.wake()
+		c.wake(ch)
 	}
 	return ch, nil
 }
@@ -278,10 +281,15 @@ func (c *cpNode) checkPorts() {
 	})
 }
 
-// wake answers every parked poll whose host or relay has news.
-func (c *cpNode) wake() {
+// wake answers the parked polls a change touches, as the server's hub
+// does: a host's poll for the host and the networks it held when it parked,
+// a relay's for the relay.
+func (c *cpNode) wake(ch store.Change) {
 	for _, id := range sortedKeys(c.polls) {
 		p := c.polls[id]
+		if !slices.Contains(ch.Hosts, id) && !slices.ContainsFunc(p.nets, func(n model.NetworkID) bool { return slices.Contains(ch.Networks, n) }) {
+			continue
+		}
 		var u api.StateUpdate
 		var err error
 		c.view(func(tx store.ReadTx) error {
@@ -300,6 +308,9 @@ func (c *cpNode) wake() {
 	}
 	for _, id := range sortedKeys(c.rpoll) {
 		p := c.rpoll[id]
+		if !slices.Contains(ch.Relays, id) {
+			continue
+		}
 		var st api.RelayState
 		var ok bool
 		c.view(func(tx store.ReadTx) error {
@@ -405,8 +416,13 @@ func (c *cpNode) handlePoll(host model.HostID, since uint64, reply func(api.Stat
 		return
 	}
 	var gen uint64
+	var nets []model.NetworkID
 	c.view(func(tx store.ReadTx) error {
-		gen, _, _ = cp.HostGeneration(tx, host)
+		var held []store.Network
+		gen, held, _ = cp.HostGeneration(tx, host)
+		for _, n := range held {
+			nets = append(nets, n.ID)
+		}
 		return nil
 	})
 	if gen > since {
@@ -420,7 +436,7 @@ func (c *cpNode) handlePoll(host model.HostID, since uint64, reply func(api.Stat
 		}
 		return
 	}
-	c.polls[host] = hostPoll{since: since, parked: c.w.now(), reply: reply}
+	c.polls[host] = hostPoll{since: since, parked: c.w.now(), nets: nets, reply: reply}
 }
 
 func (c *cpNode) handleRelayPoll(relay model.RelayID, since uint64, reply func(api.RelayState)) {

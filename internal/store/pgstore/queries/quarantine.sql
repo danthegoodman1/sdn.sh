@@ -24,12 +24,18 @@ ON CONFLICT (relay, addr, port) DO UPDATE SET at = excluded.at;
 -- name: DeleteReleasedPort :exec
 DELETE FROM released_ports WHERE relay = $1 AND addr = $2 AND port = $3;
 
+-- name: DeleteRelayPorts :exec
+DELETE FROM released_ports WHERE relay = $1;
+
 -- name: GetPortCursor :one
 SELECT next FROM port_cursors WHERE relay = $1 AND addr = $2;
 
 -- name: SetPortCursor :exec
 INSERT INTO port_cursors (relay, addr, next) VALUES ($1, $2, $3)
 ON CONFLICT (relay, addr) DO UPDATE SET next = excluded.next;
+
+-- name: DeleteRelayCursors :exec
+DELETE FROM port_cursors WHERE relay = $1;
 
 -- name: GetMeta :one
 SELECT value FROM meta WHERE key = $1;

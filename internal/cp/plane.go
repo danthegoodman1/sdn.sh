@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 
@@ -58,6 +59,8 @@ func (c Config) Validate() error {
 	switch {
 	case c.LeaseTTL <= 0 || c.DrainGrace <= 0:
 		return errors.New("lease TTL and drain grace must be positive")
+	case c.PortQuarantine <= 0:
+		return errors.New("port quarantine must be positive, or a stale sender reaches the next edge on its port")
 	case c.Quarantine4 <= c.DrainGrace:
 		return errors.New("IPv4 quarantine must outlast the drain grace period")
 	case c.Retention < c.DrainGrace:
@@ -149,7 +152,20 @@ func bump(tx store.Tx, now time.Time, n *store.Network, hosts ...model.HostID) e
 	if err := tx.PutNetwork(*n); err != nil {
 		return err
 	}
-	ch := store.Change{Networks: []model.NetworkID{n.ID}}
+	tx.Touch(store.Change{Networks: []model.NetworkID{n.ID}})
+	return bumpHosts(tx, hosts)
+}
+
+// bumpHosts gives hosts whose interface set changed this transaction's
+// revision, and records the touch.
+func bumpHosts(tx store.Tx, hosts []model.HostID) error {
+	if len(hosts) == 0 {
+		return nil
+	}
+	rev, err := tx.Bump()
+	if err != nil {
+		return err
+	}
 	for _, id := range hosts {
 		h, err := tx.Host(id)
 		if err != nil {
@@ -159,9 +175,8 @@ func bump(tx store.Tx, now time.Time, n *store.Network, hosts ...model.HostID) e
 		if err := tx.PutHost(h); err != nil {
 			return err
 		}
-		ch.Hosts = append(ch.Hosts, id)
 	}
-	tx.Touch(ch)
+	tx.Touch(store.Change{Hosts: hosts})
 	return nil
 }
 
@@ -175,6 +190,24 @@ func ResolveNetwork(tx store.ReadTx, ref string) (store.Network, error) {
 		n, err = tx.NetworkByName(ref)
 	}
 	return n, notFound(err, "network "+ref)
+}
+
+// ResolveHost finds a host by name, or failing that by identifier.
+func ResolveHost(tx store.ReadTx, ref string) (store.Host, error) {
+	h, err := tx.HostByName(ref)
+	if errors.Is(err, store.ErrNotFound) && strings.HasPrefix(ref, model.HostPrefix) {
+		h, err = tx.Host(model.HostID(ref))
+	}
+	return h, notFound(err, "host "+ref)
+}
+
+// ResolveRelay finds a relay by name, or failing that by identifier.
+func ResolveRelay(tx store.ReadTx, ref string) (store.Relay, error) {
+	r, err := tx.RelayByName(ref)
+	if errors.Is(err, store.ErrNotFound) && strings.HasPrefix(ref, model.RelayPrefix) {
+		r, err = tx.Relay(model.RelayID(ref))
+	}
+	return r, notFound(err, "relay "+ref)
 }
 
 // ResolveService finds a service of a network by identifier or name.
@@ -260,10 +293,12 @@ func (p *Plane) DeleteNetwork(tx store.Tx, ref string) error {
 			return apiErr(api.CodeConflict, "network %s still has interface %s", n.Name, i.ID)
 		}
 	}
+	var hosts []model.HostID
 	for _, i := range ifaces {
 		if err := tx.DeleteInterface(i.ID); err != nil {
 			return err
 		}
+		hosts = append(hosts, i.Host)
 	}
 	rules, err := tx.Rules(n.ID)
 	if err != nil {
@@ -282,6 +317,12 @@ func (p *Plane) DeleteNetwork(tx store.Tx, ref string) error {
 		if err := tx.DeleteService(s.ID); err != nil {
 			return err
 		}
+	}
+	// The hosts that still saw the network's ended interfaces move to a
+	// generation that no longer lists it, so they drop it.
+	slices.Sort(hosts)
+	if err := bumpHosts(tx, slices.Compact(hosts)); err != nil {
+		return err
 	}
 	tx.Touch(store.Change{Networks: []model.NetworkID{n.ID}})
 	return tx.DeleteNetwork(n.ID)
@@ -425,7 +466,10 @@ func (p *Plane) DeleteRule(tx store.Tx, now time.Time, netRef string, id model.R
 		return err
 	}
 	r, err := tx.Rule(id)
-	if err != nil || r.Network != n.ID {
+	if err != nil {
+		return notFound(err, "rule "+string(id))
+	}
+	if r.Network != n.ID {
 		return notFound(store.ErrNotFound, "rule "+string(id))
 	}
 	if err := tx.DeleteRule(id); err != nil {
@@ -457,6 +501,46 @@ func (p *Plane) CreateHost(tx store.Tx, now time.Time, req api.CreateHost) (stor
 		return store.Host{}, "", conflict(err, "host "+req.Name)
 	}
 	return h, token, nil
+}
+
+// DeleteHost removes a host and its token. It revokes every interface the
+// host holds, which ends the development machines behind its gateways too,
+// and deletes their records with the host's, since no host is left to learn
+// their state.
+func (p *Plane) DeleteHost(tx store.Tx, now time.Time, ref string) (store.Host, error) {
+	h, err := ResolveHost(tx, ref)
+	if err != nil {
+		return store.Host{}, err
+	}
+	ifaces, err := tx.HostInterfaces(h.ID)
+	if err != nil {
+		return store.Host{}, err
+	}
+	for _, i := range ifaces {
+		if err := p.Revoke(tx, now, i.ID); err != nil {
+			return store.Host{}, err
+		}
+	}
+	var nets []model.NetworkID
+	for _, i := range ifaces {
+		if err := tx.DeleteInterface(i.ID); err != nil {
+			return store.Host{}, err
+		}
+		nets = append(nets, i.Network)
+	}
+	// A network's revision moves with every record its compilation reads.
+	slices.Sort(nets)
+	for _, id := range slices.Compact(nets) {
+		n, err := tx.Network(id)
+		if err != nil {
+			return store.Host{}, err
+		}
+		if err := bump(tx, now, &n); err != nil {
+			return store.Host{}, err
+		}
+	}
+	tx.Touch(store.Change{Hosts: []model.HostID{h.ID}})
+	return h, tx.DeleteHost(h.ID)
 }
 
 // CreateRelay registers a relay and returns its token.
@@ -502,6 +586,27 @@ func (p *Plane) CreateRelay(tx store.Tx, now time.Time, req api.CreateRelay) (st
 		return store.Relay{}, "", conflict(err, "relay "+req.Name)
 	}
 	return r, token, nil
+}
+
+// DeleteRelay removes a relay that no network names, and its token. Edges
+// hold ports only on the relays of their network's set, so the relay serves
+// none.
+func (p *Plane) DeleteRelay(tx store.Tx, ref string) (store.Relay, error) {
+	r, err := ResolveRelay(tx, ref)
+	if err != nil {
+		return store.Relay{}, err
+	}
+	nets, err := tx.Networks()
+	if err != nil {
+		return store.Relay{}, err
+	}
+	for _, n := range nets {
+		if slices.Contains(n.Relays, r.ID) {
+			return store.Relay{}, apiErr(api.CodeConflict, "relay %s serves network %s", r.Name, n.Name)
+		}
+	}
+	tx.Touch(store.Change{Relays: []model.RelayID{r.ID}})
+	return r, tx.DeleteRelay(r.ID)
 }
 
 // Attach issues an interface and its lease to a host. The agent chose the
@@ -595,7 +700,11 @@ func (p *Plane) CreateDevice(tx store.Tx, now time.Time, netRef string, req api.
 	if gw.Kind != api.Gateway || gw.State != api.Live || gw.Network != n.ID {
 		return store.Interface{}, apiErr(api.CodeInvalid, "%s is not a live gateway of network %s", gw.ID, n.Name)
 	}
-	if h, err := tx.Host(gw.Host); err != nil || !h.Endpoint.IsValid() {
+	h, err := tx.Host(gw.Host)
+	if err != nil {
+		return store.Interface{}, notFound(err, "host "+string(gw.Host))
+	}
+	if !h.Endpoint.IsValid() {
 		return store.Interface{}, apiErr(api.CodeInvalid, "gateway %s's host has no endpoint development machines can reach", gw.ID)
 	}
 	id, err := p.id(model.InterfacePrefix)
@@ -626,7 +735,10 @@ func (p *Plane) CreateDevice(tx store.Tx, now time.Time, netRef string, req api.
 // DeviceConfig returns what a development machine's WireGuard config needs.
 func DeviceConfig(tx store.ReadTx, id model.InterfaceID) (api.DeviceConfig, error) {
 	d, err := tx.Interface(id)
-	if err != nil || d.Kind != api.Device {
+	if err != nil {
+		return api.DeviceConfig{}, notFound(err, "device "+string(id))
+	}
+	if d.Kind != api.Device {
 		return api.DeviceConfig{}, apiErr(api.CodeNotFound, "device %s not found", id)
 	}
 	n, err := tx.Network(d.Network)
@@ -661,7 +773,9 @@ func DeviceConfig(tx store.ReadTx, id model.InterfaceID) (api.DeviceConfig, erro
 
 // Release ends a host's interfaces as a planned removal: peers drain them
 // over the grace period. Releasing an interface already ended, or one the
-// host does not hold, changes nothing.
+// host does not hold, changes nothing. A development machine is not its
+// gateway host's to release: it ends by revocation, by its term, or with its
+// gateway.
 func (p *Plane) Release(tx store.Tx, now time.Time, host model.HostID, ids []model.InterfaceID) error {
 	for _, id := range ids {
 		i, err := tx.Interface(id)
@@ -670,7 +784,7 @@ func (p *Plane) Release(tx store.Tx, now time.Time, host model.HostID, ids []mod
 		} else if err != nil {
 			return err
 		}
-		if i.Host != host || i.State != api.Live {
+		if i.Host != host || i.State != api.Live || i.Kind == api.Device {
 			continue
 		}
 		i.State, i.Ended = api.Released, now
@@ -701,8 +815,8 @@ func (p *Plane) Revoke(tx store.Tx, now time.Time, id model.InterfaceID) error {
 }
 
 // end writes an interface that just left the live state, quarantines its
-// IPv4 address if asked, drops its edges once it is drained, and bumps its
-// network.
+// IPv4 address if asked, revokes the development machines behind a gateway,
+// drops its edges once it is drained, and bumps its network.
 func (p *Plane) end(tx store.Tx, now time.Time, i store.Interface, quarantine bool) error {
 	if quarantine && i.Addr4.IsValid() {
 		if err := tx.PutReleased4(store.Released4{Network: i.Network, Addr: i.Addr4, At: now}); err != nil {
@@ -712,21 +826,39 @@ func (p *Plane) end(tx store.Tx, now time.Time, i store.Interface, quarantine bo
 	if err := tx.PutInterface(i); err != nil {
 		return err
 	}
+	if i.Kind == api.Gateway {
+		if err := p.endDevices(tx, now, i); err != nil {
+			return err
+		}
+	}
 	n, err := tx.Network(i.Network)
 	if err != nil {
 		return err
 	}
 	if i.Drained {
-		// A development machine's edges are its gateway's.
-		sc := interfaceScope(i.ID)
-		if i.Kind == api.Device {
-			sc = interfaceScope(i.Gateway)
-		}
-		if err := p.reconcileEdges(tx, now, &n, sc); err != nil {
+		if err := p.reconcileEdges(tx, now, &n, edgeScope(i)); err != nil {
 			return err
 		}
 	}
 	return bump(tx, now, &n, i.Host)
+}
+
+// endDevices revokes the development machines behind a gateway that just
+// ended. A stock client holds one static peer and runs no agent, so nothing
+// can move it to another gateway.
+func (p *Plane) endDevices(tx store.Tx, now time.Time, gw store.Interface) error {
+	ifaces, err := tx.HostInterfaces(gw.Host)
+	if err != nil {
+		return err
+	}
+	for _, d := range ifaces {
+		if d.Kind == api.Device && d.Gateway == gw.ID && d.State == api.Live {
+			if err := p.Revoke(tx, now, d.ID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // Renew extends the leases of a host's live interfaces and returns their
@@ -794,7 +926,7 @@ func (p *Plane) Sweep(tx store.Tx, now time.Time) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		if err := p.reconcileEdges(tx, now, &n, interfaceScope(i.ID)); err != nil {
+		if err := p.reconcileEdges(tx, now, &n, edgeScope(i)); err != nil {
 			return 0, err
 		}
 		if err := bump(tx, now, &n, i.Host); err != nil {
@@ -835,30 +967,61 @@ func (p *Plane) Sweep(tx store.Tx, now time.Time) (int, error) {
 
 // Boot runs when a control plane starts. Leases could not be renewed while
 // it was down, so it holds off expiry for at least as long as it was down,
-// and never less than one lease term.
+// and never less than one lease term, keeping a later hold already set. It
+// returns how long it was down.
 func (p *Plane) Boot(tx store.Tx, now time.Time) (time.Duration, error) {
-	last, err := metaTime(tx, metaHeartbeat)
+	down, err := sinceHeartbeat(tx, now)
 	if err != nil {
 		return 0, err
 	}
-	down := time.Duration(0)
-	if !last.IsZero() && now.After(last) {
-		down = now.Sub(last)
-	}
-	resumes := now.Add(max(down, p.Config.LeaseTTL))
-	if err := tx.SetMeta(metaExpiryResumes, resumes.UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := holdExpiry(tx, now.Add(max(down, p.Config.LeaseTTL))); err != nil {
 		return 0, err
 	}
-	return down, p.Heartbeat(tx, now)
+	return down, setMetaTime(tx, metaHeartbeat, now)
 }
 
-// Heartbeat records that a control plane is up, so the next boot knows how
-// long the outage lasted.
-func (p *Plane) Heartbeat(tx store.Tx, now time.Time) error {
-	return tx.SetMeta(metaHeartbeat, now.UTC().Format(time.RFC3339Nano))
+// Heartbeat records that a control plane is up and reaching its store. A
+// gap since the last heartbeat means the control plane or its store was
+// down, and agents could not renew through it. A lease its agent keeps
+// renewing has at least two thirds of a term left, so any gap over a third
+// of a term, which leaves the agent less than a third to renew in, holds off
+// expiry for as long as the gap lasted, keeping a later hold already set. It
+// returns the gap it held for, zero if none.
+func (p *Plane) Heartbeat(tx store.Tx, now time.Time) (time.Duration, error) {
+	gap, err := sinceHeartbeat(tx, now)
+	if err != nil {
+		return 0, err
+	}
+	if gap <= p.Config.LeaseTTL/3 {
+		gap = 0
+	} else if err := holdExpiry(tx, now.Add(gap)); err != nil {
+		return 0, err
+	}
+	return gap, setMetaTime(tx, metaHeartbeat, now)
 }
 
-// ExpiryResumes reports when lease expiry resumes after a boot.
+// sinceHeartbeat returns how long ago the last heartbeat was recorded, zero
+// if none was.
+func sinceHeartbeat(tx store.ReadTx, now time.Time) (time.Duration, error) {
+	last, err := metaTime(tx, metaHeartbeat)
+	if err != nil || last.IsZero() || !now.After(last) {
+		return 0, err
+	}
+	return now.Sub(last), nil
+}
+
+// holdExpiry holds off lease expiry until at least until. It keeps a later
+// hold, which another replica's boot or heartbeat may have set.
+func holdExpiry(tx store.Tx, until time.Time) error {
+	resumes, err := metaTime(tx, metaExpiryResumes)
+	if err != nil || !until.After(resumes) {
+		return err
+	}
+	return setMetaTime(tx, metaExpiryResumes, until)
+}
+
+// ExpiryResumes reports when lease expiry resumes after a boot or a gap in
+// heartbeats.
 func ExpiryResumes(tx store.ReadTx) (time.Time, error) { return metaTime(tx, metaExpiryResumes) }
 
 func metaTime(tx store.ReadTx, key string) (time.Time, error) {
@@ -867,4 +1030,8 @@ func metaTime(tx store.ReadTx, key string) (time.Time, error) {
 		return time.Time{}, err
 	}
 	return time.Parse(time.RFC3339Nano, v)
+}
+
+func setMetaTime(tx store.Tx, key string, t time.Time) error {
+	return tx.SetMeta(key, t.UTC().Format(time.RFC3339Nano))
 }

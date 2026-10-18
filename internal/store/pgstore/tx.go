@@ -315,6 +315,10 @@ func (t *tx) PutHost(h store.Host) error {
 	return t.unique(written, err, "host", h.Name)
 }
 
+func (t *tx) DeleteHost(id model.HostID) error {
+	return t.check(t.q.DeleteHost(t.ctx, string(id)))
+}
+
 func (t *tx) PutRelay(r store.Relay) error {
 	addresses, err := json.Marshal(r.Addresses)
 	if err != nil {
@@ -326,6 +330,16 @@ func (t *tx) PutRelay(r store.Relay) error {
 		Revision: int64(r.Revision), Created: r.Created,
 	})
 	return t.unique(written, err, "relay", r.Name)
+}
+
+func (t *tx) DeleteRelay(id model.RelayID) error {
+	if err := t.check(t.q.DeleteRelay(t.ctx, string(id))); err != nil {
+		return err
+	}
+	if err := t.check(t.q.DeleteRelayPorts(t.ctx, string(id))); err != nil {
+		return err
+	}
+	return t.check(t.q.DeleteRelayCursors(t.ctx, string(id)))
 }
 
 // unique reports a put that wrote nothing because another record holds its

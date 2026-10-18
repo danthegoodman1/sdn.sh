@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"sdn.sh/internal/api"
+	"sdn.sh/internal/compile"
 	"sdn.sh/internal/model"
 	"sdn.sh/internal/prng"
 	"sdn.sh/internal/store"
@@ -689,7 +690,7 @@ func TestExpiryWaitsOutTheControlPlanesDowntime(t *testing.T) {
 	eachStore(t, func(t *testing.T, f *fixture) {
 		f.network(api.CreateNetwork{Name: "n"})
 		f.service("n", "a", false)
-		f.update(func(tx store.Tx) error { return f.p.Heartbeat(tx, f.now) })
+		f.update(func(tx store.Tx) error { _, err := f.p.Heartbeat(tx, f.now); return err })
 		i, _ := f.attach("h", "n", "a")
 		// The control plane goes down for ten minutes, far past the lease.
 		down := 10 * time.Minute
@@ -713,6 +714,308 @@ func TestExpiryWaitsOutTheControlPlanesDowntime(t *testing.T) {
 			return nil
 		})
 	})
+}
+
+func (f *fixture) heartbeat() time.Duration {
+	f.t.Helper()
+	var gap time.Duration
+	f.update(func(tx store.Tx) error {
+		var err error
+		gap, err = f.p.Heartbeat(tx, f.now)
+		return err
+	})
+	return gap
+}
+
+func (f *fixture) sweep(at time.Time) {
+	f.t.Helper()
+	f.update(func(tx store.Tx) error { _, err := f.p.Sweep(tx, at); return err })
+}
+
+// TestExpiryHoldsThroughAStoreOutage keeps the control plane up while its
+// store answers nothing. A healthy lease has at least two thirds of a term
+// left, so the outages here end after the lease does: one shorter than a
+// term, and one longer.
+func TestExpiryHoldsThroughAStoreOutage(t *testing.T) {
+	for _, gap := range []time.Duration{26 * time.Second, DefaultConfig().LeaseTTL + time.Minute} {
+		t.Run(gap.String(), func(t *testing.T) {
+			eachStore(t, func(t *testing.T, f *fixture) {
+				f.network(api.CreateNetwork{Name: "n"})
+				f.service("n", "a", false)
+				f.update(func(tx store.Tx) error { _, err := f.p.Boot(tx, f.now); return err })
+				i, _ := f.attach("h", "n", "a")
+				beat := func() {
+					f.now = f.now.Add(5 * time.Second)
+					if held := f.heartbeat(); held != 0 {
+						t.Fatalf("a heartbeat 5s after the last held expiry for %v", held)
+					}
+				}
+				beat()
+				beat()
+				f.update(func(tx store.Tx) error {
+					_, err := f.p.Renew(tx, f.now, f.host("h"), []model.InterfaceID{i.ID})
+					return err
+				})
+				beat()
+				// The lease ends 25s after the last heartbeat, and the store
+				// answers again later than that.
+				f.now = f.now.Add(gap)
+				if held := f.heartbeat(); held != gap {
+					t.Fatalf("the heartbeat after the outage held expiry for %v, want %v", held, gap)
+				}
+				f.sweep(f.now)
+				if st := f.interfaceState(i.ID); st != api.Live {
+					t.Fatalf("the first sweep after the outage left the lease %s", st)
+				}
+				// An agent that never renews loses its lease once the hold ends.
+				f.sweep(f.now.Add(gap + time.Second))
+				if st := f.interfaceState(i.ID); st != api.Revoked {
+					t.Fatalf("the lease is %s after the hold", st)
+				}
+			})
+		})
+	}
+}
+
+// TestASecondBootKeepsTheLongerHold boots twice after a long outage, as a
+// second replica or a crash loop would: the second boot keeps the first
+// boot's hold.
+func TestASecondBootKeepsTheLongerHold(t *testing.T) {
+	eachStore(t, func(t *testing.T, f *fixture) {
+		f.network(api.CreateNetwork{Name: "n"})
+		f.service("n", "a", false)
+		f.heartbeat()
+		i, _ := f.attach("h", "n", "a")
+		f.now = f.now.Add(10 * time.Minute)
+		f.update(func(tx store.Tx) error { _, err := f.p.Boot(tx, f.now); return err })
+		f.now = f.now.Add(5 * time.Second)
+		f.update(func(tx store.Tx) error { _, err := f.p.Boot(tx, f.now); return err })
+		f.sweep(f.now.Add(time.Minute))
+		if st := f.interfaceState(i.ID); st != api.Live {
+			t.Fatalf("a minute after the second boot the lease is %s", st)
+		}
+	})
+}
+
+// TestDeletingAHostRevokesItsInterfaces deletes a host running a workload
+// and a gateway with a development machine behind it: its peers drop both
+// at once, the machine goes with its gateway, the host's token finds
+// nothing, and later sweeps run clean.
+func TestDeletingAHostRevokesItsInterfaces(t *testing.T) {
+	eachStore(t, func(t *testing.T, f *fixture) {
+		gw, db, _ := shopWithDevices(f)
+		f.service("shop", "web", true)
+		f.rule("shop", "web", "db", model.TCP, 5432)
+		web, _ := f.attach("edge", "shop", "web")
+		laptop, err := f.device("shop", "dev", gw.ID, 24*time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := peerIDs(f.state("h2"), db.ID); !slices.Equal(got, sortedIDs(gw.ID, web.ID)) {
+			t.Fatalf("db's peers before the delete: %v", got)
+		}
+		var h store.Host
+		f.update(func(tx store.Tx) error {
+			var err error
+			h, err = f.p.DeleteHost(tx, f.now, "edge")
+			return err
+		})
+		if got := peerIDs(f.state("h2"), db.ID); len(got) != 0 {
+			t.Fatalf("db still peers with %v", got)
+		}
+		for _, id := range []model.InterfaceID{gw.ID, web.ID, laptop.ID} {
+			if st := f.interfaceState(id); st != "" {
+				t.Fatalf("%s is still on record, %s", id, st)
+			}
+		}
+		if err := f.s.View(t.Context(), func(tx store.ReadTx) error {
+			if edges := must(tx.RelayEdges(must(tx.RelayByName("r")).ID)); len(edges) != 0 {
+				t.Errorf("the relay still serves %d edges", len(edges))
+			}
+			_, err := tx.HostByToken(h.TokenHash)
+			return err
+		}); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("the deleted host's token: %v", err)
+		}
+		f.now = f.now.Add(f.p.Config.Retention + f.p.Config.PortQuarantine)
+		f.sweep(f.now)
+		err = f.tryUpdate(func(tx store.Tx) error { _, err := f.p.DeleteHost(tx, f.now, string(h.ID)); return err })
+		if code(err) != api.CodeNotFound {
+			t.Fatalf("deleting the host again: %v", err)
+		}
+	})
+}
+
+func code(err error) string {
+	var ae *api.Error
+	if errors.As(err, &ae) {
+		return ae.Code
+	}
+	return ""
+}
+
+// TestARelayIsDeletedOnlyOnceNoNetworkNamesIt refuses to delete a relay a
+// network names, and deletes it once the network is gone.
+func TestARelayIsDeletedOnlyOnceNoNetworkNamesIt(t *testing.T) {
+	eachStore(t, func(t *testing.T, f *fixture) {
+		relay := f.relay("r")
+		f.network(api.CreateNetwork{Name: "n", Relays: []model.RelayID{relay}})
+		del := func() error {
+			return f.tryUpdate(func(tx store.Tx) error { _, err := f.p.DeleteRelay(tx, "r"); return err })
+		}
+		if err := del(); code(err) != api.CodeConflict {
+			t.Fatalf("deleting a relay a network names: %v", err)
+		}
+		f.update(func(tx store.Tx) error { return f.p.DeleteNetwork(tx, "n") })
+		if err := del(); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.s.View(t.Context(), func(tx store.ReadTx) error { _, err := tx.Relay(relay); return err }); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("the deleted relay: %v", err)
+		}
+	})
+}
+
+// TestNoNewEdgeTowardADrainingInterface releases a backend, then attaches a
+// client policy connects to it: the client gets no edge and no peer for the
+// draining backend, which keeps the edge it already had.
+func TestNoNewEdgeTowardADrainingInterface(t *testing.T) {
+	eachStore(t, func(t *testing.T, f *fixture) {
+		relay := f.relay("r")
+		f.network(api.CreateNetwork{Name: "n", Relays: []model.RelayID{relay}})
+		f.service("n", "a", false)
+		f.service("n", "b", false)
+		f.rule("n", "a", "b", model.TCP, 80)
+		b, _ := f.attach("hb", "n", "b")
+		a1, _ := f.attach("h1", "n", "a")
+		f.update(func(tx store.Tx) error { return f.p.Release(tx, f.now, f.host("hb"), []model.InterfaceID{b.ID}) })
+		a2, _ := f.attach("h2", "n", "a")
+		var pairs [][2]model.InterfaceID
+		f.s.View(t.Context(), func(tx store.ReadTx) error {
+			n, err := ResolveNetwork(tx, "n")
+			if err != nil {
+				return err
+			}
+			for _, e := range must(tx.Edges(n.ID)) {
+				pairs = append(pairs, [2]model.InterfaceID{e.A, e.B})
+			}
+			return nil
+		})
+		x, y := compile.Pair(a1.ID, b.ID)
+		if len(pairs) != 1 || pairs[0] != [2]model.InterfaceID{x, y} {
+			t.Fatalf("edges %v, want only the draining backend's own", pairs)
+		}
+		if got := peerIDs(f.state("h2"), a2.ID); len(got) != 0 {
+			t.Fatalf("the new client peers with %v", got)
+		}
+	})
+}
+
+// TestDeletingANetworkMovesItsHostsOn deletes a network whose host still
+// sees its drained interface: the host's generation moves, so its poll
+// answers, and the answer drops the network.
+func TestDeletingANetworkMovesItsHostsOn(t *testing.T) {
+	eachStore(t, func(t *testing.T, f *fixture) {
+		f.network(api.CreateNetwork{Name: "n"})
+		f.service("n", "a", false)
+		i, _ := f.attach("h", "n", "a")
+		f.update(func(tx store.Tx) error { return f.p.Release(tx, f.now, f.host("h"), []model.InterfaceID{i.ID}) })
+		f.now = f.now.Add(f.p.Config.DrainGrace + time.Second)
+		f.sweep(f.now)
+		held := api.NewHostState()
+		if err := held.Apply(f.state("h")); err != nil || len(held.Networks) != 1 {
+			t.Fatalf("before the delete the host holds %d networks: %v", len(held.Networks), err)
+		}
+		f.update(func(tx store.Tx) error { return f.p.DeleteNetwork(tx, "n") })
+		var u api.StateUpdate
+		if err := f.s.View(t.Context(), func(tx store.ReadTx) error {
+			var err error
+			u, err = HostState(tx, NoCache{}, f.host("h"), held.Generation)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if u.Generation <= held.Generation {
+			t.Fatalf("the host's generation stayed at %d", u.Generation)
+		}
+		if err := held.Apply(u); err != nil || len(held.Networks) != 0 {
+			t.Fatalf("after the delete the host holds %d networks: %v", len(held.Networks), err)
+		}
+	})
+}
+
+var errBroken = errors.New("store broken")
+
+// brokenTx fails one read, as a store that loses its connection would.
+type brokenTx struct {
+	store.Tx
+	read string
+}
+
+func (t brokenTx) Rule(id model.RuleID) (store.Rule, error) {
+	if t.read == "Rule" {
+		return store.Rule{}, errBroken
+	}
+	return t.Tx.Rule(id)
+}
+
+func (t brokenTx) Interface(id model.InterfaceID) (store.Interface, error) {
+	if t.read == "Interface" {
+		return store.Interface{}, errBroken
+	}
+	return t.Tx.Interface(id)
+}
+
+func (t brokenTx) Host(id model.HostID) (store.Host, error) {
+	if t.read == "Host" {
+		return store.Host{}, errBroken
+	}
+	return t.Tx.Host(id)
+}
+
+// TestStoreErrorsComeBackAsErrors fails the read each call depends on and
+// checks the call returns the store's error rather than a verdict about
+// the records.
+func TestStoreErrorsComeBackAsErrors(t *testing.T) {
+	eachStore(t, func(t *testing.T, f *fixture) {
+		gw, _, _ := shopWithDevices(f)
+		rule := f.rule("shop", "edge", "db", model.TCP, 1)
+		laptop, err := f.device("shop", "dev", gw.ID, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := []struct {
+			name string
+			call func(tx store.Tx) error
+		}{
+			{"DeleteRule", func(tx store.Tx) error {
+				return f.p.DeleteRule(brokenTx{tx, "Rule"}, f.now, "shop", rule.ID)
+			}},
+			{"DeviceConfig", func(tx store.Tx) error {
+				_, err := DeviceConfig(brokenTx{tx, "Interface"}, laptop.ID)
+				return err
+			}},
+			{"CreateDevice", func(tx store.Tx) error {
+				_, err := f.p.CreateDevice(brokenTx{tx, "Host"}, f.now, "shop", api.CreateDevice{
+					Service: "dev", Gateway: gw.ID, PublicKey: model.Key{9}, TTL: time.Hour,
+				})
+				return err
+			}},
+		}
+		for _, c := range calls {
+			if err := f.tryUpdate(c.call); !errors.Is(err, errBroken) {
+				t.Errorf("%s over a broken store: %v", c.name, err)
+			}
+		}
+	})
+}
+
+func TestConfigNeedsAPortQuarantine(t *testing.T) {
+	c := DefaultConfig()
+	c.PortQuarantine = 0
+	if c.Validate() == nil {
+		t.Fatal("a zero port quarantine validated")
+	}
 }
 
 func TestStateUpdatesCarryOnlyChangedNetworks(t *testing.T) {

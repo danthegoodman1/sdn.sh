@@ -43,3 +43,24 @@ func TestAnUpdateMustCarryWhatItLists(t *testing.T) {
 		t.Fatal("accepted an update listing a network it never carried")
 	}
 }
+
+// TestAnUpdateThatFailsACheckChangesNothing applies an update whose first
+// network is sound and whose second carries no identifier: the held state
+// keeps both networks and its generation as they were.
+func TestAnUpdateThatFailsACheckChangesNothing(t *testing.T) {
+	h := NewHostState()
+	if err := h.Apply(StateUpdate{Generation: 10,
+		Present:  []NetworkRef{{Network: "net-a", Revision: 10}, {Network: "net-b", Revision: 10}},
+		Networks: []NetworkState{{Network: "net-a", Revision: 10}, {Network: "net-b", Revision: 10}}}); err != nil {
+		t.Fatal(err)
+	}
+	bad := StateUpdate{Generation: 20,
+		Present:  []NetworkRef{{Network: "net-a", Revision: 20}, {Network: "net-b", Revision: 20}},
+		Networks: []NetworkState{{Network: "net-a", Revision: 20}, {}}}
+	if err := h.Apply(bad); err == nil {
+		t.Fatal("accepted a network with no identifier")
+	}
+	if h.Generation != 10 || len(h.Networks) != 2 || h.Networks["net-a"].Revision != 10 {
+		t.Fatalf("a refused update changed the state: generation %d, net-a %+v", h.Generation, h.Networks["net-a"])
+	}
+}

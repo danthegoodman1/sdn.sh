@@ -36,6 +36,11 @@ func Connected(i store.Interface) bool {
 	return i.State == api.Live || i.State == api.Released && !i.Drained
 }
 
+// Built reports whether an agent builds the interface on its host. A
+// development machine's record names its gateway's host, where the
+// gateway's peer table carries it, so that host builds nothing for it.
+func Built(i store.Interface) bool { return i.Kind != api.Device }
+
 // Adjacency says which pairs of services policy connects, in either
 // direction, since a WireGuard session needs a peer at both ends.
 type Adjacency map[[2]model.ServiceID]bool
@@ -66,11 +71,20 @@ type Links struct {
 	devices map[model.InterfaceID][]store.Interface
 }
 
-// NewLinks builds the links among a network's interfaces.
+// NewLinks builds the links among a network's interfaces. A development
+// machine counts only behind the live gateway it names on its own host, so
+// an interface that takes over the identifier on another host fronts
+// nothing.
 func NewLinks(adj Adjacency, ifaces []store.Interface) Links {
+	gateways := map[model.InterfaceID]model.HostID{}
+	for _, i := range ifaces {
+		if i.Kind == api.Gateway && i.State == api.Live {
+			gateways[i.ID] = i.Host
+		}
+	}
 	l := Links{adj: adj, devices: map[model.InterfaceID][]store.Interface{}}
 	for _, i := range ifaces {
-		if i.Kind == api.Device && i.State == api.Live {
+		if host, ok := gateways[i.Gateway]; ok && i.Kind == api.Device && i.State == api.Live && host == i.Host {
 			l.devices[i.Gateway] = append(l.devices[i.Gateway], i)
 		}
 	}
@@ -165,7 +179,7 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 	out := map[model.HostID]api.NetworkState{}
 	reached := map[model.HostID]map[model.ServiceID]bool{}
 	for _, x := range s.Interfaces {
-		if x.Kind == api.Device {
+		if !Built(x) {
 			continue
 		}
 		ns, ok := out[x.Host]

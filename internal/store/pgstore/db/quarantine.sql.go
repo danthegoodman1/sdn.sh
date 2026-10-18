@@ -22,6 +22,24 @@ func (q *Queries) Bump(ctx context.Context) (int64, error) {
 	return seq, err
 }
 
+const deleteRelayCursors = `-- name: DeleteRelayCursors :exec
+DELETE FROM port_cursors WHERE relay = $1
+`
+
+func (q *Queries) DeleteRelayCursors(ctx context.Context, relay string) error {
+	_, err := q.db.Exec(ctx, deleteRelayCursors, relay)
+	return err
+}
+
+const deleteRelayPorts = `-- name: DeleteRelayPorts :exec
+DELETE FROM released_ports WHERE relay = $1
+`
+
+func (q *Queries) DeleteRelayPorts(ctx context.Context, relay string) error {
+	_, err := q.db.Exec(ctx, deleteRelayPorts, relay)
+	return err
+}
+
 const deleteReleased4 = `-- name: DeleteReleased4 :exec
 DELETE FROM released4 WHERE network = $1 AND addr = $2
 `

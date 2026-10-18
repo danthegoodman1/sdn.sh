@@ -3,6 +3,7 @@
 package cp
 
 import (
+	"fmt"
 	"slices"
 
 	"sdn.sh/internal/api"
@@ -69,8 +70,8 @@ func CompileNetwork(tx store.ReadTx, cache Cache, n store.Network) (Compiled, er
 }
 
 // HostGeneration returns a host's generation: the newest revision among the
-// host's own record and the networks it holds interfaces in. Every change to
-// what the host should run raises one of them.
+// host's own record and the networks it builds interfaces in. Every change
+// to what the host should run raises one of them.
 func HostGeneration(tx store.ReadTx, host model.HostID) (uint64, []store.Network, error) {
 	h, err := tx.Host(host)
 	if err != nil {
@@ -82,7 +83,9 @@ func HostGeneration(tx store.ReadTx, host model.HostID) (uint64, []store.Network
 	}
 	var ids []model.NetworkID
 	for _, i := range ifaces {
-		ids = append(ids, i.Network)
+		if compile.Built(i) {
+			ids = append(ids, i.Network)
+		}
 	}
 	slices.Sort(ids)
 	ids = slices.Compact(ids)
@@ -116,7 +119,11 @@ func HostState(tx store.ReadTx, cache Cache, host model.HostID, since uint64) (a
 		if err != nil {
 			return api.StateUpdate{}, err
 		}
-		u.Networks = append(u.Networks, c[host])
+		ns, ok := c[host]
+		if !ok {
+			return api.StateUpdate{}, fmt.Errorf("network %s compiled nothing for host %s", n.ID, host)
+		}
+		u.Networks = append(u.Networks, ns)
 	}
 	return u, nil
 }
@@ -132,7 +139,11 @@ func NetworkStateFor(tx store.ReadTx, cache Cache, net model.NetworkID, host mod
 	if err != nil {
 		return api.NetworkState{}, err
 	}
-	return c[host], nil
+	ns, ok := c[host]
+	if !ok {
+		return api.NetworkState{}, apiErr(api.CodeNotFound, "host %s builds nothing in network %s", host, n.Name)
+	}
+	return ns, nil
 }
 
 // RelayState returns a relay's port table.

@@ -215,6 +215,22 @@ func (s *Server) createHost(r *http.Request, _ principal) (any, error) {
 	return api.Credentials{ID: string(h.ID), Token: token}, nil
 }
 
+// deleteHost revokes a host's interfaces and deletes it. This replica stops
+// trusting its token at once, and every other within TokenTTL.
+func (s *Server) deleteHost(r *http.Request, _ principal) (any, error) {
+	var h store.Host
+	if _, err := s.update(r.Context(), "delete_host", func(tx store.Tx) error {
+		var err error
+		h, err = s.plane.DeleteHost(tx, s.now(), r.PathValue("host"))
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	s.tokens.Delete(h.TokenHash)
+	s.log.Info().Str("host", string(h.ID)).Str("name", h.Name).Msg("host deleted")
+	return nil, nil
+}
+
 func (s *Server) createRelay(r *http.Request, _ principal) (any, error) {
 	req, err := decode[api.CreateRelay](r)
 	if err != nil {
@@ -246,6 +262,22 @@ func (s *Server) listRelays(r *http.Request, _ principal) (any, error) {
 		return err
 	})
 	return out, err
+}
+
+// deleteRelay deletes a relay no network names, and stops trusting its
+// token as deleteHost does.
+func (s *Server) deleteRelay(r *http.Request, _ principal) (any, error) {
+	var rl store.Relay
+	if _, err := s.update(r.Context(), "delete_relay", func(tx store.Tx) error {
+		var err error
+		rl, err = s.plane.DeleteRelay(tx, r.PathValue("relay"))
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	s.tokens.Delete(rl.TokenHash)
+	s.log.Info().Str("relay", string(rl.ID)).Str("name", rl.Name).Msg("relay deleted")
+	return nil, nil
 }
 
 // The agents' API.

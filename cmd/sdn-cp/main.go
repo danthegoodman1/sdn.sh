@@ -47,6 +47,7 @@ func run() error {
 	flag.DurationVar(&cfg.Plane.Retention, "retention", cfg.Plane.Retention, "how long an ended interface stays visible to its host")
 	flag.IntVar(&cfg.Plane.MTU, "mtu", cfg.Plane.MTU, "overlay MTU for networks that name none")
 	flag.DurationVar(&cfg.PollTimeout, "poll-timeout", cfg.PollTimeout, "how long a long poll parks")
+	flag.DurationVar(&cfg.CensusEvery, "census-every", cfg.CensusEvery, "how often to count interfaces, IPv4 quarantine and relay ports for metrics")
 	flag.Parse()
 
 	log, err := telemetry.NewLogger("cp", telemetry.LogConfig{Level: *logLevel, Format: *logFormat})

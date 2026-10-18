@@ -10,6 +10,24 @@ import (
 	"time"
 )
 
+const deleteHost = `-- name: DeleteHost :exec
+DELETE FROM hosts WHERE id = $1
+`
+
+func (q *Queries) DeleteHost(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, deleteHost, id)
+	return err
+}
+
+const deleteRelay = `-- name: DeleteRelay :exec
+DELETE FROM relays WHERE id = $1
+`
+
+func (q *Queries) DeleteRelay(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, deleteRelay, id)
+	return err
+}
+
 const getHost = `-- name: GetHost :one
 SELECT id, name, token_hash, endpoint, revision, created FROM hosts WHERE id = $1
 `

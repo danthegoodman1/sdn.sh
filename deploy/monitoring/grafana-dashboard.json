@@ -505,6 +505,150 @@
       ]
     },
     {
+      "type": "timeseries",
+      "title": "Interfaces by lease state",
+      "description": "Interface records by lease state at the control plane's last census. Released and revoked records stay until their retention ends.",
+      "id": 40,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 25
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (state) (sdn_cp_interfaces)",
+          "legendFormat": "{{state}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "IPv4 addresses in quarantine",
+      "description": "Released IPv4 addresses waiting out their quarantine, across every network, at the last census.",
+      "id": 41,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 25
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max(sdn_cp_ipv4_quarantined)",
+          "legendFormat": "quarantined",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Relay port pool",
+      "description": "Each relay's ports: every port its range offers across its addresses, the ports edges hold, and the released ports still in quarantine.",
+      "id": 42,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 25
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (relay, pool) (sdn_cp_relay_ports)",
+          "legendFormat": "{{relay}} {{pool}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "Agents",
       "id": 11,
@@ -513,7 +657,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 25
+        "y": 33
       },
       "panels": []
     },
@@ -530,7 +674,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 26
+        "y": 34
       },
       "fieldConfig": {
         "defaults": {
@@ -578,7 +722,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 26
+        "y": 34
       },
       "fieldConfig": {
         "defaults": {
@@ -626,7 +770,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 26
+        "y": 34
       },
       "fieldConfig": {
         "defaults": {
@@ -674,7 +818,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 34
+        "y": 42
       },
       "fieldConfig": {
         "defaults": {
@@ -722,7 +866,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 34
+        "y": 42
       },
       "fieldConfig": {
         "defaults": {
@@ -779,7 +923,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 34
+        "y": 42
       },
       "fieldConfig": {
         "defaults": {
@@ -827,7 +971,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 42
+        "y": 50
       },
       "fieldConfig": {
         "defaults": {
@@ -884,7 +1028,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 42
+        "y": 50
       },
       "fieldConfig": {
         "defaults": {
@@ -932,7 +1076,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 42
+        "y": 50
       },
       "fieldConfig": {
         "defaults": {
@@ -980,7 +1124,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 50
+        "y": 58
       },
       "fieldConfig": {
         "defaults": {
@@ -1037,7 +1181,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 50
+        "y": 58
       },
       "fieldConfig": {
         "defaults": {
@@ -1085,7 +1229,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 50
+        "y": 58
       },
       "fieldConfig": {
         "defaults": {
@@ -1133,7 +1277,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 58
+        "y": 66
       },
       "fieldConfig": {
         "defaults": {
@@ -1181,7 +1325,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 58
+        "y": 66
       },
       "fieldConfig": {
         "defaults": {
@@ -1234,7 +1378,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 66
+        "y": 74
       },
       "panels": []
     },
@@ -1251,7 +1395,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 67
+        "y": 75
       },
       "fieldConfig": {
         "defaults": {
@@ -1299,7 +1443,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 67
+        "y": 75
       },
       "fieldConfig": {
         "defaults": {
@@ -1347,7 +1491,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 67
+        "y": 75
       },
       "fieldConfig": {
         "defaults": {
@@ -1404,7 +1548,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 75
+        "y": 83
       },
       "fieldConfig": {
         "defaults": {
@@ -1452,7 +1596,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 75
+        "y": 83
       },
       "fieldConfig": {
         "defaults": {
@@ -1500,7 +1644,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 75
+        "y": 83
       },
       "fieldConfig": {
         "defaults": {
@@ -1557,7 +1701,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 83
+        "y": 91
       },
       "fieldConfig": {
         "defaults": {
@@ -1605,7 +1749,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 83
+        "y": 91
       },
       "fieldConfig": {
         "defaults": {
@@ -1662,7 +1806,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 83
+        "y": 91
       },
       "fieldConfig": {
         "defaults": {
@@ -1706,7 +1850,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 91
+        "y": 99
       },
       "panels": []
     },
@@ -1723,7 +1867,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 92
+        "y": 100
       },
       "fieldConfig": {
         "defaults": {
@@ -1771,7 +1915,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 92
+        "y": 100
       },
       "fieldConfig": {
         "defaults": {
@@ -1819,7 +1963,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 92
+        "y": 100
       },
       "fieldConfig": {
         "defaults": {

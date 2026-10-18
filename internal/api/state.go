@@ -246,7 +246,8 @@ func NewHostState() *HostState {
 // held unless the held one is newer, which happens when an attach delivered
 // it first; a network the update leaves out of Present is dropped, unless
 // the held one is newer than the whole update, which then predates it. An
-// update older than the generation held changes nothing.
+// update older than the generation held changes nothing, and so does one
+// that fails a check.
 func (h *HostState) Apply(u StateUpdate) error {
 	if u.Generation < h.Generation {
 		// An answer that arrived out of order: everything it says, a newer
@@ -257,34 +258,39 @@ func (h *HostState) Apply(u StateUpdate) error {
 	for _, ref := range u.Present {
 		present[ref.Network] = ref.Revision
 	}
+	// The merge builds a new map, which replaces the held one only once
+	// every check passes.
+	next := make(map[model.NetworkID]*NetworkState, len(h.Networks))
+	maps.Copy(next, h.Networks)
 	for i := range u.Networks {
 		n := u.Networks[i]
 		rev, ok := present[n.Network]
 		if !ok || rev != n.Revision {
 			return fmt.Errorf("update carries %s at %d but lists it at %d", n.Network, n.Revision, rev)
 		}
-		if held, ok := h.Networks[n.Network]; ok && held.Revision > n.Revision {
+		if held, ok := next[n.Network]; ok && held.Revision > n.Revision {
 			continue
 		}
-		h.Networks[n.Network] = &n
+		next[n.Network] = &n
 	}
-	for _, id := range h.NetworkIDs() {
+	for _, id := range slices.Sorted(maps.Keys(next)) {
 		rev, ok := present[id]
 		if !ok {
-			if h.Networks[id].Revision <= u.Generation {
-				delete(h.Networks, id)
+			if next[id].Revision <= u.Generation {
+				delete(next, id)
 			}
 			continue
 		}
-		if h.Networks[id].Revision < rev {
-			return fmt.Errorf("update lists %s at %d but carries nothing newer than %d", id, rev, h.Networks[id].Revision)
+		if next[id].Revision < rev {
+			return fmt.Errorf("update lists %s at %d but carries nothing newer than %d", id, rev, next[id].Revision)
 		}
 	}
 	for _, ref := range u.Present {
-		if _, ok := h.Networks[ref.Network]; !ok {
+		if _, ok := next[ref.Network]; !ok {
 			return fmt.Errorf("update lists %s at %d but this host holds nothing for it", ref.Network, ref.Revision)
 		}
 	}
+	h.Networks = next
 	if u.Generation > h.Generation {
 		h.Generation = u.Generation
 	}

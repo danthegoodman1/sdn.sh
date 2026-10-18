@@ -115,7 +115,7 @@ func (c *cpNode) start() {
 		if !c.up || c.inc != inc {
 			return
 		}
-		c.update(func(tx store.Tx) error { return c.plane.Heartbeat(tx, c.w.now()) })
+		c.update(func(tx store.Tx) error { _, err := c.plane.Heartbeat(tx, c.w.now()); return err })
 		for {
 			var n int
 			if _, err := c.update(func(tx store.Tx) error {

@@ -583,6 +583,11 @@ func testHosts(t *testing.T, s store.Store) {
 	same(t, "replaced Host", read(t, s, func(tx store.ReadTx) (store.Host, error) { return tx.HostByToken(key(11)) }), full)
 	missing(t, s, "HostByToken of the old token", func(tx store.ReadTx) (store.Host, error) { return tx.HostByToken(key(7)) })
 	missing(t, s, "HostByName of the old name", func(tx store.ReadTx) (store.Host, error) { return tx.HostByName("full") })
+	update(t, s, func(tx store.Tx) error { return errors.Join(tx.DeleteHost("host-full"), tx.DeleteHost("host-none")) })
+	missing(t, s, "deleted Host", func(tx store.ReadTx) (store.Host, error) { return tx.Host("host-full") })
+	missing(t, s, "deleted HostByName", func(tx store.ReadTx) (store.Host, error) { return tx.HostByName("renamed") })
+	missing(t, s, "deleted HostByToken", func(tx store.ReadTx) (store.Host, error) { return tx.HostByToken(key(11)) })
+	same(t, "the other Host", read(t, s, func(tx store.ReadTx) (store.Host, error) { return tx.HostByToken(bare.TokenHash) }), bare)
 }
 
 func testRelays(t *testing.T, s store.Store) {
@@ -601,6 +606,35 @@ func testRelays(t *testing.T, s store.Store) {
 	put(t, s, putRelay, full)
 	same(t, "replaced Relay", read(t, s, func(tx store.ReadTx) (store.Relay, error) { return tx.RelayByToken(key(12)) }), full)
 	missing(t, s, "RelayByToken of the old token", func(tx store.ReadTx) (store.Relay, error) { return tx.RelayByToken(key(9)) })
+
+	// A deleted relay takes its port cursors and released ports with it,
+	// and leaves the other relay's.
+	kept := store.ReleasedPort{Relay: "relay-bare", Addr: addr("10.0.0.9"), Port: 20001, At: at(1)}
+	update(t, s, func(tx store.Tx) error {
+		return errors.Join(
+			tx.SetPortCursor("relay-full", addr("10.0.0.9"), 20005), tx.SetPortCursor("relay-full", addr("2001:db8::9"), 20007),
+			tx.SetPortCursor("relay-bare", addr("10.0.0.9"), 20002),
+			tx.PutReleasedPort(store.ReleasedPort{Relay: "relay-full", Addr: addr("10.0.0.9"), Port: 20001, At: at(1)}),
+			tx.PutReleasedPort(store.ReleasedPort{Relay: "relay-full", Addr: addr("2001:db8::9"), Port: 20003, At: at(1)}),
+			tx.PutReleasedPort(kept),
+		)
+	})
+	update(t, s, func(tx store.Tx) error {
+		return errors.Join(tx.DeleteRelay("relay-full"), tx.DeleteRelay("relay-none"))
+	})
+	missing(t, s, "deleted Relay", func(tx store.ReadTx) (store.Relay, error) { return tx.Relay("relay-full") })
+	missing(t, s, "deleted RelayByToken", func(tx store.ReadTx) (store.Relay, error) { return tx.RelayByToken(key(12)) })
+	same(t, "Relays after a delete", read(t, s, store.ReadTx.Relays), []store.Relay{bare})
+	for _, a := range []string{"10.0.0.9", "2001:db8::9"} {
+		same(t, "deleted relay's PortCursor on "+a, read(t, s, func(tx store.ReadTx) (uint16, error) { return tx.PortCursor("relay-full", addr(a)) }), uint16(0))
+		same(t, "deleted relay's ReleasedPorts on "+a, read(t, s, func(tx store.ReadTx) ([]store.ReleasedPort, error) {
+			return tx.ReleasedPorts("relay-full", addr(a), at(100), 0)
+		}), []store.ReleasedPort(nil))
+	}
+	same(t, "the other relay's PortCursor", read(t, s, func(tx store.ReadTx) (uint16, error) { return tx.PortCursor("relay-bare", addr("10.0.0.9")) }), uint16(20002))
+	same(t, "the other relay's ReleasedPorts", read(t, s, func(tx store.ReadTx) ([]store.ReleasedPort, error) {
+		return tx.ReleasedPorts("relay-bare", addr("10.0.0.9"), at(100), 0)
+	}), []store.ReleasedPort{kept})
 }
 
 func testReleased4(t *testing.T, s store.Store) {
@@ -622,6 +656,7 @@ func testReleased4(t *testing.T, s store.Store) {
 		r("net-a", "10.0.0.7", time.Time{}), r("net-a", "10.0.0.3", at(10)), r("net-a", "10.0.0.4", at(20)), r("net-a", "10.0.0.5", at(30)),
 	})
 	same(t, "Released4 up to 2", released(2), []store.Released4{r("net-a", "10.0.0.7", time.Time{}), r("net-a", "10.0.0.3", at(10))})
+	same(t, "Released4 with no limit", released(0), released(10))
 	put(t, s, putReleased4, r("net-a", "10.0.0.3", at(50)))
 	update(t, s, func(tx store.Tx) error {
 		if err := tx.DeleteReleased4("net-a", addr("10.0.0.4")); err != nil {
@@ -661,6 +696,7 @@ func testReleasedPorts(t *testing.T, s store.Store) {
 		p("relay-a", "10.0.0.1", 20004, time.Time{}), p("relay-a", "10.0.0.1", 20003, at(10)), p("relay-a", "10.0.0.1", 20005, at(30)),
 	})
 	same(t, "ReleasedPorts up to 1", released(1), []store.ReleasedPort{p("relay-a", "10.0.0.1", 20004, time.Time{})})
+	same(t, "ReleasedPorts with no limit", released(0), released(10))
 	same(t, "ReleasedPorts on an IPv6 address", read(t, s, func(tx store.ReadTx) ([]store.ReleasedPort, error) {
 		return tx.ReleasedPorts("relay-a", addr("2001:db8::1"), at(100), 10)
 	}), []store.ReleasedPort{p("relay-a", "2001:db8::1", 20007, at(2))})
@@ -918,11 +954,12 @@ func must[V any](v V, err error) any {
 func testFailedUpdateWritesNothing(t *testing.T, s store.Store) {
 	base := bareNetwork("net-a", "a")
 	svc := bareService("svc-a", "net-a", "web")
+	h, rl := bareHost("host-b", "kept"), bareRelay("relay-b", "kept")
 	update(t, s, func(tx store.Tx) error {
 		if _, err := tx.Bump(); err != nil {
 			return err
 		}
-		return errors.Join(tx.PutNetwork(base), tx.PutService(svc))
+		return errors.Join(tx.PutNetwork(base), tx.PutService(svc), tx.PutHost(h), tx.PutRelay(rl))
 	})
 	ch, err := s.Update(t.Context(), func(tx store.Tx) error {
 		if _, err := tx.Bump(); err != nil {
@@ -933,7 +970,7 @@ func testFailedUpdateWritesNothing(t *testing.T, s store.Store) {
 			tx.PutNetwork(fullNetwork("net-a", "a")), tx.PutNetwork(bareNetwork("net-b", "b")),
 			tx.DeleteService("svc-a"), tx.PutInterface(bareInterface("if-a")),
 			tx.PutEdge(bareEdge("net-a", "if-a", "if-b")), tx.PutHost(bareHost("host-a", "h")),
-			tx.PutRelay(bareRelay("relay-a", "r")),
+			tx.PutRelay(bareRelay("relay-a", "r")), tx.DeleteHost("host-b"), tx.DeleteRelay("relay-b"),
 			tx.PutReleased4(store.Released4{Network: "net-a", Addr: addr("10.0.0.1"), At: at(1)}),
 			tx.PutReleasedPort(store.ReleasedPort{Relay: "relay-a", Addr: addr("10.0.0.1"), Port: 1, At: at(1)}),
 			tx.SetPortCursor("relay-a", addr("10.0.0.1"), 2), tx.SetMeta("k", "v"),
@@ -953,7 +990,8 @@ func testFailedUpdateWritesNothing(t *testing.T, s store.Store) {
 	same(t, "Interfaces", read(t, s, func(tx store.ReadTx) ([]store.Interface, error) { return tx.Interfaces("net-a") }), []store.Interface(nil))
 	same(t, "Edges", edges(t, s, "net-a"), []store.Edge(nil))
 	missing(t, s, "Host", func(tx store.ReadTx) (store.Host, error) { return tx.Host("host-a") })
-	same(t, "Relays", read(t, s, store.ReadTx.Relays), []store.Relay(nil))
+	same(t, "deleted Host", read(t, s, func(tx store.ReadTx) (store.Host, error) { return tx.Host("host-b") }), h)
+	same(t, "Relays", read(t, s, store.ReadTx.Relays), []store.Relay{rl})
 	same(t, "Released4", read(t, s, func(tx store.ReadTx) ([]store.Released4, error) { return tx.Released4("net-a", at(2), 10) }), []store.Released4(nil))
 	same(t, "ReleasedPorts", read(t, s, func(tx store.ReadTx) ([]store.ReleasedPort, error) {
 		return tx.ReleasedPorts("relay-a", addr("10.0.0.1"), at(2), 10)

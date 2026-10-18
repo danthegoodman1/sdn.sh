@@ -185,12 +185,23 @@ func (c *Client) CreateHost(ctx context.Context, req api.CreateHost) (api.Creden
 	return call[api.Credentials](c, ctx, "POST", "/v1/hosts", req)
 }
 
+// DeleteHost revokes a host's interfaces and deletes the host, by name or
+// identifier.
+func (c *Client) DeleteHost(ctx context.Context, ref string) error {
+	return c.do(ctx, "DELETE", "/v1/hosts/"+esc(ref), nil, nil, c.timeout)
+}
+
 func (c *Client) CreateRelay(ctx context.Context, req api.CreateRelay) (api.Credentials, error) {
 	return call[api.Credentials](c, ctx, "POST", "/v1/relays", req)
 }
 
 func (c *Client) Relays(ctx context.Context) ([]api.RelayInfo, error) {
 	return call[[]api.RelayInfo](c, ctx, "GET", "/v1/relays", nil)
+}
+
+// DeleteRelay deletes a relay no network names, by name or identifier.
+func (c *Client) DeleteRelay(ctx context.Context, ref string) error {
+	return c.do(ctx, "DELETE", "/v1/relays/"+esc(ref), nil, nil, c.timeout)
 }
 
 // An agent's API.

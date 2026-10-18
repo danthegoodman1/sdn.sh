@@ -15,6 +15,9 @@ ON CONFLICT (id) DO UPDATE SET
 	name = excluded.name, token_hash = excluded.token_hash, endpoint = excluded.endpoint,
 	revision = excluded.revision, created = excluded.created;
 
+-- name: DeleteHost :exec
+DELETE FROM hosts WHERE id = $1;
+
 -- name: GetRelay :one
 SELECT * FROM relays WHERE id = $1;
 
@@ -35,3 +38,6 @@ ON CONFLICT (id) DO UPDATE SET
 	name = excluded.name, token_hash = excluded.token_hash, addresses = excluded.addresses,
 	port_lo = excluded.port_lo, port_hi = excluded.port_hi, probe_port = excluded.probe_port,
 	revision = excluded.revision, created = excluded.created;
+
+-- name: DeleteRelay :exec
+DELETE FROM relays WHERE id = $1;

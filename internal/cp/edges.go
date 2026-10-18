@@ -23,6 +23,15 @@ func interfaceScope(id model.InterfaceID) scope { return scope{iface: id} }
 
 func servicesScope(a, b model.ServiceID) scope { return scope{services: [2]model.ServiceID{a, b}} }
 
+// edgeScope covers the edges an interface's end changes. A development
+// machine's edges are its gateway's.
+func edgeScope(i store.Interface) scope {
+	if i.Kind == api.Device {
+		return interfaceScope(i.Gateway)
+	}
+	return interfaceScope(i.ID)
+}
+
 // networkScope covers every pair, for a change whose reach a gateway's
 // development machines widen.
 func networkScope() scope { return scope{all: true} }
@@ -100,7 +109,7 @@ func (p *Plane) reconcileEdges(tx store.Tx, now time.Time, n *store.Network, sc 
 	// A development machine reaches the network through its gateway, so
 	// edges join the interfaces agents run.
 	connected := slices.DeleteFunc(slices.Clone(ifaces), func(i store.Interface) bool {
-		return !compile.Connected(i) || i.Kind == api.Device
+		return !compile.Connected(i) || !compile.Built(i)
 	})
 	var wanted [][2]model.InterfaceID
 	want := map[[2]model.InterfaceID]bool{}
@@ -167,7 +176,10 @@ func (p *Plane) reconcileEdges(tx store.Tx, now time.Time, n *store.Network, sc 
 		relays = append(relays, r)
 	}
 	for _, key := range wanted {
-		if have[key] {
+		// A draining interface keeps its edges until it drains and gains
+		// none: its own host has stopped configuring it, so a new edge
+		// would only spend relay ports.
+		if have[key] || byID[key[0]].State != api.Live || byID[key[1]].State != api.Live {
 			continue
 		}
 		e := store.Edge{Network: n.ID, A: key[0], B: key[1], Created: now}

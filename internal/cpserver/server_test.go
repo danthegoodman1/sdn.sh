@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http/httptest"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ type env struct {
 	url   string
 	admin *cpclient.Client
 	ctx   context.Context
+	reg   *prometheus.Registry
 }
 
 func testConfig() Config {
@@ -52,7 +54,8 @@ func eachStore(t *testing.T, fn func(t *testing.T, open func() store.Store)) {
 
 func newEnv(t *testing.T, st store.Store, cfg Config) *env {
 	t.Helper()
-	srv, err := New(cfg, st, zerolog.Nop(), prometheus.NewRegistry())
+	reg := prometheus.NewRegistry()
+	srv, err := New(cfg, st, zerolog.Nop(), reg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +64,7 @@ func newEnv(t *testing.T, st store.Store, cfg Config) *env {
 	go srv.Run(ctx)
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
-	e := &env{t: t, srv: srv, url: hs.URL, ctx: ctx}
+	e := &env{t: t, srv: srv, url: hs.URL, ctx: ctx, reg: reg}
 	e.admin = e.client(adminToken)
 	return e
 }
@@ -323,5 +326,132 @@ func TestAReplicaWakesForAnotherReplicasCommit(t *testing.T) {
 	must(h2b.Attach(b.ctx, attachReq(t, r, "prod", "web", 40002)))
 	if d := <-done; d > time.Second {
 		t.Fatalf("the poll on replica a answered after %v, at its timeout", d)
+	}
+}
+
+// flakyViews fails every read-only transaction while fail is set, as a
+// store that has gone away would.
+type flakyViews struct {
+	store.Store
+	fail atomic.Bool
+}
+
+func (s *flakyViews) View(ctx context.Context, fn func(store.ReadTx) error) error {
+	if s.fail.Load() {
+		return errors.New("store unreachable")
+	}
+	return s.Store.View(ctx, fn)
+}
+
+// TestATokenTheStoreCannotCheckIsUnavailable presents a host's token while
+// the store cannot look it up: the call fails as one to retry, and an
+// unknown token still fails as one to give up on.
+func TestATokenTheStoreCannotCheckIsUnavailable(t *testing.T) {
+	eachStore(t, func(t *testing.T, open func() store.Store) {
+		st := &flakyViews{Store: open()}
+		e := newEnv(t, st, testConfig())
+		agent := e.client(must(e.admin.CreateHost(e.ctx, api.CreateHost{Name: "h1"})).Token)
+		st.fail.Store(true)
+		if _, err := agent.Renew(e.ctx, nil); code(err) != api.CodeUnavailable || !errors.Is(err, cpclient.ErrUnavailable) {
+			t.Fatalf("a token lookup the store failed: %v", err)
+		}
+		st.fail.Store(false)
+		if _, err := agent.Renew(e.ctx, nil); err != nil {
+			t.Fatalf("once the store answers: %v", err)
+		}
+		if _, err := e.client("unknown-token").Renew(e.ctx, nil); code(err) != api.CodeForbidden {
+			t.Fatalf("an unknown token: %v", err)
+		}
+	})
+}
+
+// TestADeletedHostsTokenStopsWorking deletes a host through one of two
+// replicas that both trust its token: the deleting replica refuses it at
+// once, and the other once its TokenTTL passes.
+func TestADeletedHostsTokenStopsWorking(t *testing.T) {
+	eachStore(t, func(t *testing.T, open func() store.Store) {
+		st := open()
+		cfg := testConfig()
+		cfg.TokenTTL = 300 * time.Millisecond
+		a, b := newEnv(t, st, cfg), newEnv(t, st, cfg)
+		creds := must(a.admin.CreateHost(a.ctx, api.CreateHost{Name: "h1"}))
+		ha, hb := a.client(creds.Token), b.client(creds.Token)
+		must(ha.Renew(a.ctx, nil))
+		must(hb.Renew(b.ctx, nil))
+		if err := a.admin.DeleteHost(a.ctx, "h1"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ha.Renew(a.ctx, nil); code(err) != api.CodeForbidden {
+			t.Fatalf("the deleting replica: %v", err)
+		}
+		time.Sleep(cfg.TokenTTL + 100*time.Millisecond)
+		if _, err := hb.Renew(b.ctx, nil); code(err) != api.CodeForbidden {
+			t.Fatalf("the other replica past its TokenTTL: %v", err)
+		}
+		if err := a.admin.DeleteHost(a.ctx, "h1"); code(err) != api.CodeNotFound {
+			t.Fatalf("deleting the host again: %v", err)
+		}
+	})
+}
+
+// gauge reads one gauge series from a registry, and reports whether it is
+// there.
+func gauge(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) (float64, bool) {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		if f.GetName() != name {
+			continue
+		}
+	next:
+		for _, m := range f.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if v, ok := labels[l.GetName()]; ok && v != l.GetValue() {
+					continue next
+				}
+			}
+			return m.GetGauge().GetValue(), true
+		}
+	}
+	return 0, false
+}
+
+// TestTheCensusExportsPoolGauges registers a relay and waits for the census
+// to export its port pool, then deletes it and waits for its series to go.
+func TestTheCensusExportsPoolGauges(t *testing.T) {
+	eachStore(t, func(t *testing.T, open func() store.Store) {
+		cfg := testConfig()
+		cfg.CensusEvery = 50 * time.Millisecond
+		e := newEnv(t, open(), cfg)
+		must(e.admin.CreateRelay(e.ctx, api.CreateRelay{
+			Name:      "r1",
+			Addresses: []api.RelayAddress{{Local: netip.MustParseAddr("10.0.0.1"), Advertised: netip.MustParseAddr("198.51.100.1")}},
+			PortLo:    20000, PortHi: 20099, ProbePort: 19999,
+		}))
+		capacity := map[string]string{"relay": "r1", "pool": "capacity"}
+		waitFor(t, func() bool { v, ok := gauge(t, e.reg, "sdn_cp_relay_ports", capacity); return ok && v == 100 })
+		if v, ok := gauge(t, e.reg, "sdn_cp_interfaces", map[string]string{"state": "live"}); !ok || v != 0 {
+			t.Fatalf("live interfaces: %v %v", v, ok)
+		}
+		if _, ok := gauge(t, e.reg, "sdn_cp_ipv4_quarantined", nil); !ok {
+			t.Fatal("no IPv4 quarantine gauge")
+		}
+		if err := e.admin.DeleteRelay(e.ctx, "r1"); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, func() bool { _, ok := gauge(t, e.reg, "sdn_cp_relay_ports", capacity); return !ok })
+	})
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !cond(); {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

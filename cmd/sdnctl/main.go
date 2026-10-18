@@ -9,8 +9,9 @@
 //	sdnctl rule list NET | delete NET RULE
 //	sdnctl interface list NET | revoke IFACE
 //	sdnctl host create NAME [--endpoint ADDR:PORT]
+//	sdnctl host delete HOST         (revokes its interfaces)
 //	sdnctl relay create NAME --address LOCAL[=ADVERTISED] [--address ...] --ports LO-HI --probe-port N
-//	sdnctl relay list
+//	sdnctl relay list | delete RELAY
 //	sdnctl device create NET SVC --gateway IFACE [--ttl 24h] [--out FILE]
 //	sdnctl attach NAME NET SVC      (local agent)
 //	sdnctl detach IFACE             (local agent)
@@ -177,6 +178,12 @@ func run(args []string) error {
 			}
 		}
 		return show(c.CreateHost(ctx, req))
+	case "host delete":
+		a, err := parse(fs, rest, 1)
+		if err != nil {
+			return err
+		}
+		return c.DeleteHost(ctx, a[0])
 	case "relay create":
 		var addrs addrList
 		fs.Var(&addrs, "address", "LOCAL[=ADVERTISED], repeatable")
@@ -193,6 +200,12 @@ func run(args []string) error {
 		return show(c.CreateRelay(ctx, api.CreateRelay{Name: a[0], Addresses: addrs, PortLo: pr.Lo, PortHi: pr.Hi, ProbePort: uint16(*probe)}))
 	case "relay list":
 		return show(c.Relays(ctx))
+	case "relay delete":
+		a, err := parse(fs, rest, 1)
+		if err != nil {
+			return err
+		}
+		return c.DeleteRelay(ctx, a[0])
 	case "device create":
 		gateway := fs.String("gateway", "", "the gateway interface the machine peers with")
 		ttl := fs.Duration("ttl", 24*time.Hour, "the lease's fixed term; generate a new config to extend it")

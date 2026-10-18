@@ -11,6 +11,7 @@ import (
 	"maps"
 	"net/netip"
 	"slices"
+	"strings"
 	"time"
 
 	"sdn.sh/internal/api"
@@ -316,11 +317,24 @@ func (t *tx) PutHost(h store.Host) error {
 	return nil
 }
 
+func (t *tx) DeleteHost(id model.HostID) error { t.hosts.delete(id); return nil }
+
 func (t *tx) PutRelay(r store.Relay) error {
 	if dup(t.relays.scan(func(o store.Relay) bool { return o.Name == r.Name && o.ID != r.ID })) {
 		return store.ErrConflict
 	}
 	t.relays.set(r.ID, r)
+	return nil
+}
+
+func (t *tx) DeleteRelay(id model.RelayID) error {
+	t.relays.delete(id)
+	for _, p := range t.ports.scan(func(p store.ReleasedPort) bool { return p.Relay == id }) {
+		t.ports.delete(portKey{mkAddrKey(string(id), p.Addr), p.Port})
+	}
+	for _, k := range t.cursors.keys(func(k addrKey) bool { return strings.HasPrefix(string(k), string(id)+"|") }) {
+		t.cursors.delete(k)
+	}
 	return nil
 }
 
@@ -442,17 +456,30 @@ func (o *overlay[K, V]) delete(k K) {
 // scan returns the rows match accepts, every row when match is nil, in key
 // order.
 func (o *overlay[K, V]) scan(match func(V) bool) []V {
-	keys := slices.SortedFunc(maps.Keys(o.base.rows), o.base.compare)
-	keys = append(keys, slices.SortedFunc(maps.Keys(o.put), o.base.compare)...)
-	slices.SortFunc(keys, o.base.compare)
-	keys = slices.CompactFunc(keys, func(a, b K) bool { return o.base.compare(a, b) == 0 })
 	var out []V
-	for _, k := range keys {
+	for _, k := range o.written() {
 		if v, ok := o.peek(k); ok && (match == nil || match(v)) {
 			out = append(out, o.base.detach(v))
 		}
 	}
 	return out
+}
+
+// keys returns the keys of the rows match accepts, in order.
+func (o *overlay[K, V]) keys(match func(K) bool) []K {
+	return slices.DeleteFunc(o.written(), func(k K) bool {
+		_, ok := o.peek(k)
+		return !ok || !match(k)
+	})
+}
+
+// written returns, in order, every key committed or put, deleted ones among
+// them.
+func (o *overlay[K, V]) written() []K {
+	keys := slices.SortedFunc(maps.Keys(o.base.rows), o.base.compare)
+	keys = append(keys, slices.SortedFunc(maps.Keys(o.put), o.base.compare)...)
+	slices.SortFunc(keys, o.base.compare)
+	return slices.CompactFunc(keys, func(a, b K) bool { return o.base.compare(a, b) == 0 })
 }
 
 func (o *overlay[K, V]) commit() {

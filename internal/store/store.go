@@ -67,7 +67,8 @@ func union[T ~string](a, b []T) []T {
 	return slices.Compact(out)
 }
 
-// ReadTx finds records. Every list comes back sorted by identifier.
+// ReadTx finds records. Every list comes back sorted by identifier, and a
+// limit of zero or less lists every match.
 type ReadTx interface {
 	Network(model.NetworkID) (Network, error)
 	NetworkByName(name string) (Network, error)
@@ -141,7 +142,12 @@ type Tx interface {
 	PutEdge(Edge) error
 	DeleteEdge(net model.NetworkID, a, b model.InterfaceID) error
 	PutHost(Host) error
+	// DeleteHost removes a host, and with it its token.
+	DeleteHost(model.HostID) error
 	PutRelay(Relay) error
+	// DeleteRelay removes a relay, its port cursors and its released
+	// ports.
+	DeleteRelay(model.RelayID) error
 
 	PutReleased4(Released4) error
 	DeleteReleased4(net model.NetworkID, addr netip.Addr) error

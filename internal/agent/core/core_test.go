@@ -86,15 +86,29 @@ func TestAHeldNamespaceIsReapedOnce(t *testing.T) {
 
 func TestAnInterfaceWhoseNamespaceVanishesIsTornDown(t *testing.T) {
 	c, now := adopted(t)
-	if err := c.State(now, state(3, nil)); err != nil {
+	u := state(3, nil)
+	u.Networks[0].Interfaces[0].Egress = []api.Egress{{Proto: model.TCP, Ports: model.PortRange{Lo: 443, Hi: 443}}}
+	if err := c.State(now, u); err != nil {
 		t.Fatal(err)
 	}
 	drive(c, now, succeed)
 	c.Observed(now, kernel.Namespace{Name: "sdn-a"}, kernel.ErrNoNamespace)
 	gone := func(RunBatch) error { return fmt.Errorf("op: %w", kernel.ErrNoNamespace) }
+	var unlinked []uint16
 	for range 4 {
 		now = now.Add(10 * time.Second)
-		drive(c, now, gone)
+		for _, b := range drive(c, now, gone) {
+			for _, op := range b.Ops {
+				if op.Kind == kernel.SetEgress && op.Egress == nil {
+					unlinked = append(unlinked, op.EgressIndex)
+				}
+			}
+		}
+	}
+	// The host's filter for the namespace's egress link outlives the
+	// namespace, so teardown removes it by index.
+	if len(unlinked) == 0 || unlinked[0] != 40000 {
+		t.Fatalf("teardown removed egress indexes %v, want 40000, the listen port", unlinked)
 	}
 	if i, ok := c.ifaces["if-a"]; ok && !i.phase.tearingDown() {
 		t.Fatalf("if-a is %s after its namespace vanished", i.phase)

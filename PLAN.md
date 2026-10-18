@@ -62,9 +62,9 @@ Status ledger:
 
 | Status | Type | Item | Evidence / Gap |
 | --- | --- | --- | --- |
-| In Progress | Gate | 10,000-seed simulator sweep with no failures | Running on the current tree. |
-| In Progress | Gate | Every planted bug caught | Running: `go run ./scripts/mutants -root -all-layers -jobs 6`. |
-| In Progress | Gate | Code review, findings fixed or recorded | Running: reviews of the agent, the control plane, and the relay with the kernel layer. |
+| Complete | Gate | 10,000-seed simulator sweep with no failures | `go run ./cmd/sdn-sim --seeds 10000 1` at `46afa06`: 0 of 10,000 failed, 1,355s on the Core Ultra 9. The sweep before it, at `0ceb8f3`, failed seeds 371, 2425 and 3389 (1G), which `TestAnUnnamedNamespaceLivesWhileTheAgentHoldsIt` now replays. |
+| Complete | Gate | Every planted bug caught | `go run ./scripts/mutants -root -all-layers -jobs 6` at `29c0c28`, with Postgres: 90 of 93 caught in 733s. `egress-filter-outlives-namespace` had never been caught, since no simulator seed tears down an egress-granted interface whose namespace vanished; `TestAnInterfaceWhoseNamespaceVanishesIsTornDown` now gives it a grant and checks the index. `unmounted-name-accepted` and `metric-increment-dropped` had stopped compiling. All three caught on rerun. |
+| Complete | Gate | Code review, findings fixed or recorded | Reviews of the agent and kernel (1F), the control plane (2E), the relay (3H), and the acknowledgment work (1G); what they left is recorded as Risk rows in Phases 1 and 9. |
 
 ## Phase 0: Scaffold
 

@@ -297,7 +297,7 @@ var Mutants = []Mutant{
 		ID:     "egress-filter-outlives-namespace",
 		Breaks: "tearing down an interface whose namespace is gone still removes its host egress filter, by index",
 		Edits:  []Edit{{agentPlan, "kernel.Op{Kind: kernel.SetEgress, Namespace: st.name, EgressIndex: egressIndex(st, i)}", "kernel.Op{Kind: kernel.SetEgress, Namespace: st.name}"}},
-		Catch:  []string{"sim"},
+		Catch:  []string{"agent-core"},
 	},
 	{
 		ID:     "gateway-end-spares-devices",
@@ -500,7 +500,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "unmounted-name-accepted",
 		Breaks: "a namespace name a crash left as a plain file is replaced by a mounted namespace",
-		Edits:  []Edit{{linuxNetns, "\tcase err == nil && mounted:\n", "\tcase err == nil:\n"}},
+		Edits:  []Edit{{linuxNetns, "\tcase err == nil && mounted:\n", "\tcase err == nil && (mounted || true):\n"}},
 		Catch:  []string{"kernel"},
 	},
 	{
@@ -512,7 +512,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "metric-increment-dropped",
 		Breaks: "every local attach and detach counts in sdn_agent_local_calls_total by result",
-		Edits:  []Edit{{agentDaemon, "\td.m.localCalls.WithLabelValues(r.kind, result).Inc()\n", ""}},
+		Edits:  []Edit{{agentDaemon, "\td.m.localCalls.WithLabelValues(r.kind, result).Inc()\n", "\t_ = result\n"}},
 		Catch:  []string{"agent-daemon", "e2e"},
 	},
 	{

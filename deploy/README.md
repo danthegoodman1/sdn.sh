@@ -66,6 +66,8 @@ go build -o bin/ ./cmd/sdn-lab
 bin/sdn-lab deploy --tf-output fleet.json --ssh-key ~/.ssh/sdn-bench --bin bin
 ```
 
+`--known-hosts FILE` keeps the fleet's host keys out of your own `known_hosts`, since EC2 hands the addresses to other machines once the fleet is gone.
+
 Each machine gets its role's binaries in `/usr/local/bin`, `hostprep.sh` and `purge.sh` in `/usr/local/lib/sdn`, and the units in `/etc/systemd/system`; `hostprep.sh` runs again. The control-plane host also gets the Prometheus configuration and its targets. Add `--dry-run` to any `sdn-lab` command to print every remote command instead of running it; a dry run needs no credentials, only a `fleet.json`.
 
 ## Run a plan

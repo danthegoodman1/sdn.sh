@@ -100,14 +100,17 @@ var roleBinaries = map[Role][]string{
 // every remote command and answers with stand-in output, so the whole
 // flow runs without credentials or instances.
 type awsEnv struct {
-	fleet   Fleet
-	key     string
-	bin     string
-	dry     bool
-	out     io.Writer
-	control string
-	public  map[string]string
-	nodes   struct {
+	fleet Fleet
+	key   string
+	// knownHosts, when set, records the fleet's host keys apart from the
+	// operator's own, since EC2 hands their addresses to others later.
+	knownHosts string
+	bin        string
+	dry        bool
+	out        io.Writer
+	control    string
+	public     map[string]string
+	nodes      struct {
 		cp, mid       Node
 		hosts, relays []Node
 	}
@@ -168,6 +171,9 @@ func (e *awsEnv) sshOptions() []string {
 		"-o", "ServerAliveInterval=15", "-o", "ControlMaster=auto", "-o", "ControlPath=" + e.control + "/%C", "-o", "ControlPersist=300"}
 	if e.key != "" {
 		opts = append([]string{"-i", e.key}, opts...)
+	}
+	if e.knownHosts != "" {
+		opts = append(opts, "-o", "UserKnownHostsFile="+e.knownHosts)
 	}
 	return opts
 }

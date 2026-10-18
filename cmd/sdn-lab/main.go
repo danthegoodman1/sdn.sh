@@ -42,7 +42,7 @@ func usage() error {
 // envFlags are the flags every command that reaches a fleet takes.
 type envFlags struct {
 	env, bin, tfOutput, sshKey, store string
-	logLevel, keep                    string
+	knownHosts, logLevel, keep        string
 	hosts                             int
 	dryRun                            bool
 }
@@ -53,6 +53,7 @@ func (f *envFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.bin, "bin", filepath.Dir(self), "directory holding sdn-cp, sdn-agent, sdn-relay, sdnctl, sdn-bench and hostbench (linux/amd64 for aws)")
 	fs.StringVar(&f.tfOutput, "tf-output", "", "aws: a file holding `terraform output -json` from deploy/aws/terraform")
 	fs.StringVar(&f.sshKey, "ssh-key", "", "aws: the private key for the fleet's key pair; ssh's default when empty")
+	fs.StringVar(&f.knownHosts, "known-hosts", "", "aws: the file that records the fleet's host keys; ssh's default when empty")
 	fs.StringVar(&f.store, "store", "memory", `local: the control plane's store, "memory" or a postgres:// URL (each run gets a fresh schema)`)
 	fs.IntVar(&f.hosts, "hosts", 3, "local: agent hosts")
 	fs.StringVar(&f.logLevel, "log-level", "info", "local: the daemons' log level")
@@ -85,7 +86,11 @@ func (f *envFlags) openAWS() (*awsEnv, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newAWSEnv(fleet, f.sshKey, f.bin, f.dryRun, os.Stdout)
+	e, err := newAWSEnv(fleet, f.sshKey, f.bin, f.dryRun, os.Stdout)
+	if e != nil {
+		e.knownHosts = f.knownHosts
+	}
+	return e, err
 }
 
 func cli(args []string) error {

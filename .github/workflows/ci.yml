@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Every step runs scripts/ci, which runs the same commands locally.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: sdn
+          POSTGRES_DB: sdn
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sdn"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build, vet and gofmt
+        run: scripts/ci check
+      - name: Unit tests, the determinism check, simulator seeds and the mutant list
+        run: scripts/ci test
+      - name: Store, control-plane and server tests on Postgres
+        run: scripts/ci postgres
+        env:
+          SDN_TEST_POSTGRES: postgres://postgres:sdn@127.0.0.1:5432/sdn?sslmode=disable
+
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Simulate 500 seeds from the commit hash
+        run: scripts/ci sim "$GITHUB_SHA" 500
+
+  # ubuntu-latest is a full VM with root, kernel WireGuard and nftables.
+  kernel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install the tools the tests and the lab call
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wireguard-tools nftables conntrack iproute2
+          sudo modprobe wireguard
+      - name: Kernel tests in a fresh network namespace
+        run: scripts/ci kernel
+      - name: End-to-end tests in a namespace lab
+        run: scripts/ci e2e -test.v
+
+  terraform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-terraform@v3
+        if: hashFiles('deploy/aws/**') != ''
+      - name: Terraform fmt and validate
+        if: hashFiles('deploy/aws/**') != ''
+        run: scripts/ci terraform

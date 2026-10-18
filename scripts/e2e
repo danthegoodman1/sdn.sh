@@ -2,7 +2,7 @@
 # Builds the daemons and the end-to-end tests as you, then runs the tests as
 # root, since the lab creates namespaces and devices.
 #
-#   scripts/e2e [go test flags...]       e.g. scripts/e2e -run TwoHosts -v
+#   scripts/e2e [test binary flags...]   e.g. scripts/e2e -test.run TwoHosts -test.v
 #
 # SDN_TEST_POSTGRES, when set, runs the control plane on Postgres.
 set -euo pipefail

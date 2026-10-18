@@ -202,12 +202,16 @@ func (c *cpNode) record(id model.NetworkID) {
 				c.w.fail("IPv6 address %v reused: %s after %s", i.Addr6, i.ID, prev)
 			}
 			c.ever6[id][i.Addr6] = i.ID
-			if !compile.Connected(i) {
-				if i.Addr4.IsValid() {
-					if h := c.holder4[id][i.Addr4]; h.iface == i.ID && h.ended.IsZero() {
-						c.holder4[id][i.Addr4] = addrHolder{iface: i.ID, ended: i.Ended}
-					}
+			// An address's quarantine runs from the end of its holder's
+			// lease, so record the end once a snapshot shows it: one sweep
+			// can drain an interface and delete it past retention, and then
+			// no snapshot shows it disconnected.
+			if i.Addr4.IsValid() && i.State != api.Live {
+				if h := c.holder4[id][i.Addr4]; h.iface == i.ID && h.ended.IsZero() {
+					c.holder4[id][i.Addr4] = addrHolder{iface: i.ID, ended: i.Ended}
 				}
+			}
+			if !compile.Connected(i) {
 				continue
 			}
 			for _, a := range []netip.Addr{i.Addr6, i.Addr4} {

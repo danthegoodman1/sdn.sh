@@ -83,13 +83,14 @@ func TestAnUnknownTableIsReplaced(t *testing.T) {
 }
 
 func TestAPartialMapIsInvalid(t *testing.T) {
-	rs := &Ruleset{Maps: []Map{{Name: "m", Family: IPv6, Slots: make([]netip.Addr, Slots-1)}}}
-	if rs.Validate() == nil {
-		t.Fatal("a short map validated")
-	}
 	full := make([]netip.Addr, Slots)
 	for i := range full {
 		full[i] = netip.MustParseAddr("fd00::1")
+	}
+	// Every slot it has names a backend; the last slot is missing.
+	rs := &Ruleset{Maps: []Map{{Name: "m", Family: IPv6, Slots: full[:Slots-1]}}}
+	if rs.Validate() == nil {
+		t.Fatal("a short map validated")
 	}
 	full[7] = netip.Addr{}
 	rs.Maps[0].Slots = full

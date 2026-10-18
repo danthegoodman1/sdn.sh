@@ -239,14 +239,7 @@ func (w *World) expect(net model.NetworkID, rev uint64, id model.InterfaceID) (e
 		return e, true
 	}
 	e.live = true
-	adjacent := func(a, b model.ServiceID) bool {
-		for _, r := range rules {
-			if r.To != "" && (r.From == a && r.To == b || r.From == b && r.To == a) {
-				return true
-			}
-		}
-		return false
-	}
+	adjacent := func(a, b model.ServiceID) bool { return reaches(rules, a, b) || reaches(rules, b, a) }
 	for _, y := range snap {
 		connected := y.State == api.Live || y.State == api.Released && !y.Drained
 		if y.ID == x.ID || y.Kind == api.Device || !connected || !adjacent(x.Service, y.Service) {
@@ -262,35 +255,20 @@ func (w *World) expect(net model.NetworkID, rev uint64, id model.InterfaceID) (e
 		}
 		e.peers[y.PublicKey] = expPeer{allowed: allowed, keepalive: y.Host == x.Host && x.ID < y.ID}
 	}
-	for _, r := range rules {
-		if r.From == x.Service && r.To == "" {
-			if e.egress == nil {
-				e.egress = &kernel.EgressConfig{Index: x.ListenPort}
-			}
-			e.egress.Rules = append(e.egress.Rules, kernel.EgressRule{Proto: r.Proto, Ports: r.Ports})
-		}
-	}
-	if e.egress != nil {
-		slices.SortFunc(e.egress.Rules, func(a, b kernel.EgressRule) int {
-			return cmp.Or(cmp.Compare(a.Proto, b.Proto), cmp.Compare(a.Ports.Lo, b.Ports.Lo), cmp.Compare(a.Ports.Hi, b.Ports.Hi))
-		})
-		e.egress.Rules = slices.Compact(e.egress.Rules)
+	if rs := egressRules(rules, x.Service); len(rs) > 0 {
+		e.egress = &kernel.EgressConfig{Index: x.ListenPort, Rules: rs}
 	}
 	families := []nft.Family{nft.IPv6}
 	if x.Addr4.IsValid() {
 		families = append(families, nft.IPv4)
 	}
-	svc := map[model.ServiceID]*svcIntent{}
-	for _, s := range n.services {
-		svc[s.id] = s
-	}
-	for _, r := range rules {
-		if r.From != x.Service || r.To == "" {
+	for _, to := range n.services {
+		if !reaches(rules, x.Service, to.id) {
 			continue
 		}
 		var backends []store.Interface
 		for _, y := range snap {
-			if y.Service != r.To || y.State != api.Live || y.Kind == api.Device {
+			if y.Service != to.id || y.State != api.Live || y.Kind == api.Device {
 				continue
 			}
 			if _, peer := e.peers[y.PublicKey]; peer || y.ID == x.ID {
@@ -306,7 +284,7 @@ func (w *World) expect(net model.NetworkID, rev uint64, id model.InterfaceID) (e
 		}
 		table := slots.Assign(ids)
 		for _, f := range families {
-			if f == nft.IPv4 && !svc[r.To].addr4.IsValid() {
+			if f == nft.IPv4 && !to.addr4.IsValid() {
 				continue
 			}
 			addrs := make([]netip.Addr, len(table))
@@ -316,18 +294,18 @@ func (w *World) expect(net model.NetworkID, rev uint64, id model.InterfaceID) (e
 					addrs[slot] = backends[i].Addr4
 				}
 			}
-			e.maps[nft.MapName(r.To, f)] = addrs
+			e.maps[nft.MapName(to.id, f)] = addrs
 		}
 	}
-	for _, r := range rules {
-		if r.To != x.Service {
+	for _, from := range n.services {
+		if !reaches(rules, from.id, x.Service) {
 			continue
 		}
 		for _, f := range families {
-			name := nft.SetName(r.From, f)
+			name := nft.SetName(from.id, f)
 			var addrs []netip.Addr
 			for _, y := range snap {
-				if _, peer := e.peers[y.PublicKey]; !peer || y.Service != r.From {
+				if _, peer := e.peers[y.PublicKey]; !peer || y.Service != from.id {
 					continue
 				}
 				if f == nft.IPv6 {
@@ -659,25 +637,39 @@ func (w *World) probeAll() {
 			continue
 		}
 		rules := n.rulesAt(rev)
-		for _, r := range rules {
-			if r.From != x.service || r.To == "" {
-				continue
-			}
-			var s *svcIntent
-			for _, c := range n.services {
-				if c.id == r.To {
-					s = c
+		// To each service x reaches: a flow in each protocol the rules
+		// open toward it, and one flow they close.
+		for _, s := range n.services {
+			var open, shut []point
+			seen := map[model.Proto]bool{}
+			for _, p := range points(rules) {
+				switch {
+				case permits(rules, x.service, s.id, p.proto, p.port):
+					if !seen[p.proto] {
+						seen[p.proto] = true
+						open = append(open, p)
+					}
+				case len(shut) == 0:
+					shut = append(shut, p)
 				}
 			}
-			proto, port := r.Proto, r.Ports.Lo
-			if proto == model.AnyProto {
-				proto, port = model.TCP, 80
+			if len(open) == 0 {
+				continue
 			}
-			if _, ok := e.maps[nft.MapName(r.To, nft.IPv6)]; ok {
-				probes = append(probes, probe{w.open(x, s.addr6, proto, port), true, fmt.Sprintf("%s to %s over IPv6 %s/%d", x.id, s.name, proto, port)})
-			}
-			if _, ok := e.maps[nft.MapName(r.To, nft.IPv4)]; ok {
-				probes = append(probes, probe{w.open(x, s.addr4, proto, port), true, fmt.Sprintf("%s to %s over IPv4 %s/%d", x.id, s.name, proto, port)})
+			for _, f := range []nft.Family{nft.IPv6, nft.IPv4} {
+				if _, ok := e.maps[nft.MapName(s.id, f)]; !ok {
+					continue
+				}
+				addr := s.addr6
+				if f == nft.IPv4 {
+					addr = s.addr4
+				}
+				for _, p := range open {
+					probes = append(probes, probe{w.open(x, addr, p.proto, p.port), true, fmt.Sprintf("%s to %s over %v %s/%d", x.id, s.name, f, p.proto, p.port)})
+				}
+				for _, p := range shut {
+					probes = append(probes, probe{w.open(x, addr, p.proto, p.port), false, fmt.Sprintf("%s to %s over %v %s/%d, which policy closes", x.id, s.name, f, p.proto, p.port)})
+				}
 			}
 		}
 		for _, y := range o.live() {
@@ -691,7 +683,7 @@ func (w *World) probeAll() {
 				}
 				continue
 			}
-			if !permitsPort(rules, x.service, y.service, 9) {
+			if !permits(rules, x.service, y.service, model.TCP, 9) {
 				probes = append(probes, probe{w.open(x, y.addr6, model.TCP, 9), false, fmt.Sprintf("%s to %s on a port policy does not name", x.id, y.id)})
 			}
 		}
@@ -724,15 +716,6 @@ func (w *World) heldByAnother(net model.NetworkID, rev uint64, id model.Interfac
 	return false
 }
 
-// permitsPort reports whether a rule lets a reach b on a TCP port.
-func permitsPort(rules []store.Rule, a, b model.ServiceID, port uint16) bool {
-	for _, r := range rules {
-		if r.From == a && r.To == b && (r.Proto == model.AnyProto || r.Proto == model.TCP && r.Ports.Contains(port)) {
-			return true
-		}
-	}
-	return false
-}
 
 // compiledPeers describes what the agent's desired state lists for an
 // interface, for a failure report.

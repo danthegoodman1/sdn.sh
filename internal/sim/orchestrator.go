@@ -66,9 +66,10 @@ type orchestrator struct {
 	w   *World
 	rng *prng.Rand
 	// egress draws internet grants, on a stream of its own so the other
-	// draws stay as they were; unnamer draws which namespace loses its
-	// name, likewise.
+	// draws stay as they were; policy draws wildcard and deny rules, and
+	// unnamer which namespace loses its name, likewise.
 	egress    *prng.Rand
+	policy    *prng.Rand
 	unnamer   *prng.Rand
 	networks  []*netIntent
 	ifaces    map[model.InterfaceID]*ifIntent
@@ -92,8 +93,9 @@ const retryAfter = 500 * time.Millisecond
 
 func newOrchestrator(w *World) *orchestrator {
 	return &orchestrator{
-		w: w, rng: prng.Stream(w.seed, "orchestrator"), egress: prng.Stream(w.seed, "egress"), unnamer: prng.Stream(w.seed, "unname"),
-		ifaces: map[model.InterfaceID]*ifIntent{}, attaching: map[string]*pendingAttach{},
+		w: w, rng: prng.Stream(w.seed, "orchestrator"), egress: prng.Stream(w.seed, "egress"), policy: prng.Stream(w.seed, "policy"),
+		unnamer: prng.Stream(w.seed, "unname"),
+		ifaces:  map[model.InterfaceID]*ifIntent{}, attaching: map[string]*pendingAttach{},
 	}
 }
 
@@ -219,6 +221,71 @@ func (o *orchestrator) grantEgress() {
 	}
 }
 
+// changePolicy sometimes adds a wildcard or deny rule, toward a service or
+// the internet, or takes one away.
+func (o *orchestrator) changePolicy() {
+	if !o.policy.Percent(6) || len(o.networks) == 0 {
+		return
+	}
+	n := o.networks[o.policy.Index(len(o.networks))]
+	var drawn []model.RuleID
+	for _, id := range sortedKeys(n.rules) {
+		if r := n.rules[id]; r.Deny || r.From == model.AnyService || r.To == model.AnyService {
+			drawn = append(drawn, id)
+		}
+	}
+	if len(drawn) > 0 && o.policy.Percent(40) {
+		id := drawn[o.policy.Index(len(drawn))]
+		if o.admin(func(tx store.Tx) error { return o.w.cp.plane.DeleteRule(tx, o.w.now(), string(n.id), id) }) {
+			delete(n.rules, id)
+			o.w.summary.Policies++
+			o.record(n)
+		}
+		return
+	}
+	side := func() string {
+		if o.policy.Percent(40) {
+			return api.Wildcard
+		}
+		return string(n.services[o.policy.Index(len(n.services))].id)
+	}
+	req := api.CreateRule{From: side(), To: side()}
+	if o.policy.Percent(55) {
+		req.Action = api.Deny
+	} else if req.From != api.Wildcard && req.To != api.Wildcard {
+		req.From = api.Wildcard
+	}
+	switch o.policy.Below(6) {
+	case 0:
+		req.Proto = model.AnyProto
+	case 1:
+		req.Proto, req.Ports = model.UDP, model.PortRange{Lo: 53, Hi: 53}
+	case 2:
+		req.Proto, req.Ports = model.TCP, model.PortRange{Lo: 1, Hi: 1500}
+	case 3:
+		req.Proto, req.Ports = model.TCP, model.PortRange{Lo: 1000, Hi: 3000}
+	default:
+		p := uint16(80 + o.policy.Below(3)*1000)
+		req.Proto, req.Ports = model.TCP, model.PortRange{Lo: p, Hi: p}
+	}
+	if o.policy.Percent(15) {
+		req.To = api.Internet
+		if req.Proto == model.TCP {
+			req.Ports = model.PortRange{Lo: 443, Hi: 443}
+		}
+	}
+	var r store.Rule
+	if o.admin(func(tx store.Tx) error {
+		var err error
+		r, err = o.w.cp.plane.CreateRule(tx, o.w.now(), string(n.id), req)
+		return err
+	}) {
+		n.rules[r.ID] = r
+		o.w.summary.Policies++
+		o.record(n)
+	}
+}
+
 func (o *orchestrator) addRule(n *netIntent, a, b *svcIntent) {
 	proto, ports := o.randomRule()
 	var r store.Rule
@@ -287,6 +354,7 @@ func (o *orchestrator) start() {
 		}
 		o.change()
 		o.grantEgress()
+		o.changePolicy()
 		o.w.loop.After(o.rng.Duration(o.w.opts.ChangeEvery/4, o.w.opts.ChangeEvery*2), next)
 	}
 	o.w.loop.After(o.w.opts.ChangeEvery, next)

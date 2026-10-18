@@ -1,6 +1,9 @@
 package detcheck
 
 import (
+	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -8,6 +11,7 @@ import (
 
 // TestModuleIsDeterministic checks every deterministic package in the module.
 func TestModuleIsDeterministic(t *testing.T) {
+	touchSources(t, "../..")
 	pkgs, err := Load("../..", "sdn.sh/...")
 	if err != nil {
 		t.Fatal(err)
@@ -28,11 +32,45 @@ func TestModuleIsDeterministic(t *testing.T) {
 	}
 }
 
+// touchSources opens every Go file in the module. The packages load through
+// a go list subprocess, whose reads the test cache cannot see; reading them
+// here makes an edit invalidate a cached pass.
+func touchSources(t *testing.T, root string) {
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == ".git" || d.Name() == "testdata") {
+			return filepath.SkipDir
+		}
+		if !d.IsDir() && strings.HasSuffix(path, ".go") {
+			_, err = os.ReadFile(path)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // deterministic lists the packages that must carry the directive, so
 // removing it from one fails here rather than exempting the package.
 var deterministic = []string{
+	"sdn.sh/internal/agent/core",
+	"sdn.sh/internal/api",
+	"sdn.sh/internal/compile",
+	"sdn.sh/internal/cp",
+	"sdn.sh/internal/kernel",
+	"sdn.sh/internal/kernel/kmodel",
+	"sdn.sh/internal/model",
+	"sdn.sh/internal/nft",
 	"sdn.sh/internal/prng",
+	"sdn.sh/internal/regproto",
+	"sdn.sh/internal/relay/core",
 	"sdn.sh/internal/sim",
+	"sdn.sh/internal/slots",
+	"sdn.sh/internal/store",
+	"sdn.sh/internal/store/mem",
 }
 
 func TestFixtureViolatesEveryRule(t *testing.T) {

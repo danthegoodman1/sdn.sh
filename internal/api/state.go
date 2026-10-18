@@ -220,8 +220,15 @@ func NewHostState() *HostState {
 
 // Apply merges an update. A network the update carries replaces the one
 // held unless the held one is newer, which happens when an attach delivered
-// it first; a network the update leaves out of Present is dropped.
+// it first; a network the update leaves out of Present is dropped, unless
+// the held one is newer than the whole update, which then predates it. An
+// update older than the generation held changes nothing.
 func (h *HostState) Apply(u StateUpdate) error {
+	if u.Generation < h.Generation {
+		// An answer that arrived out of order: everything it says, a newer
+		// update already said.
+		return nil
+	}
 	present := map[model.NetworkID]uint64{}
 	for _, ref := range u.Present {
 		present[ref.Network] = ref.Revision
@@ -240,11 +247,18 @@ func (h *HostState) Apply(u StateUpdate) error {
 	for _, id := range h.NetworkIDs() {
 		rev, ok := present[id]
 		if !ok {
-			delete(h.Networks, id)
+			if h.Networks[id].Revision <= u.Generation {
+				delete(h.Networks, id)
+			}
 			continue
 		}
 		if h.Networks[id].Revision < rev {
 			return fmt.Errorf("update lists %s at %d but carries nothing newer than %d", id, rev, h.Networks[id].Revision)
+		}
+	}
+	for _, ref := range u.Present {
+		if _, ok := h.Networks[ref.Network]; !ok {
+			return fmt.Errorf("update lists %s at %d but this host holds nothing for it", ref.Network, ref.Revision)
 		}
 	}
 	if u.Generation > h.Generation {

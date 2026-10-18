@@ -99,6 +99,9 @@ type ReadTx interface {
 	Edges(model.NetworkID) ([]Edge, error)
 	// RelayEdges lists every edge holding ports on a relay.
 	RelayEdges(model.RelayID) ([]Edge, error)
+	// DormantEdges lists up to limit edges dormant since before t, oldest
+	// first.
+	DormantEdges(t time.Time, limit int) ([]Edge, error)
 
 	Host(model.HostID) (Host, error)
 	HostByName(name string) (Host, error)
@@ -232,6 +235,11 @@ type Edge struct {
 	SecretBA model.Secret `json:"secret_ba"`
 	Ports    []EdgePorts  `json:"ports"`
 	Created  time.Time    `json:"created"`
+	// Dormant is when policy stopped connecting a pair that is still
+	// attached. A dormant edge keeps its ports and secrets for the port
+	// quarantine, so a pair that reconnects gets the same edge back and its
+	// peers' endpoints stay valid.
+	Dormant time.Time `json:"dormant,omitzero"`
 }
 
 // EdgePorts are an edge's two ports on one relay address.

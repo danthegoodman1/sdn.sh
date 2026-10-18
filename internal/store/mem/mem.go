@@ -221,6 +221,12 @@ func (t *tx) RelayEdges(relay model.RelayID) ([]store.Edge, error) {
 	}), nil
 }
 
+func (t *tx) DormantEdges(before time.Time, limit int) ([]store.Edge, error) {
+	out := t.edges.scan(func(e store.Edge) bool { return !e.Dormant.IsZero() && e.Dormant.Before(before) })
+	slices.SortStableFunc(out, func(a, b store.Edge) int { return a.Dormant.Compare(b.Dormant) })
+	return capped(out, limit), nil
+}
+
 func (t *tx) Host(id model.HostID) (store.Host, error) { return found(t.hosts.get(id)) }
 func (t *tx) HostByName(name string) (store.Host, error) {
 	return first(t.hosts.scan(func(h store.Host) bool { return h.Name == name }))

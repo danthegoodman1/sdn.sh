@@ -194,7 +194,7 @@ func peer(x, y store.Interface, edges map[[2]model.InterfaceID]store.Edge, relay
 	}
 	a, b := Pair(x.ID, y.ID)
 	e, ok := edges[[2]model.InterfaceID{a, b}]
-	if !ok {
+	if !ok || !e.Dormant.IsZero() {
 		return api.Peer{}, false
 	}
 	p.Registration = e.SecretAB

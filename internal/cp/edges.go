@@ -99,22 +99,38 @@ func (p *Plane) reconcileEdges(tx store.Tx, now time.Time, n *store.Network, sc 
 	for _, e := range edges {
 		x, okx := byID[e.A]
 		y, oky := byID[e.B]
-		inScope := !okx || !oky || sc.covers(x, y)
-		if !inScope {
+		attached := okx && oky && compile.Connected(x) && compile.Connected(y)
+		if attached && !sc.covers(x, y) {
 			continue
 		}
 		key := [2]model.InterfaceID{e.A, e.B}
-		if want[key] {
+		switch {
+		case want[key]:
 			have[key] = true
-			continue
+			if !e.Dormant.IsZero() {
+				e.Dormant = time.Time{}
+				if err := tx.PutEdge(e); err != nil {
+					return err
+				}
+			}
+		case attached:
+			// Policy no longer connects a pair that is still attached: keep
+			// the edge, dormant, in case it reconnects.
+			if e.Dormant.IsZero() {
+				e.Dormant = now
+				if err := tx.PutEdge(e); err != nil {
+					return err
+				}
+			}
+		default:
+			if err := releasePorts(tx, e, now); err != nil {
+				return err
+			}
+			if err := tx.DeleteEdge(n.ID, e.A, e.B); err != nil {
+				return err
+			}
+			touched = append(touched, relayIDs(e)...)
 		}
-		if err := releasePorts(tx, e, now); err != nil {
-			return err
-		}
-		if err := tx.DeleteEdge(n.ID, e.A, e.B); err != nil {
-			return err
-		}
-		touched = append(touched, relayIDs(e)...)
 	}
 	relays := make([]store.Relay, 0, len(n.Relays))
 	for _, id := range n.Relays {
@@ -148,6 +164,26 @@ func (p *Plane) reconcileEdges(tx store.Tx, now time.Time, n *store.Network, sc 
 		touched = append(touched, relayIDs(e)...)
 	}
 	return bumpRelays(tx, touched)
+}
+
+// expireDormant deletes edges dormant for a port quarantine. Their ports
+// have had no sender since they went dormant, so they are free at once.
+func (p *Plane) expireDormant(tx store.Tx, now time.Time, limit int) (int, error) {
+	old, err := tx.DormantEdges(now.Add(-p.Config.PortQuarantine), limit)
+	if err != nil {
+		return 0, err
+	}
+	var touched []model.RelayID
+	for _, e := range old {
+		if err := releasePorts(tx, e, e.Dormant); err != nil {
+			return 0, err
+		}
+		if err := tx.DeleteEdge(e.Network, e.A, e.B); err != nil {
+			return 0, err
+		}
+		touched = append(touched, relayIDs(e)...)
+	}
+	return len(old), bumpRelays(tx, touched)
 }
 
 // bumpRelays gives every touched relay this transaction's revision, so its

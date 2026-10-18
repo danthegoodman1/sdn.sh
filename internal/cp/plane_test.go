@@ -503,8 +503,13 @@ func TestFullyConnectedPolicyPeersEveryPair(t *testing.T) {
 	}
 }
 
-func TestDeletingARuleDropsItsEdgesAndQuarantinesPorts(t *testing.T) {
+// TestADisconnectedPairKeepsItsEdgeForTheQuarantine covers a rule that goes
+// away and comes back: the pair gets its edge back with the same ports, so
+// endpoints peers roamed to stay valid, and only once the quarantine passes
+// does the edge go and its ports free up.
+func TestADisconnectedPairKeepsItsEdgeForTheQuarantine(t *testing.T) {
 	f := newFixture(t)
+	f.p.Config.LeaseTTL = time.Hour
 	relay := f.relay("r")
 	f.network(api.CreateNetwork{Name: "n", Relays: []model.RelayID{relay}})
 	f.service("n", "a", false)
@@ -512,16 +517,47 @@ func TestDeletingARuleDropsItsEdgesAndQuarantinesPorts(t *testing.T) {
 	r := f.rule("n", "a", "b", model.TCP, 1)
 	f.attach("h1", "n", "a")
 	f.attach("h2", "n", "b")
+	edges := func() []store.Edge {
+		var out []store.Edge
+		f.s.View(context.Background(), func(tx store.ReadTx) error {
+			n, _ := tx.NetworkByName("n")
+			out, _ = tx.Edges(n.ID)
+			return nil
+		})
+		return out
+	}
+	before := edges()
 	f.update(func(tx store.Tx) error { return f.p.DeleteRule(tx, f.now, "n", r.ID) })
-	f.s.View(context.Background(), func(tx store.ReadTx) error {
-		n, _ := tx.NetworkByName("n")
-		edges, _ := tx.Edges(n.ID)
-		if len(edges) != 0 {
-			t.Errorf("%d edges left", len(edges))
+	if e := edges(); len(e) != 1 || e[0].Dormant.IsZero() {
+		t.Fatalf("edges after the rule went: %+v", e)
+	}
+	if peers := peerIDs(f.state("h1"), before[0].A); len(peers) != 0 {
+		peers = peerIDs(f.state("h1"), before[0].B)
+		if len(peers) != 0 {
+			t.Fatalf("a dormant edge still peers %v", peers)
 		}
-		ports, _ := tx.ReleasedPorts(relay, netip.MustParseAddr("10.0.0.1"), f.now.Add(time.Hour), 10)
+	}
+	f.rule("n", "a", "b", model.TCP, 1)
+	after := edges()
+	if len(after) != 1 || !after[0].Dormant.IsZero() || after[0].Ports[0] != before[0].Ports[0] || after[0].SecretAB != before[0].SecretAB {
+		t.Fatalf("the restored edge differs: %+v vs %+v", after, before)
+	}
+	r2 := after[0]
+	var rules []store.Rule
+	f.s.View(context.Background(), func(tx store.ReadTx) error { rules, _ = tx.Rules(r2.Network); return nil })
+	f.update(func(tx store.Tx) error { return f.p.DeleteRule(tx, f.now, "n", rules[0].ID) })
+	f.update(func(tx store.Tx) error { _, err := f.p.Sweep(tx, f.now.Add(f.p.Config.PortQuarantine-time.Second)); return err })
+	if len(edges()) != 1 {
+		t.Fatal("a dormant edge went before the quarantine passed")
+	}
+	f.update(func(tx store.Tx) error { _, err := f.p.Sweep(tx, f.now.Add(f.p.Config.PortQuarantine+time.Second)); return err })
+	if len(edges()) != 0 {
+		t.Fatal("a dormant edge outlived the quarantine")
+	}
+	f.s.View(context.Background(), func(tx store.ReadTx) error {
+		ports, _ := tx.ReleasedPorts(relay, before[0].Ports[0].Addr, f.now.Add(time.Second), 10)
 		if len(ports) != 2 {
-			t.Errorf("%d ports quarantined, want 2", len(ports))
+			t.Errorf("%d ports free, want 2", len(ports))
 		}
 		return nil
 	})

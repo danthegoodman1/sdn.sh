@@ -699,6 +699,14 @@ func (p *Plane) Sweep(tx store.Tx, now time.Time) (int, error) {
 	if changed >= SweepBatch {
 		return changed, nil
 	}
+	n, err := p.expireDormant(tx, now, SweepBatch-changed)
+	if err != nil {
+		return 0, err
+	}
+	changed += n
+	if changed >= SweepBatch {
+		return changed, nil
+	}
 	old, err := tx.Ended(now.Add(-p.Config.Retention), SweepBatch-changed)
 	if err != nil {
 		return 0, err

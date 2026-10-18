@@ -223,6 +223,10 @@ type RelayPort struct {
 
 // LocalAttach asks the agent to build an interface for a workload.
 type LocalAttach struct {
+	// Name identifies the workload on this host. Attaching a name again
+	// returns the interface already built for it, so a caller that lost an
+	// answer retries without leaking an interface.
+	Name    string `json:"name"`
 	Network string `json:"network"`
 	Service string `json:"service"`
 	Kind    Kind   `json:"kind,omitempty"`
@@ -232,6 +236,7 @@ type LocalAttach struct {
 // hand the workload and the addresses it holds.
 type LocalInterface struct {
 	Interface model.InterfaceID `json:"interface"`
+	Name      string            `json:"name"`
 	Network   model.NetworkID   `json:"network"`
 	Service   model.ServiceID   `json:"service"`
 	Namespace string            `json:"namespace"`

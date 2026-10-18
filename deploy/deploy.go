@@ -1,6 +1,6 @@
-// Package deploy carries the files sdn-lab installs on a fleet: the host
+// Package deploy carries the files wirenet-lab installs on a fleet: the host
 // preparation and purge scripts, the systemd units and the Prometheus
-// configuration. Embedding them lets sdn-lab deploy without a checkout.
+// configuration. Embedding them lets wirenet-lab deploy without a checkout.
 package deploy
 
 import "embed"

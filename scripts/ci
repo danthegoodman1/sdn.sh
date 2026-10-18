@@ -8,7 +8,7 @@
 #                                 simulator's fixed and regression seeds, and
 #                                 the mutant list
 #   scripts/ci postgres           store, control-plane and server tests on the
-#                                 Postgres database SDN_TEST_POSTGRES names
+#                                 Postgres database WIRENET_TEST_POSTGRES names
 #   scripts/ci sim [SEED [N]]     N simulator seeds (default 500) from SEED
 #                                 (default the commit hash: GITHUB_SHA, or HEAD)
 #   scripts/ci kernel             kernel and raw-socket tests, as root, in a
@@ -16,7 +16,7 @@
 #   scripts/ci e2e [FLAGS...]     end-to-end tests in a namespace lab, as root
 #   scripts/ci terraform          fmt and validate deploy/aws, when it exists
 #   scripts/ci all                every step above; postgres only when
-#                                 SDN_TEST_POSTGRES is set
+#                                 WIRENET_TEST_POSTGRES is set
 #
 # The kernel and e2e steps use sudo unless run as root.
 set -euo pipefail
@@ -55,14 +55,14 @@ step_test() {
 }
 
 step_postgres() {
-	: "${SDN_TEST_POSTGRES:?names no Postgres database}"
+	: "${WIRENET_TEST_POSTGRES:?names no Postgres database}"
 	go test -count=1 ./internal/store/... ./internal/cp/... ./internal/cpserver/...
 }
 
 step_sim() {
 	local seed=${1:-${GITHUB_SHA:-$(git rev-parse HEAD)}}
 	local count=${2:-500}
-	go run ./cmd/sdn-sim --seeds "$count" "$seed"
+	go run ./cmd/wirenet-sim --seeds "$count" "$seed"
 }
 
 step_kernel() {
@@ -100,10 +100,10 @@ case $1 in
 all)
 	step check
 	step test
-	if [ -n "${SDN_TEST_POSTGRES:-}" ]; then
+	if [ -n "${WIRENET_TEST_POSTGRES:-}" ]; then
 		step postgres
 	else
-		echo "scripts/ci postgres: skipped, SDN_TEST_POSTGRES is unset"
+		echo "scripts/ci postgres: skipped, WIRENET_TEST_POSTGRES is unset"
 	fi
 	step sim
 	step kernel

@@ -1,10 +1,10 @@
 #!/bin/bash
 # Runs once, at first boot: names the machine, then prepares it for its
-# role with deploy/hostprep.sh. `sdn-lab deploy` runs the same script again
+# role with deploy/hostprep.sh. `wirenet-lab deploy` runs the same script again
 # later, which changes nothing that is already right.
 set -euo pipefail
 hostnamectl set-hostname "${name}"
-install -d -m 0755 /usr/local/lib/sdn
-echo "${hostprep}" | base64 -d >/usr/local/lib/sdn/hostprep.sh
-chmod 0755 /usr/local/lib/sdn/hostprep.sh
-/usr/local/lib/sdn/hostprep.sh "${role}" 2>&1 | tee /var/log/sdn-hostprep.log
+install -d -m 0755 /usr/local/lib/wirenet
+echo "${hostprep}" | base64 -d >/usr/local/lib/wirenet/hostprep.sh
+chmod 0755 /usr/local/lib/wirenet/hostprep.sh
+/usr/local/lib/wirenet/hostprep.sh "${role}" 2>&1 | tee /var/log/wirenet-hostprep.log

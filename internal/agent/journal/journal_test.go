@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	agentcore "sdn.sh/internal/agent/core"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/prng"
+	agentcore "github.com/danthegoodman1/wirenet/internal/agent/core"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/prng"
 )
 
 func TestEntriesSurviveReopeningAndCarryNoPrivateKey(t *testing.T) {
@@ -18,8 +18,8 @@ func TestEntriesSurviveReopeningAndCarryNoPrivateKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	priv, _ := model.NewPrivateKey(prng.New(1))
-	a := agentcore.JournalEntry{Interface: "if-a", Name: "w1", Namespace: "sdn-a", ListenPort: 40000, PublicKey: priv.Public()}
-	b := agentcore.JournalEntry{Interface: "if-b", Name: "w2", Namespace: "sdn-b", ListenPort: 40001}
+	a := agentcore.JournalEntry{Interface: "if-a", Name: "w1", Namespace: "wirenet-a", ListenPort: 40000, PublicKey: priv.Public()}
+	b := agentcore.JournalEntry{Interface: "if-b", Name: "w2", Namespace: "wirenet-b", ListenPort: 40001}
 	for _, e := range []agentcore.JournalEntry{b, a} {
 		if err := j.Write(e); err != nil {
 			t.Fatal(err)

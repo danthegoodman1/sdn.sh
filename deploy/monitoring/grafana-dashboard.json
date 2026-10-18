@@ -1,9 +1,9 @@
 {
-  "title": "sdn.sh fleet",
-  "uid": "sdn-fleet",
-  "description": "Control plane, agents and relays of an sdn.sh fleet, from deploy/monitoring/prometheus.yml.",
+  "title": "wirenet fleet",
+  "uid": "wirenet-fleet",
+  "description": "Control plane, agents and relays of an wirenet fleet, from deploy/monitoring/prometheus.yml.",
   "tags": [
-    "sdn.sh"
+    "wirenet"
   ],
   "timezone": "utc",
   "schemaVersion": 39,
@@ -87,7 +87,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (route) (rate(sdn_cp_requests_total[$__rate_interval]))",
+          "expr": "sum by (route) (rate(wirenet_cp_requests_total[$__rate_interval]))",
           "legendFormat": "{{route}}",
           "refId": "A"
         }
@@ -135,7 +135,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (route, code) (rate(sdn_cp_requests_total{code!~\"2..\"}[$__rate_interval]))",
+          "expr": "sum by (route, code) (rate(wirenet_cp_requests_total{code!~\"2..\"}[$__rate_interval]))",
           "legendFormat": "{{route}} {{code}}",
           "refId": "A"
         }
@@ -183,7 +183,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum by (route, le) (rate(sdn_cp_request_seconds_bucket{route!~\"GET /v1/(agent|relay)/state\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (route, le) (rate(wirenet_cp_request_seconds_bucket{route!~\"GET /v1/(agent|relay)/state\"}[$__rate_interval])))",
           "legendFormat": "{{route}}",
           "refId": "A"
         }
@@ -231,7 +231,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (op, le) (rate(sdn_cp_store_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (op, le) (rate(wirenet_cp_store_seconds_bucket[$__rate_interval])))",
           "legendFormat": "p50 {{op}}",
           "refId": "A"
         },
@@ -240,7 +240,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum by (op, le) (rate(sdn_cp_store_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (op, le) (rate(wirenet_cp_store_seconds_bucket[$__rate_interval])))",
           "legendFormat": "p99 {{op}}",
           "refId": "B"
         }
@@ -288,7 +288,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (op, result) (rate(sdn_cp_store_transactions_total[$__rate_interval]))",
+          "expr": "sum by (op, result) (rate(wirenet_cp_store_transactions_total[$__rate_interval]))",
           "legendFormat": "{{op}} {{result}}",
           "refId": "A"
         }
@@ -336,7 +336,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (kind) (sdn_cp_polls_open)",
+          "expr": "sum by (kind) (wirenet_cp_polls_open)",
           "legendFormat": "{{kind}}",
           "refId": "A"
         }
@@ -384,7 +384,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(sdn_cp_push_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(wirenet_cp_push_seconds_bucket[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "A"
         },
@@ -393,7 +393,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(sdn_cp_push_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(wirenet_cp_push_seconds_bucket[$__rate_interval])))",
           "legendFormat": "p99",
           "refId": "B"
         }
@@ -441,7 +441,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(sdn_cp_pushes_total[$__rate_interval]))",
+          "expr": "sum(rate(wirenet_cp_pushes_total[$__rate_interval]))",
           "legendFormat": "pushes",
           "refId": "A"
         }
@@ -489,7 +489,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (event) (rate(sdn_cp_lease_events_total[$__rate_interval]))",
+          "expr": "sum by (event) (rate(wirenet_cp_lease_events_total[$__rate_interval]))",
           "legendFormat": "{{event}}",
           "refId": "A"
         },
@@ -498,7 +498,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(sdn_cp_swept_interfaces_total[$__rate_interval]))",
+          "expr": "sum(rate(wirenet_cp_swept_interfaces_total[$__rate_interval]))",
           "legendFormat": "swept",
           "refId": "B"
         }
@@ -546,7 +546,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (state) (sdn_cp_interfaces)",
+          "expr": "max by (state) (wirenet_cp_interfaces)",
           "legendFormat": "{{state}}",
           "refId": "A"
         }
@@ -594,7 +594,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max(sdn_cp_ipv4_quarantined)",
+          "expr": "max(wirenet_cp_ipv4_quarantined)",
           "legendFormat": "quarantined",
           "refId": "A"
         }
@@ -642,7 +642,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (relay, pool) (sdn_cp_relay_ports)",
+          "expr": "max by (relay, pool) (wirenet_cp_relay_ports)",
           "legendFormat": "{{relay}} {{pool}}",
           "refId": "A"
         }
@@ -703,7 +703,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum by (node, call, le) (rate(sdn_agent_local_call_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (node, call, le) (rate(wirenet_agent_local_call_seconds_bucket[$__rate_interval])))",
           "legendFormat": "{{node}} {{call}}",
           "refId": "A"
         }
@@ -751,7 +751,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (call, result) (rate(sdn_agent_local_calls_total[$__rate_interval]))",
+          "expr": "sum by (call, result) (rate(wirenet_agent_local_calls_total[$__rate_interval]))",
           "legendFormat": "{{call}} {{result}}",
           "refId": "A"
         }
@@ -799,7 +799,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum by (kind, le) (rate(sdn_agent_kernel_op_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (kind, le) (rate(wirenet_agent_kernel_op_seconds_bucket[$__rate_interval])))",
           "legendFormat": "{{kind}}",
           "refId": "A"
         }
@@ -847,7 +847,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (kind, result) (rate(sdn_agent_kernel_ops_total[$__rate_interval]))",
+          "expr": "sum by (kind, result) (rate(wirenet_agent_kernel_ops_total[$__rate_interval]))",
           "legendFormat": "{{kind}} {{result}}",
           "refId": "A"
         }
@@ -895,7 +895,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (node, le) (rate(sdn_agent_batch_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (node, le) (rate(wirenet_agent_batch_seconds_bucket[$__rate_interval])))",
           "legendFormat": "p50 {{node}}",
           "refId": "A"
         },
@@ -904,7 +904,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum by (node, le) (rate(sdn_agent_batch_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (node, le) (rate(wirenet_agent_batch_seconds_bucket[$__rate_interval])))",
           "legendFormat": "p99 {{node}}",
           "refId": "B"
         }
@@ -952,7 +952,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (node, result) (rate(sdn_agent_batches_total[$__rate_interval]))",
+          "expr": "sum by (node, result) (rate(wirenet_agent_batches_total[$__rate_interval]))",
           "legendFormat": "{{node}} {{result}}",
           "refId": "A"
         }
@@ -1000,7 +1000,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sdn_agent_generation",
+          "expr": "wirenet_agent_generation",
           "legendFormat": "{{node}}",
           "refId": "A"
         },
@@ -1009,7 +1009,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max(sdn_agent_generation)",
+          "expr": "max(wirenet_agent_generation)",
           "legendFormat": "newest",
           "refId": "B"
         }
@@ -1057,7 +1057,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum by (node, le) (rate(sdn_agent_nft_transaction_size_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (node, le) (rate(wirenet_agent_nft_transaction_size_bucket[$__rate_interval])))",
           "legendFormat": "{{node}}",
           "refId": "A"
         }
@@ -1105,7 +1105,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (what) (rate(sdn_agent_flushed_total[$__rate_interval]))",
+          "expr": "sum by (what) (rate(wirenet_agent_flushed_total[$__rate_interval]))",
           "legendFormat": "{{what}}",
           "refId": "A"
         }
@@ -1153,7 +1153,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (node, relay, le) (rate(sdn_agent_relay_probe_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (node, relay, le) (rate(wirenet_agent_relay_probe_seconds_bucket[$__rate_interval])))",
           "legendFormat": "p50 {{node}} to {{relay}}",
           "refId": "A"
         },
@@ -1162,7 +1162,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum by (node, relay, le) (rate(sdn_agent_relay_probe_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (node, relay, le) (rate(wirenet_agent_relay_probe_seconds_bucket[$__rate_interval])))",
           "legendFormat": "p99 {{node}} to {{relay}}",
           "refId": "B"
         }
@@ -1210,7 +1210,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "1 - sum by (node, relay) (rate(sdn_agent_relay_probes_total{result=\"answered\"}[$__rate_interval])) / sum by (node, relay) (rate(sdn_agent_relay_probes_total{result=\"sent\"}[$__rate_interval]))",
+          "expr": "1 - sum by (node, relay) (rate(wirenet_agent_relay_probes_total{result=\"answered\"}[$__rate_interval])) / sum by (node, relay) (rate(wirenet_agent_relay_probes_total{result=\"sent\"}[$__rate_interval]))",
           "legendFormat": "{{node}} to {{relay}}",
           "refId": "A"
         }
@@ -1258,7 +1258,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (node, result) (rate(sdn_agent_registrations_total[$__rate_interval]))",
+          "expr": "sum by (node, result) (rate(wirenet_agent_registrations_total[$__rate_interval]))",
           "legendFormat": "{{node}} {{result}}",
           "refId": "A"
         }
@@ -1306,7 +1306,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (node, event) (increase(sdn_agent_core_events_total[5m]))",
+          "expr": "sum by (node, event) (increase(wirenet_agent_core_events_total[5m]))",
           "legendFormat": "{{node}} {{event}}",
           "refId": "A"
         }
@@ -1354,7 +1354,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (call, result) (rate(sdn_agent_cp_calls_total[$__rate_interval]))",
+          "expr": "sum by (call, result) (rate(wirenet_agent_cp_calls_total[$__rate_interval]))",
           "legendFormat": "{{call}} {{result}}",
           "refId": "A"
         },
@@ -1363,7 +1363,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (result) (rate(sdn_agent_polls_total[$__rate_interval]))",
+          "expr": "sum by (result) (rate(wirenet_agent_polls_total[$__rate_interval]))",
           "legendFormat": "poll {{result}}",
           "refId": "B"
         }
@@ -1411,7 +1411,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (node, phase) (sdn_agent_interfaces)",
+          "expr": "sum by (node, phase) (wirenet_agent_interfaces)",
           "legendFormat": "{{node}} {{phase}}",
           "refId": "A"
         },
@@ -1420,7 +1420,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (node, kind) (sdn_agent_namespaces)",
+          "expr": "sum by (node, kind) (wirenet_agent_namespaces)",
           "legendFormat": "{{node}} namespaces {{kind}}",
           "refId": "B"
         },
@@ -1429,7 +1429,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (node) (sdn_agent_peers)",
+          "expr": "sum by (node) (wirenet_agent_peers)",
           "legendFormat": "{{node}} peers",
           "refId": "C"
         }
@@ -1490,7 +1490,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (node) (rate(sdn_relay_forwarded_packets_total[$__rate_interval]))",
+          "expr": "sum by (node) (rate(wirenet_relay_forwarded_packets_total[$__rate_interval]))",
           "legendFormat": "{{node}}",
           "refId": "A"
         }
@@ -1538,7 +1538,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "8 * sum by (node) (rate(sdn_relay_forwarded_bytes_total[$__rate_interval]))",
+          "expr": "8 * sum by (node) (rate(wirenet_relay_forwarded_bytes_total[$__rate_interval]))",
           "legendFormat": "{{node}}",
           "refId": "A"
         }
@@ -1586,7 +1586,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (node, reason) (rate(sdn_relay_dropped_packets_total[$__rate_interval]))",
+          "expr": "sum by (node, reason) (rate(wirenet_relay_dropped_packets_total[$__rate_interval]))",
           "legendFormat": "{{node}} {{reason}}",
           "refId": "A"
         },
@@ -1595,7 +1595,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (node) (rate(sdn_relay_write_failed_packets_total[$__rate_interval]))",
+          "expr": "sum by (node) (rate(wirenet_relay_write_failed_packets_total[$__rate_interval]))",
           "legendFormat": "{{node}} write failed",
           "refId": "B"
         }
@@ -1643,7 +1643,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (node, result) (rate(sdn_relay_registrations_total[$__rate_interval]))",
+          "expr": "sum by (node, result) (rate(wirenet_relay_registrations_total[$__rate_interval]))",
           "legendFormat": "{{node}} {{result}}",
           "refId": "A"
         }
@@ -1691,7 +1691,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (node, family) (rate(sdn_relay_udp_rcvbuf_errors_total[$__rate_interval]))",
+          "expr": "sum by (node, family) (rate(wirenet_relay_udp_rcvbuf_errors_total[$__rate_interval]))",
           "legendFormat": "{{node}} {{family}}",
           "refId": "A"
         }
@@ -1739,7 +1739,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (node, le) (rate(sdn_relay_registration_fsync_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (node, le) (rate(wirenet_relay_registration_fsync_seconds_bucket[$__rate_interval])))",
           "legendFormat": "p50 {{node}}",
           "refId": "A"
         },
@@ -1748,7 +1748,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum by (node, le) (rate(sdn_relay_registration_fsync_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (node, le) (rate(wirenet_relay_registration_fsync_seconds_bucket[$__rate_interval])))",
           "legendFormat": "p99 {{node}}",
           "refId": "B"
         }
@@ -1796,7 +1796,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (node, le) (rate(sdn_relay_read_batch_size_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (node, le) (rate(wirenet_relay_read_batch_size_bucket[$__rate_interval])))",
           "legendFormat": "{{node}}",
           "refId": "A"
         }
@@ -1844,7 +1844,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sdn_relay_ports",
+          "expr": "wirenet_relay_ports",
           "legendFormat": "ports {{node}}",
           "refId": "A"
         },
@@ -1853,7 +1853,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sdn_relay_generation",
+          "expr": "wirenet_relay_generation",
           "legendFormat": "generation {{node}}",
           "refId": "B"
         }
@@ -1901,7 +1901,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "topk(10, 8 * rate(sdn_relay_port_forwarded_bytes_total[$__rate_interval]))",
+          "expr": "topk(10, 8 * rate(wirenet_relay_port_forwarded_bytes_total[$__rate_interval]))",
           "legendFormat": "{{node}} {{port}}",
           "refId": "A"
         }
@@ -1949,7 +1949,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (node) (sdn_relay_unbound_ports)",
+          "expr": "sum by (node) (wirenet_relay_unbound_ports)",
           "legendFormat": "{{node}} unbound",
           "refId": "A"
         },
@@ -1958,7 +1958,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (node) (rate(sdn_relay_bind_failures_total[$__rate_interval]))",
+          "expr": "sum by (node) (rate(wirenet_relay_bind_failures_total[$__rate_interval]))",
           "legendFormat": "{{node}} bind failures",
           "refId": "B"
         },
@@ -1967,7 +1967,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (node) (rate(sdn_relay_probes_limited_total[$__rate_interval]))",
+          "expr": "sum by (node) (rate(wirenet_relay_probes_limited_total[$__rate_interval]))",
           "legendFormat": "{{node}} probes limited",
           "refId": "C"
         }
@@ -2015,7 +2015,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (relay) (sdn_agent_relay_peers)",
+          "expr": "sum by (relay) (wirenet_agent_relay_peers)",
           "legendFormat": "{{relay}}",
           "refId": "A"
         }
@@ -2063,7 +2063,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (relay) (sdn_agent_relay_up)",
+          "expr": "sum by (relay) (wirenet_agent_relay_up)",
           "legendFormat": "up {{relay}}",
           "refId": "A"
         },
@@ -2072,7 +2072,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count by (relay) (sdn_agent_relay_up == 0)",
+          "expr": "count by (relay) (wirenet_agent_relay_up == 0)",
           "legendFormat": "down {{relay}}",
           "refId": "B"
         }

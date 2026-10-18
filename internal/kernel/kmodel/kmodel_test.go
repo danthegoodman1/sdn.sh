@@ -4,9 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"sdn.sh/internal/kernel"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/prng"
+	"github.com/danthegoodman1/wirenet/internal/kernel"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/prng"
 )
 
 func run(t *testing.T, k *Kernel, op kernel.Op) {
@@ -24,8 +24,8 @@ func device(t *testing.T, k *Kernel, name string, port uint16) {
 		t.Fatal(err)
 	}
 	run(t, k, kernel.Op{Kind: kernel.CreateNamespace, Namespace: name})
-	run(t, k, kernel.Op{Kind: kernel.CreateDevice, Namespace: name, Device: "sdn0",
-		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: port, Alias: "sdn:test:" + name}})
+	run(t, k, kernel.Op{Kind: kernel.CreateDevice, Namespace: name, Device: "wirenet0",
+		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: port, Alias: "wirenet:test:" + name}})
 }
 
 // TestTheAgentsSocketsHoldANamespaceItsNameNoLongerReaches deletes a
@@ -42,7 +42,7 @@ func TestTheAgentsSocketsHoldANamespaceItsNameNoLongerReaches(t *testing.T) {
 			}
 			held, _ := k.Named("a")
 			k.Unname("a")
-			if _, err := k.Namespace("a", "sdn:test:"); !errors.Is(err, kernel.ErrNoNamespace) {
+			if _, err := k.Namespace("a", "wirenet:test:"); !errors.Is(err, kernel.ErrNoNamespace) {
 				t.Fatalf("observing a deleted name: %v", err)
 			}
 			k.Unhold(held)

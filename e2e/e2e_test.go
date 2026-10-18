@@ -23,11 +23,11 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/devconf"
-	"sdn.sh/internal/lab"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/store/pgstore/pgtest"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/devconf"
+	"github.com/danthegoodman1/wirenet/internal/lab"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/store/pgstore/pgtest"
 )
 
 // newLab starts a lab for one test, named for it so a crashed run's leftovers
@@ -37,7 +37,7 @@ func newLab(t *testing.T, name string, cpArgs ...string) *lab.Lab {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root: scripts/e2e")
 	}
-	bin := os.Getenv("SDN_LAB_BIN")
+	bin := os.Getenv("WIRENET_LAB_BIN")
 	if bin == "" {
 		var err error
 		if bin, err = lab.Build(t.TempDir()); err != nil {
@@ -46,7 +46,7 @@ func newLab(t *testing.T, name string, cpArgs ...string) *lab.Lab {
 	}
 	dir := t.TempDir()
 	store := "memory"
-	if os.Getenv("SDN_TEST_POSTGRES") != "" {
+	if os.Getenv("WIRENET_TEST_POSTGRES") != "" {
 		// A schema of its own, so a test never sees another's records.
 		store = pgtest.NewSchema(t)
 	}
@@ -58,7 +58,7 @@ func newLab(t *testing.T, name string, cpArgs ...string) *lab.Lab {
 		if t.Failed() {
 			t.Log(l.Logs(40))
 		}
-		if keep := os.Getenv("SDN_LAB_KEEP"); keep != "" && (t.Failed() || os.Getenv("SDN_LAB_KEEP_ALWAYS") != "") {
+		if keep := os.Getenv("WIRENET_LAB_KEEP"); keep != "" && (t.Failed() || os.Getenv("WIRENET_LAB_KEEP_ALWAYS") != "") {
 			keepFiles(dir, filepath.Join(keep, name))
 		}
 		l.Close()
@@ -159,14 +159,14 @@ func TestTwoHostsReachEachOtherThroughARelayAndNothingElse(t *testing.T) {
 	// The data path ran through the relay, which forwarded and admitted
 	// registrations.
 	m := must(lab.Metrics(relay.Telemetry))
-	if v := metric(m, `sdn_relay_forwarded_packets_total`); v == 0 {
-		t.Errorf("the relay forwarded nothing:\n%s", grep(m, "sdn_relay"))
+	if v := metric(m, `wirenet_relay_forwarded_packets_total`); v == 0 {
+		t.Errorf("the relay forwarded nothing:\n%s", grep(m, "wirenet_relay"))
 	}
-	if v := metric(m, `sdn_relay_registrations_total{result="accepted"}`); v < 2 {
+	if v := metric(m, `wirenet_relay_registrations_total{result="accepted"}`); v < 2 {
 		t.Errorf("the relay accepted %v registrations, want both directions", v)
 	}
 	am := must(lab.Metrics(h1.Telemetry))
-	if v := metric(am, `sdn_agent_local_calls_total{call="attach",result="ok"}`); v != 1 {
+	if v := metric(am, `wirenet_agent_local_calls_total{call="attach",result="ok"}`); v != 1 {
 		t.Errorf("agent attach count %v", v)
 	}
 
@@ -346,10 +346,10 @@ func TestTrafficFailsOverWhenItsRelayDies(t *testing.T) {
 	}
 	// The one edge sends through one relay of the two.
 	carrier, other := r1, r2
-	if metric(must(lab.Metrics(r1.Telemetry)), "sdn_relay_forwarded_packets_total") == 0 {
+	if metric(must(lab.Metrics(r1.Telemetry)), "wirenet_relay_forwarded_packets_total") == 0 {
 		carrier, other = r2, r1
 	}
-	if metric(must(lab.Metrics(carrier.Telemetry)), "sdn_relay_forwarded_packets_total") == 0 {
+	if metric(must(lab.Metrics(carrier.Telemetry)), "wirenet_relay_forwarded_packets_total") == 0 {
 		t.Fatal("neither relay forwarded the edge's traffic")
 	}
 	carrier.Kill()
@@ -358,7 +358,7 @@ func TestTrafficFailsOverWhenItsRelayDies(t *testing.T) {
 		t.Fatalf("no failover: %v", err)
 	}
 	t.Logf("failover: a new connection reached db %v after %s died", took, carrier.Name)
-	if metric(must(lab.Metrics(other.Telemetry)), "sdn_relay_forwarded_packets_total") == 0 {
+	if metric(must(lab.Metrics(other.Telemetry)), "wirenet_relay_forwarded_packets_total") == 0 {
 		t.Fatalf("%s, the survivor, forwarded nothing", other.Name)
 	}
 	if took > 3*time.Second {
@@ -401,7 +401,7 @@ func TestANetworksEdgesSpreadOverItsRelays(t *testing.T) {
 		}
 	}
 	for _, r := range []*lab.Relay{r1, r2} {
-		if metric(must(lab.Metrics(r.Telemetry)), "sdn_relay_forwarded_packets_total") == 0 {
+		if metric(must(lab.Metrics(r.Telemetry)), "wirenet_relay_forwarded_packets_total") == 0 {
 			t.Fatalf("%s forwarded nothing; the network's edges all took the other relay", r.Name)
 		}
 	}
@@ -410,8 +410,8 @@ func TestANetworksEdgesSpreadOverItsRelays(t *testing.T) {
 	split := func(h *lab.Host) [2]float64 {
 		m := must(lab.Metrics(h.Telemetry))
 		return [2]float64{
-			metric(m, fmt.Sprintf(`sdn_agent_relay_peers{relay="%s"}`, r1.ID)),
-			metric(m, fmt.Sprintf(`sdn_agent_relay_peers{relay="%s"}`, r2.ID)),
+			metric(m, fmt.Sprintf(`wirenet_agent_relay_peers{relay="%s"}`, r1.ID)),
+			metric(m, fmt.Sprintf(`wirenet_agent_relay_peers{relay="%s"}`, r2.ID)),
 		}
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -455,7 +455,7 @@ func TestARelayRestartsFromItsDisk(t *testing.T) {
 	}
 	t.Logf("a restarted relay carried traffic again after %v", took)
 	m := must(lab.Metrics(relay.Telemetry))
-	if v := metric(m, `sdn_relay_registrations_total{result="accepted"}`); v != 0 {
+	if v := metric(m, `wirenet_relay_registrations_total{result="accepted"}`); v != 0 {
 		t.Errorf("the restarted relay needed %v registrations", v)
 	}
 }
@@ -471,7 +471,7 @@ func TestCoLocatedInterfacesPeerOverTheHostLoopback(t *testing.T) {
 	if _, err := lab.DialUntil(web.Namespace, netip.AddrPortFrom(svc.Addr6, 5432), 20*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if v := metric(must(lab.Metrics(relay.Telemetry)), "sdn_relay_forwarded_packets_total"); v != 0 {
+	if v := metric(must(lab.Metrics(relay.Telemetry)), "wirenet_relay_forwarded_packets_total"); v != 0 {
 		t.Errorf("the relay forwarded %v packets between interfaces on one host", v)
 	}
 }
@@ -738,7 +738,7 @@ func TestAnEgressGrantReachesTheInternetOnItsPortsAlone(t *testing.T) {
 }
 
 // laptop registers a development machine behind gw and brings it up from
-// its generated config, minting the key here as sdnctl does.
+// its generated config, minting the key here as wirenetctl does.
 func laptop(t *testing.T, l *lab.Lab, name string, gw model.InterfaceID, ttl time.Duration) (*lab.Laptop, api.DeviceConfig) {
 	t.Helper()
 	priv := must(model.NewPrivateKey(crand.Reader))
@@ -876,33 +876,33 @@ func TestEveryDaemonReportsWhatItDoes(t *testing.T) {
 	}
 	cpm := l.CPTelemetry()
 	expect("after an attach",
-		check{h1.Telemetry, `sdn_agent_local_calls_total{call="attach",result="ok"}`, 1},
-		check{h1.Telemetry, `sdn_agent_kernel_ops_total{kind="create_device",result="ok"}`, 1},
-		check{h1.Telemetry, `sdn_agent_kernel_op_seconds_count{kind="set_peers"}`, 1},
-		check{h1.Telemetry, `sdn_agent_convergence_seconds_count`, 1},
-		check{h1.Telemetry, `sdn_agent_registrations_total{result="sent"}`, 1},
-		check{h1.Telemetry, `sdn_agent_relay_probes_total`, 1},
-		check{h1.Telemetry, `sdn_agent_interfaces{phase="ready"}`, 1},
-		check{h1.Telemetry, `sdn_agent_namespaces{kind="named"}`, 1},
-		check{h1.Telemetry, `sdn_agent_peers`, 1},
-		check{h1.Telemetry, `sdn_agent_generation`, 1},
-		check{cpm, `sdn_cp_requests_total{code="200",route="POST /v1/agent/attach"}`, 2},
-		check{cpm, `sdn_cp_lease_events_total{event="attached"}`, 2},
-		check{cpm, `sdn_cp_store_transactions_total{op="attach",result="ok"}`, 2},
-		check{cpm, `sdn_cp_pushes_total`, 1},
-		check{r1.Telemetry, `sdn_relay_registrations_total{result="accepted"}`, 2},
-		check{r1.Telemetry, `sdn_relay_ports`, 2},
-		check{r2.Telemetry, `sdn_relay_registrations_total{result="accepted"}`, 2},
-		check{r2.Telemetry, `sdn_relay_ports`, 2},
+		check{h1.Telemetry, `wirenet_agent_local_calls_total{call="attach",result="ok"}`, 1},
+		check{h1.Telemetry, `wirenet_agent_kernel_ops_total{kind="create_device",result="ok"}`, 1},
+		check{h1.Telemetry, `wirenet_agent_kernel_op_seconds_count{kind="set_peers"}`, 1},
+		check{h1.Telemetry, `wirenet_agent_convergence_seconds_count`, 1},
+		check{h1.Telemetry, `wirenet_agent_registrations_total{result="sent"}`, 1},
+		check{h1.Telemetry, `wirenet_agent_relay_probes_total`, 1},
+		check{h1.Telemetry, `wirenet_agent_interfaces{phase="ready"}`, 1},
+		check{h1.Telemetry, `wirenet_agent_namespaces{kind="named"}`, 1},
+		check{h1.Telemetry, `wirenet_agent_peers`, 1},
+		check{h1.Telemetry, `wirenet_agent_generation`, 1},
+		check{cpm, `wirenet_cp_requests_total{code="200",route="POST /v1/agent/attach"}`, 2},
+		check{cpm, `wirenet_cp_lease_events_total{event="attached"}`, 2},
+		check{cpm, `wirenet_cp_store_transactions_total{op="attach",result="ok"}`, 2},
+		check{cpm, `wirenet_cp_pushes_total`, 1},
+		check{r1.Telemetry, `wirenet_relay_registrations_total{result="accepted"}`, 2},
+		check{r1.Telemetry, `wirenet_relay_ports`, 2},
+		check{r2.Telemetry, `wirenet_relay_registrations_total{result="accepted"}`, 2},
+		check{r2.Telemetry, `wirenet_relay_ports`, 2},
 	)
 	// The one edge sends through one relay of the two.
 	carrier := r1
-	if metric(must(lab.Metrics(r1.Telemetry)), "sdn_relay_forwarded_packets_total") == 0 {
+	if metric(must(lab.Metrics(r1.Telemetry)), "wirenet_relay_forwarded_packets_total") == 0 {
 		carrier = r2
 	}
-	expect("after an attach", check{carrier.Telemetry, `sdn_relay_forwarded_packets_total`, 1},
-		check{h1.Telemetry, fmt.Sprintf(`sdn_agent_relay_peers{relay="%s"}`, carrier.ID), 1},
-		check{h1.Telemetry, fmt.Sprintf(`sdn_agent_relay_up{relay="%s"}`, carrier.ID), 1})
+	expect("after an attach", check{carrier.Telemetry, `wirenet_relay_forwarded_packets_total`, 1},
+		check{h1.Telemetry, fmt.Sprintf(`wirenet_agent_relay_peers{relay="%s"}`, carrier.ID), 1},
+		check{h1.Telemetry, fmt.Sprintf(`wirenet_agent_relay_up{relay="%s"}`, carrier.ID), 1})
 	if lines := h1.Agent.LogLines("attach"); len(lines) == 0 || lines[0]["interface"] != string(web.Interface) ||
 		lines[0]["namespace"] != web.Namespace || lines[0]["network"] != string(web.Network) || lines[0]["service"] != string(web.Service) {
 		t.Errorf("the agent's attach line: %v", lines)
@@ -915,28 +915,28 @@ func TestEveryDaemonReportsWhatItDoes(t *testing.T) {
 	}
 
 	// A service change rewrites the client's slot map in one transaction.
-	before := metric(must(lab.Metrics(h1.Telemetry)), `sdn_agent_nft_transaction_size_count`)
+	before := metric(must(lab.Metrics(h1.Telemetry)), `wirenet_agent_nft_transaction_size_count`)
 	attachDB(t, h2, "db-2")
-	expect("after a service change", check{h1.Telemetry, `sdn_agent_nft_transaction_size_count`, before + 1})
+	expect("after a service change", check{h1.Telemetry, `wirenet_agent_nft_transaction_size_count`, before + 1})
 
 	// A failover is counted and logged.
 	carrier.Kill()
 	if _, _, err := timeToReach(web.Namespace, dbAddr, 15*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	expect("after a failover", check{h1.Telemetry, `sdn_agent_core_events_total{event="failovers"}`, 1})
+	expect("after a failover", check{h1.Telemetry, `wirenet_agent_core_events_total{event="failovers"}`, 1})
 	if lines := h1.Agent.LogLines("relay failover"); len(lines) == 0 || lines[0]["relays_up"] == nil {
 		t.Errorf("the agent's failover line: %v", lines)
 	}
 
 	// A revocation is counted at the control plane and flushes at the peer.
-	flushes := metric(must(lab.Metrics(h1.Telemetry)), `sdn_agent_kernel_ops_total{kind="flush",result="ok"}`)
+	flushes := metric(must(lab.Metrics(h1.Telemetry)), `wirenet_agent_kernel_ops_total{kind="flush",result="ok"}`)
 	if err := l.Admin.Revoke(ctx, db1.Interface); err != nil {
 		t.Fatal(err)
 	}
 	expect("after a revocation",
-		check{cpm, `sdn_cp_lease_events_total{event="revoked"}`, 1},
-		check{h1.Telemetry, `sdn_agent_kernel_ops_total{kind="flush",result="ok"}`, flushes + 1},
+		check{cpm, `wirenet_cp_lease_events_total{event="revoked"}`, 1},
+		check{h1.Telemetry, `wirenet_agent_kernel_ops_total{kind="flush",result="ok"}`, flushes + 1},
 	)
 	if lines := l.CP().LogLines("interface revoked"); len(lines) != 1 || lines[0]["interface"] != string(db1.Interface) {
 		t.Errorf("the control plane's revocation line: %v", lines)
@@ -948,8 +948,8 @@ func TestEveryDaemonReportsWhatItDoes(t *testing.T) {
 // the agents hold, and the restarted control plane holds expiry off until
 // agents have renewed, so no interface is revoked.
 func TestTrafficOutlivesTheControlPlaneAndARestartRevokesNothing(t *testing.T) {
-	if os.Getenv("SDN_TEST_POSTGRES") == "" {
-		t.Skip("needs a durable store: set SDN_TEST_POSTGRES")
+	if os.Getenv("WIRENET_TEST_POSTGRES") == "" {
+		t.Skip("needs a durable store: set WIRENET_TEST_POSTGRES")
 	}
 	l := newLab(t, "e2em", fastClocks...)
 	ctx := context.Background()

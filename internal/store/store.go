@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package store defines the control plane's records and the transactional
 // interface every database implements. The control plane's logic lives above
@@ -12,8 +12,8 @@ import (
 	"slices"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // Errors every backend returns for the same conditions, so the control

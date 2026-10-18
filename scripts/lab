@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds the daemons, sdn-bench, hostbench and sdn-lab as you, then runs
-# sdn-lab as root, since the local environment creates namespaces and
+# Builds the daemons, wirenet-bench, hostbench and wirenet-lab as you, then runs
+# wirenet-lab as root, since the local environment creates namespaces and
 # devices. Reports land in reports/ under the repository.
 #
 #   scripts/lab run --plan paths --duration 3s
@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-go build -o "$work/" ./cmd/sdn-cp ./cmd/sdn-agent ./cmd/sdn-relay ./cmd/sdnctl ./cmd/sdn-bench ./cmd/hostbench ./cmd/sdn-lab
+go build -o "$work/" ./cmd/wirenet-cp ./cmd/wirenet-agent ./cmd/wirenet-relay ./cmd/wirenetctl ./cmd/wirenet-bench ./cmd/hostbench ./cmd/wirenet-lab
 cmd=${1:-}
 shift || true
-sudo "$work/sdn-lab" "$cmd" --bin "$work" "$@"
+sudo "$work/wirenet-lab" "$cmd" --bin "$work" "$@"

@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package kmodel is the simulator's model of one host's kernel: namespaces,
 // WireGuard devices and their peer tables, the nftables table in each
@@ -23,9 +23,9 @@ import (
 	"slices"
 	"strings"
 
-	"sdn.sh/internal/kernel"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/nft"
+	"github.com/danthegoodman1/wirenet/internal/kernel"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/nft"
 )
 
 // Kernel models one host.

@@ -18,12 +18,12 @@ import (
 
 	"github.com/rs/zerolog"
 
-	agentcore "sdn.sh/internal/agent/core"
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/dns"
-	"sdn.sh/internal/kernel"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/regproto"
+	agentcore "github.com/danthegoodman1/wirenet/internal/agent/core"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/dns"
+	"github.com/danthegoodman1/wirenet/internal/kernel"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/regproto"
 )
 
 // ControlPlane is the agent's side of the control plane's API.

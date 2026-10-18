@@ -1,6 +1,6 @@
-// Package bench holds what sdn-bench reports and sdn-lab reads: the JSON
+// Package bench holds what wirenet-bench reports and wirenet-lab reads: the JSON
 // result of each subcommand, and the latency summary both compute. It uses
-// the standard library alone, so sdn-bench stays a single binary with no
+// the standard library alone, so wirenet-bench stays a single binary with no
 // dependencies to install on a host.
 package bench
 
@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Port is where sdn-bench serves unless told otherwise.
+// Port is where wirenet-bench serves unless told otherwise.
 const Port = 5300
 
 // Latency summarizes a set of samples, in milliseconds.

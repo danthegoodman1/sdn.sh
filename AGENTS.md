@@ -1,4 +1,4 @@
-# sdn.sh
+# wirenet
 
 `SPEC.md` is the design contract and holds every measurement. Read it before changing behavior, and when code and spec disagree, fix one of them in the same change. `PLAN.md` is the build plan: work in its order and update its ledgers with evidence. `README.md` carries the positioning and the fleet's headline figures, copied from `SPEC.md`, which keeps each with its method and substrate; a run that changes a headline figure updates both.
 
@@ -45,7 +45,7 @@
 - **WireGuard initiates nothing without a reason.** No traffic and no `persistent-keepalive` means no handshake, so a test that waits for one will wait forever. A socket also appears only once the device is up, since it is created in `ndo_open`.
 - **`nft list` segfaults on a `jhash`-keyed map on nftables 1.0.9.** The ruleset works; the inspection tool crashes. Use `numgen random` until a newer `nft` is the floor.
 - **Judge an agent decision when it is planned.** A simulator property that checks an operation when it lands flags a correct plan that a concurrent policy change overtook. Check the batch as the agent emits it, against the kernel as it stands then.
-- **The lab's hosts share one kernel.** `sdn-lab --env local` and `e2e` run every host on one RTNL lock and the memory store under one mutex, so their latencies show mechanisms and their throughput says nothing about a fleet.
+- **The lab's hosts share one kernel.** `wirenet-lab --env local` and `e2e` run every host on one RTNL lock and the memory store under one mutex, so their latencies show mechanisms and their throughput says nothing about a fleet.
 
 ## Commands
 
@@ -53,12 +53,12 @@
 go build ./... && go vet ./... && go test ./...
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" ./...   # from a non-Linux machine
 
-go run ./cmd/sdn-sim --seeds 10000 1    # simulator sweep; --trace SEED replays one with its last events
-scripts/ci all                          # every CI step; kernel and e2e run as root, postgres when SDN_TEST_POSTGRES is set
-scripts/e2e -test.run TestTwoHosts      # the daemons in namespaces; SDN_LAB_KEEP=DIR keeps a failed test's logs
+go run ./cmd/wirenet-sim --seeds 10000 1    # simulator sweep; --trace SEED replays one with its last events
+scripts/ci all                          # every CI step; kernel and e2e run as root, postgres when WIRENET_TEST_POSTGRES is set
+scripts/e2e -test.run TestTwoHosts      # the daemons in namespaces; WIRENET_LAB_KEEP=DIR keeps a failed test's logs
 scripts/lab run --env local --plan all  # benchmark plans on this machine; --env aws needs deploy/aws
 go run ./scripts/mutants -root          # plant every known bug; -only ID runs one
-SDN_TEST_POSTGRES=postgres://... go test ./internal/store/... ./internal/cp/...   # the store suite on Postgres
+WIRENET_TEST_POSTGRES=postgres://... go test ./internal/store/... ./internal/cp/...   # the store suite on Postgres
 
 sudo ./hostbench                        # kernel costs, device placement, netdev and peer concurrency
                                         # names everything hb-*, and sweeps only that prefix first

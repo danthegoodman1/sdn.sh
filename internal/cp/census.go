@@ -1,13 +1,13 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package cp
 
 import (
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/store"
 )
 
 // Census counts what the control plane's pools hold, for its metrics.

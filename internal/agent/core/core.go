@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package core is the host agent's logic. It decides which kernel operations
 // to run, in what order, and when; it runs none itself. The agent daemon
@@ -25,11 +25,11 @@ import (
 	"slices"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/kernel"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/nft"
-	"sdn.sh/internal/regproto"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/kernel"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/nft"
+	"github.com/danthegoodman1/wirenet/internal/regproto"
 )
 
 // Config holds the agent's identity and clocks.
@@ -75,8 +75,8 @@ type Config struct {
 func DefaultConfig(host model.HostID) Config {
 	return Config{
 		Host:            host,
-		Prefix:          "sdn-",
-		Device:          "sdn0",
+		Prefix:          "wirenet-",
+		Device:          "wirenet0",
 		PortLo:          40000,
 		PortHi:          59999,
 		DrainGrace:      30 * time.Second,
@@ -95,7 +95,7 @@ func DefaultConfig(host model.HostID) Config {
 }
 
 // AliasPrefix marks devices this agent made, so it reaps only its own.
-func (c Config) AliasPrefix() string { return "sdn:" + string(c.Host) + ":" }
+func (c Config) AliasPrefix() string { return "wirenet:" + string(c.Host) + ":" }
 
 // RequestID names a local API call awaiting an answer.
 type RequestID uint64

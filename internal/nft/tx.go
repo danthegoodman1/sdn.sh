@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package nft
 
@@ -8,7 +8,7 @@ import (
 	"net/netip"
 	"slices"
 
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // Transaction is one atomic change to the table. A Linux backend renders it

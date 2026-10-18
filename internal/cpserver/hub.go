@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/store"
 )
 
 // hub wakes long polls when a commit touches what they watch. A poll

@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package bad violates every determinism rule once.
 package bad

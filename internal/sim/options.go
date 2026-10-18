@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package sim
 
@@ -7,7 +7,7 @@ import (
 	"net/netip"
 	"time"
 
-	"sdn.sh/internal/prng"
+	"github.com/danthegoodman1/wirenet/internal/prng"
 )
 
 // Options configure one run. Swarm draws them from the seed, so one seed

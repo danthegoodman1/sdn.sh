@@ -1,4 +1,4 @@
-# sdn.sh
+# wirenet
 
 Per-workload WireGuard networking across hosts. Each workload gets its own key and address and reaches a peer on another host 44 ms after it attaches. Services resolve by name with no proxy, and relays carry the traffic without being able to read it.
 
@@ -69,18 +69,18 @@ Each edge streams one TCP connection, from two sending hosts to two receiving ho
 - **A detach tells the control plane first.** Deleting a WireGuard device waits a grace period for each peer it holds: about a second under churn for a backend with 30 peers. Clients leave a departing backend while its device is deleted, which took a replacement from 1,037 ms to 34–41 ms.
 - **Short windows.** A c6i.xlarge's network bursts to 12.5 Gb/s above a lower baseline, so each throughput test runs 10 seconds.
 
-`bin/sdn-lab run --env aws --plan all` reruns the test on a fleet from [deploy/README.md](deploy/README.md). [SPEC.md](SPEC.md#the-fleet-on-ec2) records every figure with its method.
+`bin/wirenet-lab run --env aws --plan all` reruns the test on a fleet from [deploy/README.md](deploy/README.md). [SPEC.md](SPEC.md#the-fleet-on-ec2) records every figure with its method.
 
 ## Quick start
 
 One Linux machine with kernel WireGuard, nftables, `sudo` and `jq`. Start a control plane with an in-memory store, and an agent:
 
 ```console
-go build -o bin/ ./cmd/sdn-cp ./cmd/sdn-agent ./cmd/sdnctl
-export SDN_ADMIN_TOKEN=$(openssl rand -hex 16)
-bin/sdn-cp --listen 127.0.0.1:8443 &
-bin/sdnctl host create h1 > host.json
-sudo bin/sdn-agent --cp http://127.0.0.1:8443 --credentials host.json --egress=false &
+go build -o bin/ ./cmd/wirenet-cp ./cmd/wirenet-agent ./cmd/wirenetctl
+export WIRENET_ADMIN_TOKEN=$(openssl rand -hex 16)
+bin/wirenet-cp --listen 127.0.0.1:8443 &
+bin/wirenetctl host create h1 > host.json
+sudo bin/wirenet-agent --cp http://127.0.0.1:8443 --credentials host.json --egress=false &
 ```
 
 `--egress=false` leaves the host's IPv4 forwarding and egress filter alone. Drop it on a host that serves internet egress grants.
@@ -88,12 +88,12 @@ sudo bin/sdn-agent --cp http://127.0.0.1:8443 --credentials host.json --egress=f
 Create a network where `web` may reach `db` on port 8080, and attach a workload to each:
 
 ```console
-bin/sdnctl network create shop
-bin/sdnctl service create shop db
-bin/sdnctl service create shop web
-bin/sdnctl rule create shop web db --proto tcp --ports 8080
-sudo bin/sdnctl attach db-1 shop db > db.json
-sudo bin/sdnctl attach web-1 shop web > web.json
+bin/wirenetctl network create shop
+bin/wirenetctl service create shop db
+bin/wirenetctl service create shop web
+bin/wirenetctl rule create shop web db --proto tcp --ports 8080
+sudo bin/wirenetctl attach db-1 shop db > db.json
+sudo bin/wirenetctl attach web-1 shop web > web.json
 ```
 
 Each attach answers with the workload's namespace, address, interface and resolver. Serve from `db-1` and dial it by name from `web-1`:
@@ -104,8 +104,8 @@ sudo ip netns exec $(jq -r .namespace db.json) python3 -m http.server 8080 --bin
 sudo ip netns exec $(jq -r .namespace web.json) curl http://db.shop.internal:8080/              # hello from db-1
 sudo ip netns exec $(jq -r .namespace web.json) curl --max-time 2 http://db.shop.internal:8081/   # refused by policy
 sudo pkill -f "http.server 8080"
-sudo bin/sdnctl detach $(jq -r .interface web.json)
-sudo bin/sdnctl detach $(jq -r .interface db.json)
+sudo bin/wirenetctl detach $(jq -r .interface web.json)
+sudo bin/wirenetctl detach $(jq -r .interface db.json)
 ```
 
 Inside the namespace, `127.0.0.53` is the agent's resolver, which Ubuntu's `/etc/resolv.conf` already names. A runtime writes the workload's `resolv.conf` from the attach answer, whose search domain lets `db` alone resolve.
@@ -203,7 +203,7 @@ flowchart LR
 A service has a name and an address that last as long as it does. Relays carry ciphertext, so nothing in the middle can read a destination, and each client picks a backend in its own namespace:
 
 ```text
-table inet sdn {
+table inet wirenet {
   map db_slots { typeof numgen random mod 1024 : ip6 daddr; }
   chain services {
     type nat hook output priority dstnat;
@@ -216,7 +216,7 @@ The slot count stays fixed, so a backend change rewrites only the slots whose ba
 
 ### Policy
 
-Policy names services, and denies every flow it does not name: `sdnctl rule create shop web db --proto tcp --ports 5432` lets `web` reach `db` on one port. An interface gets a peer only where policy permits a flow, so its peer count is its policy degree, whatever the network's size. `AllowedIPs` decides whether a peer may speak as an address, and nftables decides whether a flow may happen. Both run in the receiver's kernel.
+Policy names services, and denies every flow it does not name: `wirenetctl rule create shop web db --proto tcp --ports 5432` lets `web` reach `db` on one port. An interface gets a peer only where policy permits a flow, so its peer count is its policy degree, whatever the network's size. `AllowedIPs` decides whether a peer may speak as an address, and nftables decides whether a flow may happen. Both run in the receiver's kernel.
 
 ### Leases and keys
 
@@ -234,7 +234,7 @@ A change sends one message to each host with a policy-connected interface. Each 
 | Remove a backend | Remove its slots; after a grace period, remove its peer, flush its conntrack entries and destroy the sockets addressed to it |
 | Revoke an interface | Remove its slots, peer, conntrack entries and sockets at once |
 
-Each client flips in one step. Across clients the change is eventually consistent, and each agent reports how long its namespaces took to settle (`sdn_agent_convergence_seconds`).
+Each client flips in one step. Across clients the change is eventually consistent, and each agent reports how long its namespaces took to settle (`wirenet_agent_convergence_seconds`).
 
 ## Operator guide
 
@@ -249,28 +249,28 @@ Each client flips in one step. Across clients the change is eventually consisten
 ### Starting a fleet
 
 ```console
-sdn-cp --store postgres://sdn@db/sdn --admin-token-file /etc/sdn/admin-token
-export SDN_CP=http://10.0.1.10:8443 SDN_ADMIN_TOKEN=...
+wirenet-cp --store postgres://wirenet@db/wirenet --admin-token-file /etc/wirenet/admin-token
+export WIRENET_CP=http://10.0.1.10:8443 WIRENET_ADMIN_TOKEN=...
 
-sdnctl relay create r1 --address 10.0.1.20 --ports 10000-60000 --probe-port 7000 > relay.json
-sdn-relay --cp $SDN_CP --credentials relay.json --state /var/lib/sdn/relay --probe 10.0.1.20:7000   # on r1
+wirenetctl relay create r1 --address 10.0.1.20 --ports 10000-60000 --probe-port 7000 > relay.json
+wirenet-relay --cp $WIRENET_CP --credentials relay.json --state /var/lib/wirenet/relay --probe 10.0.1.20:7000   # on r1
 
-sdnctl host create h1 > host.json
-sdn-agent --cp $SDN_CP --credentials host.json                                                     # on h1
+wirenetctl host create h1 > host.json
+wirenet-agent --cp $WIRENET_CP --credentials host.json                                                     # on h1
 
-sdnctl network create shop --relays r1,r2,r3
+wirenetctl network create shop --relays r1,r2,r3
 ```
 
 `--tls-cert` and `--tls-key` serve the control plane over TLS, and `--ca-file` pins its CA on agents and relays.
 
-A runtime attaches a workload through the agent's socket, `/run/sdn/agent.sock` (`sdnctl attach NAME NETWORK SERVICE`), and starts the workload in the namespace the answer names, with a `resolv.conf` naming the answer's resolver and search domain.
+A runtime attaches a workload through the agent's socket, `/run/wirenet/agent.sock` (`wirenetctl attach NAME NETWORK SERVICE`), and starts the workload in the namespace the answer names, with a `resolv.conf` naming the answer's resolver and search domain.
 
 ### Changing the fleet
 
 - **Add a relay:** create and start it, then name it in a network's `--relays`. A network's relay set is fixed when the network is created.
 - **Lose a relay:** its edges move to their next relays within a second, and back when it returns.
-- **Remove a host:** `sdnctl host delete h1` revokes its interfaces at once.
-- **Revoke an interface:** `sdnctl interface revoke IFACE` removes its key from every peer, with no grace period.
+- **Remove a host:** `wirenetctl host delete h1` revokes its interfaces at once.
+- **Revoke an interface:** `wirenetctl interface revoke IFACE` removes its key from every peer, with no grace period.
 - **Restart an agent:** traffic continues, since the kernel holds the data plane, and DNS queries wait in the socket buffer under systemd. The agent adopts its interfaces from its journal and the kernel.
 
 ### Monitoring
@@ -279,13 +279,13 @@ Each daemon serves `/metrics`, `/healthz` and `/readyz` on its `--telemetry` add
 
 | Metric | Shows |
 |---|---|
-| `sdn_agent_convergence_seconds` | Time from a commit to each namespace settling on it |
-| `sdn_agent_relay_up{relay}`, `sdn_agent_relay_peers{relay}` | Which relays the agent finds up, and how many edges each carries |
-| `sdn_agent_interfaces{phase}`, `sdn_agent_peers` | Interfaces by phase, and the peers their devices hold |
-| `sdn_relay_forwarded_bytes_total`, `sdn_relay_dropped_packets_total{reason}` | Traffic forwarded and dropped |
-| `sdn_relay_udp_rcvbuf_errors_total` | Datagrams the host dropped on full receive queues; a climbing count means the relay is falling behind |
-| `sdn_cp_requests_total`, `sdn_cp_store_transactions_total` | API requests and store transactions by result |
-| `sdn_cp_relay_ports`, `sdn_cp_ipv4_quarantined` | Relay ports in use and in quarantine, and IPv4 addresses waiting for reuse |
+| `wirenet_agent_convergence_seconds` | Time from a commit to each namespace settling on it |
+| `wirenet_agent_relay_up{relay}`, `wirenet_agent_relay_peers{relay}` | Which relays the agent finds up, and how many edges each carries |
+| `wirenet_agent_interfaces{phase}`, `wirenet_agent_peers` | Interfaces by phase, and the peers their devices hold |
+| `wirenet_relay_forwarded_bytes_total`, `wirenet_relay_dropped_packets_total{reason}` | Traffic forwarded and dropped |
+| `wirenet_relay_udp_rcvbuf_errors_total` | Datagrams the host dropped on full receive queues; a climbing count means the relay is falling behind |
+| `wirenet_cp_requests_total`, `wirenet_cp_store_transactions_total` | API requests and store transactions by result |
+| `wirenet_cp_relay_ports`, `wirenet_cp_ipv4_quarantined` | Relay ports in use and in quarantine, and IPv4 addresses waiting for reuse |
 
 ### Tuning
 
@@ -297,7 +297,7 @@ Each daemon serves `/metrics`, `/healthz` and `/readyz` on its `--telemetry` add
 
 ## Alternatives
 
-Relaying ciphertext is common: Tailscale's DERP, Nebula's relays and NetBird all do it. The measured advantage is over designs that terminate WireGuard in the middle. The case for sdn.sh is the identity model: a key per workload, scoped to its lease.
+Relaying ciphertext is common: Tailscale's DERP, Nebula's relays and NetBird all do it. The measured advantage is over designs that terminate WireGuard in the middle. The case for wirenet is the identity model: a key per workload, scoped to its lease.
 
 | Option | Choose it when |
 |---|---|
@@ -328,12 +328,12 @@ Relaying ciphertext is common: Tailscale's DERP, Nebula's relays and NetBird all
 
 | Program | What it is |
 |---|---|
-| `cmd/sdn-cp` | The control plane: networks, services, policy, leases, relays and edge ports over a transactional store, with long polls for agents and relays. |
-| `cmd/sdn-agent` | The host agent: each workload's namespace, device, peers, nftables table, resolver and egress link. |
-| `cmd/sdn-relay` | The ciphertext relay. |
-| `cmd/sdnctl` | The CLI: operator commands, attach and detach through the local agent, and development machines' configs. |
-| `cmd/sdn-sim` | The deterministic simulator. |
-| `cmd/sdn-lab`, `cmd/sdn-bench` | The benchmark driver and its load tool, on this machine or a fleet on EC2. |
+| `cmd/wirenet-cp` | The control plane: networks, services, policy, leases, relays and edge ports over a transactional store, with long polls for agents and relays. |
+| `cmd/wirenet-agent` | The host agent: each workload's namespace, device, peers, nftables table, resolver and egress link. |
+| `cmd/wirenet-relay` | The ciphertext relay. |
+| `cmd/wirenetctl` | The CLI: operator commands, attach and detach through the local agent, and development machines' configs. |
+| `cmd/wirenet-sim` | The deterministic simulator. |
+| `cmd/wirenet-lab`, `cmd/wirenet-bench` | The benchmark driver and its load tool, on this machine or a fleet on EC2. |
 | `cmd/hostbench` | Kernel costs: device placement, netdev and peer concurrency. Runs as root and names everything `hb-*`. |
 | `cmd/relay` | The prototype relay, kept for the relay-against-gateway comparison. |
 
@@ -343,7 +343,7 @@ Relaying ciphertext is common: Tailscale's DERP, Nebula's relays and NetBird all
 go build ./... && go vet ./... && go test ./...   # unit tests, the determinism check, a simulator seed range
 scripts/ci all                                   # every CI step; kernel and e2e tests run as root
 scripts/e2e -test.run TestTwoHosts               # the daemons in namespaces, as root
-SDN_TEST_POSTGRES=postgres://... go test ./internal/store/... ./internal/cp/...
+WIRENET_TEST_POSTGRES=postgres://... go test ./internal/store/... ./internal/cp/...
 ```
 
 ### Simulator
@@ -351,8 +351,8 @@ SDN_TEST_POSTGRES=postgres://... go test ./internal/store/... ./internal/cp/...
 A seed fixes the whole run: the deployment, its faults and its workload. The control plane, relays and agents run their real cores against models of the kernel and the network, and an attacker replays what it captures. At every instant each settled namespace must hold exactly what policy says it should; at the end, permitted flows must connect and forbidden ones must fail. Pass a run's seed back to replay it exactly.
 
 ```console
-go run ./cmd/sdn-sim --seeds 10000 1   # seeds 1 to 10,000 on every core
-go run ./cmd/sdn-sim --trace 42        # replay seed 42 with its last events
+go run ./cmd/wirenet-sim --seeds 10000 1   # seeds 1 to 10,000 on every core
+go run ./cmd/wirenet-sim --trace 42        # replay seed 42 with its last events
 ```
 
 `go run ./scripts/mutants -root` plants known bugs one at a time and reports which tests catch each.

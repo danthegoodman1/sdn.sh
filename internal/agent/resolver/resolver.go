@@ -29,7 +29,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/vishvananda/netns"
 
-	"sdn.sh/internal/dns"
+	"github.com/danthegoodman1/wirenet/internal/dns"
 )
 
 // Resolver serves every namespace's resolver.
@@ -63,7 +63,7 @@ func New(upstream netip.AddrPort, log zerolog.Logger, reg prometheus.Registerer)
 		zones:    map[string]*dns.Zone{},
 		adopted:  listenFDs(),
 		queries: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "sdn_agent_resolver_queries_total", Help: "Stub resolver queries by answer.",
+			Name: "wirenet_agent_resolver_queries_total", Help: "Stub resolver queries by answer.",
 		}, []string{"answer"}),
 	}
 	reg.MustRegister(r.queries)

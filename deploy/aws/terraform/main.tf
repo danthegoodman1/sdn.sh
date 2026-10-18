@@ -7,7 +7,7 @@ locals {
   agent_names = [for i in range(var.agent_count) : "h${i + 1}"]
   relay_names = [for i in range(var.relay_count) : "r${i + 1}"]
 
-  # Every machine, by the name sdn-lab and the control plane know it by.
+  # Every machine, by the name wirenet-lab and the control plane know it by.
   machines = merge(
     { cp = { role = "cp", type = var.cp_instance_type } },
     { mid = { role = "middle", type = var.middle_instance_type } },
@@ -88,7 +88,7 @@ resource "aws_route_table_association" "public" {
 # benchmark traffic itself.
 resource "aws_security_group" "fleet" {
   name        = var.name
-  description = "sdn.sh benchmark fleet"
+  description = "wirenet benchmark fleet"
   vpc_id      = aws_vpc.fleet.id
 
   tags = { Name = var.name }

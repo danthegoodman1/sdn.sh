@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package sim is the deterministic simulator: one goroutine runs a control
 // plane, hosts with agents and kernel models, relays, an underlay and the

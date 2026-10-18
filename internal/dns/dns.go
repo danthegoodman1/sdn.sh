@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package dns decides what the stub resolver answers. A workload's
 // resolver answers the names of the services its interface may reach, in
@@ -16,7 +16,7 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 
-	"sdn.sh/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/api"
 )
 
 // TTL is how long a client may cache an answer, in seconds. Reachability

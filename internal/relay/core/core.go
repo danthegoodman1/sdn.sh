@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package core is the relay's logic: which packets to forward, from which
 // port, to whom, and which registrations move an endpoint. It holds no key
@@ -30,9 +30,9 @@ import (
 	"slices"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/regproto"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/regproto"
 )
 
 // Config bounds what one port, and the relay as a whole, may cost. A zero

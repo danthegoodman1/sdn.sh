@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package core
 
@@ -10,9 +10,9 @@ import (
 	"slices"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/regproto"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/regproto"
 )
 
 // edgeRelay chooses the relay path a peer's traffic takes: of the peer's

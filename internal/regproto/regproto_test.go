@@ -4,7 +4,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 var (

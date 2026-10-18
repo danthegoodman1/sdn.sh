@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/store"
 )
 
 var edgeEndpoint = netip.MustParseAddrPort("203.0.113.7:0")

@@ -22,12 +22,12 @@ jobs:
       postgres:
         image: postgres:18
         env:
-          POSTGRES_PASSWORD: sdn
-          POSTGRES_DB: sdn
+          POSTGRES_PASSWORD: wirenet
+          POSTGRES_DB: wirenet
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d sdn"
+          --health-cmd "pg_isready -U postgres -d wirenet"
           --health-interval 2s
           --health-timeout 5s
           --health-retries 30
@@ -43,7 +43,7 @@ jobs:
       - name: Store, control-plane and server tests on Postgres
         run: scripts/ci postgres
         env:
-          SDN_TEST_POSTGRES: postgres://postgres:sdn@127.0.0.1:5432/sdn?sslmode=disable
+          WIRENET_TEST_POSTGRES: postgres://postgres:wirenet@127.0.0.1:5432/wirenet?sslmode=disable
 
   simulate:
     runs-on: ubuntu-latest

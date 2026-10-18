@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/kernel"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/prng"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/kernel"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/prng"
 )
 
 var (
@@ -21,14 +21,14 @@ var (
 	ap   = netip.MustParseAddrPort
 )
 
-// adopted is a core that adopted one interface, if-a in sdn-a, from its
+// adopted is a core that adopted one interface, if-a in wirenet-a, from its
 // journal and the kernel.
 func adopted(t *testing.T) (*Core, time.Time) {
 	t.Helper()
 	c, now := New(DefaultConfig("h1"), prng.New(1)), time.Unix(1000, 0)
-	e := JournalEntry{Interface: "if-a", Name: "w", Network: "net-1", Service: "svc-1", Kind: api.Workload, Namespace: "sdn-a", ListenPort: 40000, PublicKey: self}
+	e := JournalEntry{Interface: "if-a", Name: "w", Network: "net-1", Service: "svc-1", Kind: api.Workload, Namespace: "wirenet-a", ListenPort: 40000, PublicKey: self}
 	dev := kernel.Device{Name: c.cfg.Device, HasKey: true, PublicKey: self, ListenPort: 40000}
-	c.Start(now, []JournalEntry{e}, kernel.Snapshot{Namespaces: []kernel.Namespace{{Name: "sdn-a", Devices: []kernel.Device{dev}}}})
+	c.Start(now, []JournalEntry{e}, kernel.Snapshot{Namespaces: []kernel.Namespace{{Name: "wirenet-a", Devices: []kernel.Device{dev}}}})
 	return c, now
 }
 
@@ -93,7 +93,7 @@ func TestAnInterfaceWhoseNamespaceVanishesIsTornDown(t *testing.T) {
 		t.Fatal(err)
 	}
 	drive(c, now, succeed)
-	c.Observed(now, kernel.Namespace{Name: "sdn-a"}, kernel.ErrNoNamespace)
+	c.Observed(now, kernel.Namespace{Name: "wirenet-a"}, kernel.ErrNoNamespace)
 	gone := func(RunBatch) error { return fmt.Errorf("op: %w", kernel.ErrNoNamespace) }
 	var unlinked []uint16
 	for range 4 {
@@ -175,19 +175,19 @@ func TestAPeersRelayAnswersAndBelongsToTheSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	settle("r1", "r3")
-	if got, want := c.ns["sdn-a"].peers[peer].Endpoint, ap("192.0.2.1:7000"); got != want {
+	if got, want := c.ns["wirenet-a"].peers[peer].Endpoint, ap("192.0.2.1:7000"); got != want {
 		t.Fatalf("peer endpoint %v, want r1's %v, the one relay of the set answering", got, want)
 	}
 	if err := c.State(now, update(4, "r2", "r3")); err != nil {
 		t.Fatal(err)
 	}
 	settle("r1", "r3")
-	if got, want := c.ns["sdn-a"].peers[peer].Endpoint, ap("192.0.2.3:7000"); got != want {
+	if got, want := c.ns["wirenet-a"].peers[peer].Endpoint, ap("192.0.2.3:7000"); got != want {
 		t.Fatalf("peer endpoint %v after r1 left the set, want r3's %v", got, want)
 	}
 }
 
-// spread is a core holding n adopted interfaces, if-0 in sdn-0 onward, each
+// spread is a core holding n adopted interfaces, if-0 in wirenet-0 onward, each
 // with one remote peer if-p<i> whose paths run through every relay given.
 func spread(t *testing.T, n int, ids ...model.RelayID) (*Core, time.Time) {
 	t.Helper()
@@ -219,7 +219,7 @@ func spread(t *testing.T, n int, ids ...model.RelayID) (*Core, time.Time) {
 func relayOf(c *Core, n int) []model.RelayID {
 	out := make([]model.RelayID, n)
 	for i := range n {
-		st := c.ns[fmt.Sprintf("sdn-%d", i)]
+		st := c.ns[fmt.Sprintf("wirenet-%d", i)]
 		for _, p := range st.peers {
 			out[i] = model.RelayID(fmt.Sprintf("r%d", p.Endpoint.Addr().As4()[3]))
 		}
@@ -329,7 +329,7 @@ func TestAPeerWaitsForTheHolderOfItsAddress(t *testing.T) {
 		t.Fatalf("holder removed %v, conflicts %d; want the holder gone and the claimant deferred", removed, c.Stats.Conflicts)
 	}
 	drive(c, now, succeed)
-	if got := c.ns["sdn-a"].peers[next].Allowed; !slices.Equal(got, addrs) {
+	if got := c.ns["wirenet-a"].peers[next].Allowed; !slices.Equal(got, addrs) {
 		t.Fatalf("after the holder left the claimant holds %v, want %v", got, addrs)
 	}
 }
@@ -449,12 +449,12 @@ func TestANewRelayBackendJoinsAClientsMapOnceAcknowledged(t *testing.T) {
 		t.Fatal(err)
 	}
 	drive(c, now, succeed)
-	if slotted(c, "sdn-a") {
+	if slotted(c, "wirenet-a") {
 		t.Fatal("a backend new to the client joined its map before the relay acknowledged")
 	}
 	c.RegistrationAcked(now, 40000, relayAt)
 	drive(c, now, succeed)
-	if !slotted(c, "sdn-a") {
+	if !slotted(c, "wirenet-a") {
 		t.Fatal("the acknowledged backend never joined the map")
 	}
 	// A failover moves an established backend's path, and holds back no
@@ -468,8 +468,8 @@ func TestANewRelayBackendJoinsAClientsMapOnceAcknowledged(t *testing.T) {
 		t.Fatal(err)
 	}
 	drive(c, now, succeed)
-	if !slotted(c, "sdn-a") || len(c.ns["sdn-a"].awaiting) > 0 {
-		t.Fatalf("after moving relays the map lost its backend: awaiting %v", c.ns["sdn-a"].awaiting)
+	if !slotted(c, "wirenet-a") || len(c.ns["wirenet-a"].awaiting) > 0 {
+		t.Fatalf("after moving relays the map lost its backend: awaiting %v", c.ns["wirenet-a"].awaiting)
 	}
 }
 
@@ -565,7 +565,7 @@ func TestAnAcknowledgedDirectionIsNotResentAndANewPeerResendsAlone(t *testing.T)
 	}
 }
 
-// adoptedMany is a core that adopted n interfaces, if-0 in sdn-0 onward,
+// adoptedMany is a core that adopted n interfaces, if-0 in wirenet-0 onward,
 // each a client of db through if-b's relay path.
 func adoptedMany(t *testing.T, n int) (*Core, time.Time, func(rev uint64, backends ...api.Peer)) {
 	t.Helper()
@@ -573,7 +573,7 @@ func adoptedMany(t *testing.T, n int) (*Core, time.Time, func(rev uint64, backen
 	var journal []JournalEntry
 	var snap kernel.Snapshot
 	for i := range n {
-		id, ns, key, port := model.InterfaceID(fmt.Sprintf("if-%d", i)), fmt.Sprintf("sdn-%d", i), model.Key{byte(20 + i)}, uint16(40000+i)
+		id, ns, key, port := model.InterfaceID(fmt.Sprintf("if-%d", i)), fmt.Sprintf("wirenet-%d", i), model.Key{byte(20 + i)}, uint16(40000+i)
 		journal = append(journal, JournalEntry{Interface: id, Name: fmt.Sprintf("w%d", i), Network: "net-1", Service: "svc-1",
 			Kind: api.Workload, Namespace: ns, ListenPort: port, PublicKey: key})
 		snap.Namespaces = append(snap.Namespaces, kernel.Namespace{Name: ns,
@@ -606,7 +606,7 @@ func TestABatchReplansOnlyTheNamespacesItCanRelease(t *testing.T) {
 		drive(c, now, succeed)
 	}
 	for i := range n {
-		if ns := fmt.Sprintf("sdn-%d", i); len(c.ns[ns].awaiting) == 0 {
+		if ns := fmt.Sprintf("wirenet-%d", i); len(c.ns[ns].awaiting) == 0 {
 			t.Fatalf("%s holds its slot before the relay acknowledged", ns)
 		}
 	}
@@ -615,7 +615,7 @@ func TestABatchReplansOnlyTheNamespacesItCanRelease(t *testing.T) {
 	for range 4 {
 		drive(c, now, succeed)
 	}
-	if !slotted(c, "sdn-0") {
+	if !slotted(c, "wirenet-0") {
 		t.Fatal("the acknowledged namespace never took its slot")
 	}
 	// The released namespace plans once after the ack and once after its
@@ -692,7 +692,7 @@ func TestANetworkThatLeavesWhileAPeerWaitsLeavesNoWakeBehind(t *testing.T) {
 		t.Fatal(err)
 	}
 	drive(c, now, succeed)
-	if c.ns["sdn-a"].ackBy.IsZero() {
+	if c.ns["wirenet-a"].ackBy.IsZero() {
 		t.Fatal("the new peer waits on no acknowledgment")
 	}
 	if err := c.State(now, api.StateUpdate{Host: "h1", Generation: 4}); err != nil {
@@ -730,7 +730,7 @@ func TestAResendScheduleEndsWithItsNamespace(t *testing.T) {
 			}
 		}
 	}
-	if _, ok := c.ns["sdn-a"]; ok {
+	if _, ok := c.ns["wirenet-a"]; ok {
 		t.Fatal("the detached namespace is still tracked")
 	}
 	for at := now; at.Before(now.Add(2 * time.Second)); at = at.Add(10 * time.Millisecond) {

@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package sim
 
@@ -10,13 +10,13 @@ import (
 	"slices"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/compile"
-	"sdn.sh/internal/cp"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/prng"
-	"sdn.sh/internal/store"
-	"sdn.sh/internal/store/mem"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/compile"
+	"github.com/danthegoodman1/wirenet/internal/cp"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/prng"
+	"github.com/danthegoodman1/wirenet/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/store/mem"
 )
 
 const cpNodeName Node = "cp"

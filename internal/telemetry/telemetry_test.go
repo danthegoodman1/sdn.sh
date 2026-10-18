@@ -35,7 +35,7 @@ func TestLoggerTagsItsComponent(t *testing.T) {
 
 func TestServerServesMetricsAndReadiness(t *testing.T) {
 	reg := NewRegistry()
-	c := prometheus.NewCounter(prometheus.CounterOpts{Name: "sdn_test_total", Help: "test"})
+	c := prometheus.NewCounter(prometheus.CounterOpts{Name: "wirenet_test_total", Help: "test"})
 	reg.MustRegister(c)
 	c.Add(3)
 	var ready atomic.Bool
@@ -61,7 +61,7 @@ func TestServerServesMetricsAndReadiness(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(b)
 	}
-	if code, body := get("/metrics"); code != 200 || !strings.Contains(body, "sdn_test_total 3") {
+	if code, body := get("/metrics"); code != 200 || !strings.Contains(body, "wirenet_test_total 3") {
 		t.Fatalf("metrics %d: %s", code, body)
 	}
 	if code, _ := get("/readyz"); code != 503 {

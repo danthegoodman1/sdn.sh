@@ -10,11 +10,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/store"
-	"sdn.sh/internal/store/pgstore"
-	"sdn.sh/internal/store/pgstore/pgtest"
-	"sdn.sh/internal/store/storetest"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/store/pgstore"
+	"github.com/danthegoodman1/wirenet/internal/store/pgstore/pgtest"
+	"github.com/danthegoodman1/wirenet/internal/store/storetest"
 )
 
 func TestConformance(t *testing.T) {

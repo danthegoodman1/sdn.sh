@@ -2,7 +2,7 @@
 // deterministic, so a simulator seed replays its run exactly and a core
 // behaves the same in a daemon and in the simulator.
 //
-// A package opts in with a `//sdn:deterministic` line comment in any of its
+// A package opts in with a `//wirenet:deterministic` line comment in any of its
 // files. Its non-test files may then:
 //
 //   - import only the standard packages in allowedStd, the third-party
@@ -27,7 +27,7 @@ import (
 )
 
 // Directive marks a package deterministic.
-const Directive = "//sdn:deterministic"
+const Directive = "//wirenet:deterministic"
 
 var allowedStd = map[string]bool{
 	"bytes": true, "cmp": true, "context": true, "container/heap": true, "crypto/hmac": true,

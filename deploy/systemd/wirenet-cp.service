@@ -1,0 +1,17 @@
+[Unit]
+Description=wirenet control plane
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+# cp-store.env holds WIRENET_STORE, the database URL with its password, which
+# deploy/hostprep.sh writes; cp.env holds WIRENET_CP_ARGS, the other flags.
+EnvironmentFile=/etc/wirenet/cp-store.env
+EnvironmentFile=/etc/wirenet/cp.env
+ExecStart=/usr/local/bin/wirenet-cp --store ${WIRENET_STORE} $WIRENET_CP_ARGS
+Restart=always
+RestartSec=1
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

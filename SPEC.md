@@ -1,4 +1,4 @@
-# sdn.sh
+# wirenet
 
 Per-workload network identity for short-lived workloads, across hosts in different places, with nothing on the path between two workloads able to read a packet.
 
@@ -249,7 +249,7 @@ Because relays carry ciphertext, nothing in the middle can read an inner destina
 The agent installs, per service the client may reach:
 
 ```text
-table inet sdn {
+table inet wirenet {
   map db_slots { typeof numgen random mod 1024 : ip daddr; }
   chain services {
     type nat hook output priority dstnat;
@@ -295,7 +295,7 @@ Compilation produces two things, and default is deny:
 
 **Attach latency grows with policy degree.** Peers install at roughly 130µs each in one batched call, so an interface joining a fully connected 2,000-interface network waits about 250 ms for its own peer table before it can talk to anyone. Dense policy is expensive at attach even when it is affordable at steady state.
 
-**Internet egress is a separate grant, and it is the one case where a namespace has a second way out.** A grant names protocols and ports on the interface, such as `tcp/443`. The agent adds a veth pair, `eg0` in the namespace and `sdne<listen port>` on the host, routes the namespace's default through it, and masquerades on the host; without the grant no such path exists, which is what gates egress. The filter lives in the **host** namespace, in table `inet sdn_egress`, and drops before any grant applies:
+**Internet egress is a separate grant, and it is the one case where a namespace has a second way out.** A grant names protocols and ports on the interface, such as `tcp/443`. The agent adds a veth pair, `eg0` in the namespace and `wne<listen port>` on the host, routes the namespace's default through it, and masquerades on the host; without the grant no such path exists, which is what gates egress. The filter lives in the **host** namespace, in table `inet wirenet_egress`, and drops before any grant applies:
 
 - loopback, link-local and the metadata services in both families (`169.254.169.254`, on EC2 `fd00:ec2::254` inside `fc00::/7`, and Azure's `168.63.129.16`);
 - private, shared, multicast and reserved ranges in both families;
@@ -397,7 +397,7 @@ Neither the conntrack flush nor the socket teardown is optional. An established 
 
 So a single-instance service flips atomically per client, and established connections drain rather than break. `cutover` mode evicts the conntrack entries instead, breaking them immediately.
 
-Across namespaces the change is eventually consistent, and the window is the push latency. **This is the cost of a change**, and it is the figure to design and report against. Every network carries the time of its last change, and each agent reports, per namespace, the time from that change to the moment the namespace holds it (`sdn_agent_convergence_seconds`). The clocks of the control plane and the hosts differ, so the figure is only as good as their synchronization. Note that it bounds a different thing from attach latency: an attach can finish locally in milliseconds, but a first packet to a *remote* peer cannot arrive before that peer's host has converged, so the two targets measure different things and the convergence window dominates.
+Across namespaces the change is eventually consistent, and the window is the push latency. **This is the cost of a change**, and it is the figure to design and report against. Every network carries the time of its last change, and each agent reports, per namespace, the time from that change to the moment the namespace holds it (`wirenet_agent_convergence_seconds`). The clocks of the control plane and the hosts differ, so the figure is only as good as their synchronization. Note that it bounds a different thing from attach latency: an attach can finish locally in milliseconds, but a first packet to a *remote* peer cannot arrive before that peer's host has converged, so the two targets measure different things and the convergence window dominates.
 
 During that window, clients disagree. For a single-instance service, some clients talk to the old instance and some to the new one — never both, since each client flips in one step. Two modes decide how to handle that:
 
@@ -554,7 +554,7 @@ A host with 40 policy neighbours spends about 5–10ms per change, inside a 250m
 
 ### The relay against a terminating hub
 
-Three paths between the same two 4-vCPU hosts in one datacenter, same kernel WireGuard at both ends, 1380-byte overlay MTU. The relay here is `cmd/relay`, the prototype that learned endpoints from traffic; `sdn-relay` reads and writes in the same batches. The middle box is the same machine in both middle cases: once running the ciphertext relay, once terminating WireGuard and re-encrypting. Plain TCP between the hosts bounds every row.
+Three paths between the same two 4-vCPU hosts in one datacenter, same kernel WireGuard at both ends, 1380-byte overlay MTU. The relay here is `cmd/relay`, the prototype that learned endpoints from traffic; `wirenet-relay` reads and writes in the same batches. The middle box is the same machine in both middle cases: once running the ciphertext relay, once terminating WireGuard and re-encrypting. Plain TCP between the hosts bounds every row.
 
 Rates below are mean throughput over the 12-second window, derived from the bytes transferred. `iperf3`'s `SUM` bitrate for parallel streams sums per-stream rates over their own intervals and reads higher than the mean, so it is not used here.
 
@@ -571,7 +571,7 @@ An earlier run of the same comparison, with a build whose forwarding path is ide
 
 At 1307 Mbit/s with 1380-byte payloads the relay forwarded about 118,000 packets per second in the data direction on 1.2 cores. It dropped 16 packets before the far side registered, which is the bootstrap cost of learning endpoints.
 
-On EC2, with `sdn-relay` and an underlay five times as fast as either path, the relay carried 2.22× the gateway's traffic per CPU-second; see [The fleet on EC2](#the-fleet-on-ec2).
+On EC2, with `wirenet-relay` and an underlay five times as fast as either path, the relay carried 2.22× the gateway's traffic per CPU-second; see [The fleet on EC2](#the-fleet-on-ec2).
 
 ### Encryption at the edge
 
@@ -598,7 +598,7 @@ Separate namespaces, separate relay ports, no translation and no tenant tag. Han
 
 ### The whole system on one machine
 
-`sdn-lab --env local` and the end-to-end suite run the real daemons — control plane, relays and agents — with a network namespace standing in for each host and a veth bridge for the underlay, on the bare-metal Core Ultra 9 above. Every host shares one kernel, and so one RTNL lock, and the underlay carries 200–226 Gbit/s of plain TCP, so these figures show what the software adds and how each mechanism behaves rather than what a fleet does. The control plane used the memory store; Postgres 18 on the same machine put the attach call's p50 at 39.1ms and the first connection's at 39.8ms, both with a maximum under 56ms, against 18.6ms and 21.4ms.
+`wirenet-lab --env local` and the end-to-end suite run the real daemons — control plane, relays and agents — with a network namespace standing in for each host and a veth bridge for the underlay, on the bare-metal Core Ultra 9 above. Every host shares one kernel, and so one RTNL lock, and the underlay carries 200–226 Gbit/s of plain TCP, so these figures show what the software adds and how each mechanism behaves rather than what a fleet does. The control plane used the memory store; Postgres 18 on the same machine put the attach call's p50 at 39.1ms and the first connection's at 39.8ms, both with a maximum under 56ms, against 18.6ms and 21.4ms.
 
 | Quantity | Result |
 |---|--:|
@@ -622,12 +622,12 @@ A configured device takes 160–245ms to delete, against 39ms for a bare one in 
 
 ### The fleet on EC2
 
-Nine c6i.xlarge instances (4 vCPU, Xeon Platinum 8375C) in one cluster placement group in us-east-1, on Ubuntu 24.04 with kernel 7.0.0-1014-aws and `rmem_max` at 256 MiB: a control plane with Postgres 16 on its own machine, three relays, a middle box for the gateway comparison, and four hosts. Plain TCP between two hosts carried 9,530 Mbit/s on one stream and 12,410 Mbit/s on eight, with no retransmits. A c6i.xlarge's network bandwidth bursts to 12.5 Gbit/s above a lower baseline, so every throughput window is 10 seconds. `sdn-lab --env aws` produced every figure here, with the plain-TCP ceiling measured at the start of each run.
+Nine c6i.xlarge instances (4 vCPU, Xeon Platinum 8375C) in one cluster placement group in us-east-1, on Ubuntu 24.04 with kernel 7.0.0-1014-aws and `rmem_max` at 256 MiB: a control plane with Postgres 16 on its own machine, three relays, a middle box for the gateway comparison, and four hosts. Plain TCP between two hosts carried 9,530 Mbit/s on one stream and 12,410 Mbit/s on eight, with no retransmits. A c6i.xlarge's network bandwidth bursts to 12.5 Gbit/s above a lower baseline, so every throughput window is 10 seconds. `wirenet-lab --env aws` produced every figure here, with the plain-TCP ceiling measured at the start of each run.
 
 | Path, one edge | 1 stream | 8 streams | Middle-box CPU, 8 streams over 10s | Carried per CPU-second | Round trip p50, idle | Round trip p50, loaded |
 |---|--:|--:|--:|--:|--:|--:|
 | Plain TCP, no middle box | 9,530 Mbit/s | 12,410 Mbit/s | — | — | 0.071ms | 0.201ms |
-| **Ciphertext relay**, `sdn-relay` | 2,407 Mbit/s | 2,394 Mbit/s | **11.5s** | **2.09 Gbit** | 0.224ms | 4.8ms |
+| **Ciphertext relay**, `wirenet-relay` | 2,407 Mbit/s | 2,394 Mbit/s | **11.5s** | **2.09 Gbit** | 0.224ms | 4.8ms |
 | WireGuard-terminating gateway | 2,810 Mbit/s | 2,805 Mbit/s | 29.9s | 0.94 Gbit | 0.255ms | 3.3ms |
 
 **The relay carried 2.22× the gateway's traffic per CPU-second**, in line with [the earlier substrate](#the-relay-against-a-terminating-hub). The gateway carried 17% more on one edge, by spreading its crypto over three cores, where the relay reads one edge's port with one goroutine. Neither came near the underlay. A network's throughput comes from spreading edges over relays:

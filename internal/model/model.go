@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package model holds the identifiers, keys and small value types every
 // component shares.

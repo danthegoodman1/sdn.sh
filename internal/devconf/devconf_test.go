@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/prng"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/prng"
 )
 
 func TestTheConfigIsWhatWGQuickReads(t *testing.T) {

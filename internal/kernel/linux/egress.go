@@ -17,21 +17,21 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
-	"sdn.sh/internal/kernel"
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/kernel"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // Egress: a workload granted the internet gets a veth pair, eg0 in its
-// namespace and sdne<index> on the host. The host's table sdn_egress drops
+// namespace and wne<index> on the host. The host's table wirenet_egress drops
 // what the link must never reach — link-local and metadata addresses,
 // private ranges, the host's own prefixes, every relay, and the host
 // itself — then applies the link's own grant, reached through a verdict
 // map keyed by the link's name, and masquerades what leaves.
 const (
-	egressTable  = "sdn_egress"
-	egressPrefix = "sdne"
+	egressTable  = "wirenet_egress"
+	egressPrefix = "wne"
 	egressNSLink = "eg0"
-	egressAlias  = "sdn-egress:"
+	egressAlias  = "wirenet-egress:"
 )
 
 func egressLink(idx uint16) string { return egressPrefix + strconv.Itoa(int(idx)) }
@@ -209,7 +209,7 @@ func concat(parts ...[]expr.Any) []expr.Any {
 }
 
 // ifnamePrefix matches an interface name by its first bytes, as nft's
-// "iifname sdne*" does.
+// "iifname wne*" does.
 func ifnamePrefix(key expr.MetaKey, prefix string) []expr.Any {
 	return []expr.Any{&expr.Meta{Key: key, Register: 1}, eq([]byte(prefix))}
 }

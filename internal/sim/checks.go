@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package sim
 
@@ -13,16 +13,16 @@ import (
 	"strings"
 	"time"
 
-	agentcore "sdn.sh/internal/agent/core"
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/compile"
-	"sdn.sh/internal/cp"
-	"sdn.sh/internal/kernel"
-	"sdn.sh/internal/kernel/kmodel"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/nft"
-	"sdn.sh/internal/slots"
-	"sdn.sh/internal/store"
+	agentcore "github.com/danthegoodman1/wirenet/internal/agent/core"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/compile"
+	"github.com/danthegoodman1/wirenet/internal/cp"
+	"github.com/danthegoodman1/wirenet/internal/kernel"
+	"github.com/danthegoodman1/wirenet/internal/kernel/kmodel"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/nft"
+	"github.com/danthegoodman1/wirenet/internal/slots"
+	"github.com/danthegoodman1/wirenet/internal/store"
 )
 
 // checkMoves fails the run if any allowed IP moved between two peers: the

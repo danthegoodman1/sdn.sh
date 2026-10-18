@@ -15,10 +15,10 @@ import (
 	"os"
 	"time"
 
-	agentcore "sdn.sh/internal/agent/core"
-	"sdn.sh/internal/agent/daemon"
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/model"
+	agentcore "github.com/danthegoodman1/wirenet/internal/agent/core"
+	"github.com/danthegoodman1/wirenet/internal/agent/daemon"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // Agent is what the API serves.

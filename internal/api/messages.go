@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package api
 
@@ -6,7 +6,7 @@ import (
 	"net/netip"
 	"time"
 
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // Error is the body of every failed API call.

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // Keepalive holds the machine's own NAT mapping to its gateway open; a
@@ -19,7 +19,7 @@ const Keepalive = 25
 // WGQuick renders the config. priv never left the machine that minted it.
 func WGQuick(priv model.Key, c api.DeviceConfig) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# sdn.sh development machine %s, valid until %s\n", c.Interface, c.Expires.UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "# wirenet development machine %s, valid until %s\n", c.Interface, c.Expires.UTC().Format(time.RFC3339))
 	b.WriteString("[Interface]\n")
 	fmt.Fprintf(&b, "PrivateKey = %s\n", priv)
 	addrs := []string{netip.PrefixFrom(c.Addr6, 128).String()}

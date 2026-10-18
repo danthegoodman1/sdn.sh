@@ -50,7 +50,7 @@ systemctl enable --now prometheus-node-exporter >/dev/null
 # at rmem_max and wmem_max; the backlog absorbs bursts at line rate.
 # Agents forward for internet egress, and the middle box forwards as a
 # gateway.
-conf=/etc/sysctl.d/90-sdn.conf
+conf=/etc/sysctl.d/90-wirenet.conf
 {
 	echo "# Written by deploy/hostprep.sh for role $role."
 	echo "net.core.rmem_max = 268435456"
@@ -75,7 +75,7 @@ modprobe wireguard 2>/dev/null || {
 	DEBIAN_FRONTEND=noninteractive apt-get install -y -q "linux-modules-extra-$(uname -r)" || true
 	modprobe wireguard 2>/dev/null || true
 }
-probe=sdnprep-$$
+probe=wirenetprep-$$
 ip netns add "$probe"
 trap 'ip netns del "$probe" 2>/dev/null || true' EXIT
 ip -n "$probe" link add wgcheck type wireguard 2>/dev/null ||
@@ -110,31 +110,31 @@ else
 fi
 say "socket destruction: ok"
 
-mkdir -p /etc/sdn /var/lib/sdn
-chmod 0755 /etc/sdn
+mkdir -p /etc/wirenet /var/lib/wirenet
+chmod 0755 /etc/wirenet
 
 # The control plane's database and secrets. Both stay on this machine:
-# the units read them, and sdn-lab reads the token only through sdnctl.
+# the units read them, and wirenet-lab reads the token only through wirenetctl.
 if [ "$role" = cp ]; then
 	systemctl enable --now postgresql >/dev/null
 	umask 077
-	[ -s /etc/sdn/admin-token ] || head -c 32 /dev/urandom | base64 | tr -d '/+=\n' >/etc/sdn/admin-token
-	[ -s /etc/sdn/pg-password ] || head -c 32 /dev/urandom | base64 | tr -d '/+=\n' >/etc/sdn/pg-password
-	password=$(cat /etc/sdn/pg-password)
-	if runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = 'sdn'" | grep -q 1; then
-		runuser -u postgres -- psql -q -c "ALTER ROLE sdn LOGIN PASSWORD '$password'"
+	[ -s /etc/wirenet/admin-token ] || head -c 32 /dev/urandom | base64 | tr -d '/+=\n' >/etc/wirenet/admin-token
+	[ -s /etc/wirenet/pg-password ] || head -c 32 /dev/urandom | base64 | tr -d '/+=\n' >/etc/wirenet/pg-password
+	password=$(cat /etc/wirenet/pg-password)
+	if runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = 'wirenet'" | grep -q 1; then
+		runuser -u postgres -- psql -q -c "ALTER ROLE wirenet LOGIN PASSWORD '$password'"
 	else
-		runuser -u postgres -- psql -q -c "CREATE ROLE sdn LOGIN PASSWORD '$password'"
+		runuser -u postgres -- psql -q -c "CREATE ROLE wirenet LOGIN PASSWORD '$password'"
 	fi
-	runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname = 'sdn'" | grep -q 1 ||
-		runuser -u postgres -- psql -q -c "CREATE DATABASE sdn OWNER sdn"
-	echo "SDN_STORE=postgres://sdn:$password@127.0.0.1:5432/sdn?sslmode=disable" >/etc/sdn/cp-store.env
+	runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname = 'wirenet'" | grep -q 1 ||
+		runuser -u postgres -- psql -q -c "CREATE DATABASE wirenet OWNER wirenet"
+	echo "WIRENET_STORE=postgres://wirenet:$password@127.0.0.1:5432/wirenet?sslmode=disable" >/etc/wirenet/cp-store.env
 	umask 022
 	say "postgres role and database: ok"
-	# sdn-cp serves its own metrics on :9090, Prometheus's default, so
+	# wirenet-cp serves its own metrics on :9090, Prometheus's default, so
 	# Prometheus moves to loopback port 9099; reach it through an SSH
 	# tunnel.
-	mkdir -p /etc/prometheus/sdn
+	mkdir -p /etc/prometheus/wirenet
 	args='ARGS="--web.listen-address=127.0.0.1:9099"'
 	if [ "$(cat /etc/default/prometheus 2>/dev/null)" != "$args" ]; then
 		echo "$args" >/etc/default/prometheus

@@ -9,7 +9,7 @@ const (
 	agentRelays  = "internal/agent/core/relays.go"
 	agentDaemon  = "internal/agent/daemon/daemon.go"
 	agentResolv  = "internal/agent/resolver/resolver.go"
-	agentMain    = "cmd/sdn-agent/main.go"
+	agentMain    = "cmd/wirenet-agent/main.go"
 	agentUnder   = "internal/agent/underlay/underlay.go"
 	linuxEgress  = "internal/kernel/linux/egress.go"
 	linuxNetns   = "internal/kernel/linux/netns.go"
@@ -522,7 +522,7 @@ var Mutants = []Mutant{
 	},
 	{
 		ID:     "metric-increment-dropped",
-		Breaks: "every local attach and detach counts in sdn_agent_local_calls_total by result",
+		Breaks: "every local attach and detach counts in wirenet_agent_local_calls_total by result",
 		Edits:  []Edit{{agentDaemon, "\td.m.localCalls.WithLabelValues(r.kind, result).Inc()\n", "\t_ = result\n"}},
 		Catch:  []string{"agent-daemon", "e2e"},
 	},

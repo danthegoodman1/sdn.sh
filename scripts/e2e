@@ -4,13 +4,13 @@
 #
 #   scripts/e2e [test binary flags...]   e.g. scripts/e2e -test.run TwoHosts -test.v
 #
-# SDN_TEST_POSTGRES, when set, runs the control plane on Postgres.
+# WIRENET_TEST_POSTGRES, when set, runs the control plane on Postgres.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-go build -o "$work/bin/" ./cmd/sdn-cp ./cmd/sdn-agent ./cmd/sdn-relay ./cmd/sdnctl
+go build -o "$work/bin/" ./cmd/wirenet-cp ./cmd/wirenet-agent ./cmd/wirenet-relay ./cmd/wirenetctl
 go test -c -o "$work/e2e.test" ./e2e
 cd e2e
-sudo env SDN_LAB_BIN="$work/bin" SDN_TEST_POSTGRES="${SDN_TEST_POSTGRES:-}" SDN_LAB_KEEP="${SDN_LAB_KEEP:-}" SDN_LAB_KEEP_ALWAYS="${SDN_LAB_KEEP_ALWAYS:-}" \
+sudo env WIRENET_LAB_BIN="$work/bin" WIRENET_TEST_POSTGRES="${WIRENET_TEST_POSTGRES:-}" WIRENET_LAB_KEEP="${WIRENET_LAB_KEEP:-}" WIRENET_LAB_KEEP_ALWAYS="${WIRENET_LAB_KEEP_ALWAYS:-}" \
 	"$work/e2e.test" -test.timeout 20m "$@"

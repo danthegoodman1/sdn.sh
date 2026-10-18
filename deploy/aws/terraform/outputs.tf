@@ -9,7 +9,7 @@ locals {
 }
 
 output "fleet" {
-  description = "Every machine's role and addresses, with the region and instance types: what sdn-lab reads from `terraform output -json`."
+  description = "Every machine's role and addresses, with the region and instance types: what wirenet-lab reads from `terraform output -json`."
   value = {
     region   = var.region
     ssh_user = "ubuntu"

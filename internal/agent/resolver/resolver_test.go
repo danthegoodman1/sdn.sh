@@ -15,7 +15,7 @@ import (
 	"github.com/rs/zerolog"
 	"golang.org/x/net/dns/dnsmessage"
 
-	"sdn.sh/internal/dns"
+	"github.com/danthegoodman1/wirenet/internal/dns"
 )
 
 func query(t *testing.T, id uint16, name string, typ dnsmessage.Type) []byte {
@@ -58,13 +58,13 @@ func slowUpstream(t *testing.T, delay time.Duration) netip.AddrPort {
 	return c.LocalAddr().(*net.UDPAddr).AddrPort()
 }
 
-// withZone is a resolver answering db.n.sdn. for namespace ns and forwarding
+// withZone is a resolver answering db.n.wirenet. for namespace ns and forwarding
 // everything else to upstream.
 func withZone(t *testing.T, upstream netip.AddrPort) *Resolver {
 	t.Helper()
 	r := New(upstream, zerolog.Nop(), prometheus.NewRegistry())
-	r.zones["ns"] = &dns.Zone{Domain: "n.sdn.", Forward: true,
-		Names: []dns.Name{{FQDN: "db.n.sdn.", AAAA: netip.MustParseAddr("fd00::5")}}}
+	r.zones["ns"] = &dns.Zone{Domain: "n.wirenet.", Forward: true,
+		Names: []dns.Name{{FQDN: "db.n.wirenet.", AAAA: netip.MustParseAddr("fd00::5")}}}
 	return r
 }
 
@@ -82,7 +82,7 @@ func TestASlowUpstreamDelaysNoLocalAnswer(t *testing.T) {
 	}
 	defer client.Close()
 	start := time.Now()
-	for _, q := range [][]byte{query(t, 1, "example.com.", dnsmessage.TypeA), query(t, 2, "db.n.sdn.", dnsmessage.TypeAAAA)} {
+	for _, q := range [][]byte{query(t, 1, "example.com.", dnsmessage.TypeA), query(t, 2, "db.n.wirenet.", dnsmessage.TypeAAAA)} {
 		if _, err := client.Write(q); err != nil {
 			t.Fatal(err)
 		}
@@ -115,7 +115,7 @@ func TestATCPConnectionPastTheCapIsClosed(t *testing.T) {
 	go r.serveTCP("ns", ln)
 	addr := ln.Addr().String()
 	ask := func(c net.Conn) error {
-		q := query(t, 7, "db.n.sdn.", dnsmessage.TypeAAAA)
+		q := query(t, 7, "db.n.wirenet.", dnsmessage.TypeAAAA)
 		if _, err := c.Write(append(binary.BigEndian.AppendUint16(nil, uint16(len(q))), q...)); err != nil {
 			return err
 		}

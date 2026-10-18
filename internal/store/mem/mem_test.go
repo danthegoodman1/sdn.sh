@@ -3,10 +3,10 @@ package mem_test
 import (
 	"testing"
 
-	"sdn.sh/internal/store"
-	"sdn.sh/internal/store/locked"
-	"sdn.sh/internal/store/mem"
-	"sdn.sh/internal/store/storetest"
+	"github.com/danthegoodman1/wirenet/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/store/locked"
+	"github.com/danthegoodman1/wirenet/internal/store/mem"
+	"github.com/danthegoodman1/wirenet/internal/store/storetest"
 )
 
 // TestConformance runs the suite on the memory store behind a lock, so the

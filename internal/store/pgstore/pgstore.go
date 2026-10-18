@@ -16,8 +16,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"sdn.sh/internal/store"
-	"sdn.sh/internal/store/pgstore/db"
+	"github.com/danthegoodman1/wirenet/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/store/pgstore/db"
 )
 
 // Store is a pool of connections to one database.

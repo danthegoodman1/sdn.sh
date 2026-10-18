@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // Client is one principal's connection to the control plane.

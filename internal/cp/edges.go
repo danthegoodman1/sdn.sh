@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package cp
 
@@ -6,10 +6,10 @@ import (
 	"slices"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/compile"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/compile"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/store"
 )
 
 // scope limits an edge reconciliation to the pairs a change can affect.

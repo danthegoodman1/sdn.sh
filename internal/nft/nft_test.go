@@ -6,8 +6,8 @@ import (
 	"net/netip"
 	"testing"
 
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/prng"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/prng"
 )
 
 // randomRuleset draws a valid ruleset over a small universe of services and

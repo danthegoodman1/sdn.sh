@@ -6,8 +6,8 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 func network() *api.NetworkState {

@@ -7,12 +7,12 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"sdn.sh/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/store"
 )
 
 // Channel is the notification channel every committed change is announced
 // on, as the JSON of a store.Change.
-const Channel = "sdn_changes"
+const Channel = "wirenet_changes"
 
 // maxPayload is the longest notification payload Postgres accepts: it
 // rejects one of 8000 bytes or more.

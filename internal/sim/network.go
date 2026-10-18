@@ -1,11 +1,11 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package sim
 
 import (
 	"time"
 
-	"sdn.sh/internal/prng"
+	"github.com/danthegoodman1/wirenet/internal/prng"
 )
 
 // Node names an endpoint of the simulated network: the control plane, a host

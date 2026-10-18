@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package core
 
@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/dns"
-	"sdn.sh/internal/kernel"
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/dns"
+	"github.com/danthegoodman1/wirenet/internal/kernel"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // Start adopts what the journal and the kernel hold. Journaled interfaces

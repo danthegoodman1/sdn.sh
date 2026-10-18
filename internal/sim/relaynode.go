@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package sim
 
@@ -7,11 +7,11 @@ import (
 	"net/netip"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/prng"
-	"sdn.sh/internal/regproto"
-	relaycore "sdn.sh/internal/relay/core"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/prng"
+	"github.com/danthegoodman1/wirenet/internal/regproto"
+	relaycore "github.com/danthegoodman1/wirenet/internal/relay/core"
 )
 
 const relayProbePort = 7000

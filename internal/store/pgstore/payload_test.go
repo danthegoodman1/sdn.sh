@@ -6,8 +6,8 @@ import (
 	"slices"
 	"testing"
 
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/store"
 )
 
 func TestPayloadsFitAndCoverTheChange(t *testing.T) {

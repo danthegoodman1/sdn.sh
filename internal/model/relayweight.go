@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package model
 

@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	relaycore "sdn.sh/internal/relay/core"
+	relaycore "github.com/danthegoodman1/wirenet/internal/relay/core"
 )
 
 // Disk is what survives a relay restart: a state file holding the pushed

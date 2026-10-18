@@ -6,7 +6,7 @@ import (
 	"context"
 	"sync"
 
-	"sdn.sh/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/store"
 )
 
 // Store serializes every transaction of the store it wraps.

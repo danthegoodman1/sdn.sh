@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package sim
 
@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/prng"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/prng"
 )
 
 // Epoch is the simulated wall clock at the start of every run.

@@ -21,11 +21,11 @@ import (
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 
-	"sdn.sh/internal/kernel"
-	"sdn.sh/internal/kernel/kmodel"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/nft"
-	"sdn.sh/internal/prng"
+	"github.com/danthegoodman1/wirenet/internal/kernel"
+	"github.com/danthegoodman1/wirenet/internal/kernel/kmodel"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/nft"
+	"github.com/danthegoodman1/wirenet/internal/prng"
 )
 
 // newKernel returns a kernel for tests that need root in a namespace of
@@ -86,7 +86,7 @@ func newKernel(t *testing.T) *Kernel {
 
 // prefix names this test run's namespaces, so a run never touches another's.
 func prefix(t *testing.T) string {
-	return fmt.Sprintf("sdnt%d-", os.Getpid()%100000)
+	return fmt.Sprintf("wnt%d-", os.Getpid()%100000)
 }
 
 func run(t *testing.T, k *Kernel, ops ...kernel.Op) {
@@ -103,7 +103,7 @@ func namespace(t *testing.T, k *Kernel, name string) string {
 	t.Helper()
 	run(t, k, kernel.Op{Kind: kernel.CreateNamespace, Namespace: name})
 	t.Cleanup(func() {
-		k.Run(kernel.Op{Kind: kernel.DeleteDevice, Namespace: name, Device: "sdn0"})
+		k.Run(kernel.Op{Kind: kernel.DeleteDevice, Namespace: name, Device: "wirenet0"})
 		k.Run(kernel.Op{Kind: kernel.DeleteNamespace, Namespace: name})
 	})
 	return name
@@ -132,9 +132,9 @@ func pair(t *testing.T, k *Kernel, r *prng.Rand) (end, end) {
 			a4:   netip.AddrFrom4([4]byte{10, 99, 0, i}),
 		}
 		run(t, k,
-			kernel.Op{Kind: kernel.CreateDevice, Namespace: e.ns, Device: "sdn0",
-				Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: port, Alias: "sdn:test:" + name}},
-			kernel.Op{Kind: kernel.ConfigureLink, Namespace: e.ns, Device: "sdn0", Link: &kernel.LinkConfig{
+			kernel.Op{Kind: kernel.CreateDevice, Namespace: e.ns, Device: "wirenet0",
+				Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: port, Alias: "wirenet:test:" + name}},
+			kernel.Op{Kind: kernel.ConfigureLink, Namespace: e.ns, Device: "wirenet0", Link: &kernel.LinkConfig{
 				Addrs:  []netip.Prefix{netip.PrefixFrom(e.addr, 128), netip.PrefixFrom(e.a4, 32)},
 				Routes: []netip.Prefix{netip.MustParsePrefix("fd00::/64"), netip.MustParsePrefix("10.99.0.0/16")},
 				MTU:    1380,
@@ -144,7 +144,7 @@ func pair(t *testing.T, k *Kernel, r *prng.Rand) (end, end) {
 	base := uint16(42000 + r.Below(1000))
 	a, b := mk("a", 1, base), mk("b", 2, base+1)
 	peer := func(from, to end, keepalive time.Duration) {
-		run(t, k, kernel.Op{Kind: kernel.SetPeers, Namespace: from.ns, Device: "sdn0", Peers: []kernel.PeerUpdate{{
+		run(t, k, kernel.Op{Kind: kernel.SetPeers, Namespace: from.ns, Device: "wirenet0", Peers: []kernel.PeerUpdate{{
 			PublicKey: to.pub(),
 			Allowed:   []netip.Prefix{netip.PrefixFrom(to.addr, 128), netip.PrefixFrom(to.a4, 32)},
 			Endpoint:  netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), to.port),
@@ -237,7 +237,7 @@ func readReply(t *testing.T, c net.Conn) string {
 func TestADeviceCreatedIntoANamespaceKeepsItsSocketInTheRoot(t *testing.T) {
 	k := newKernel(t)
 	a, b := pair(t, k, prng.New(1))
-	if _, err := netlink.LinkByName("sdn0"); err == nil {
+	if _, err := netlink.LinkByName("wirenet0"); err == nil {
 		t.Fatal("the device shows in the root namespace")
 	}
 	serve(t, b.ns, netip.AddrPortFrom(b.addr, 8080), "b over v6")
@@ -253,7 +253,7 @@ func TestADeviceCreatedIntoANamespaceKeepsItsSocketInTheRoot(t *testing.T) {
 	inNamespace(t, a.ns, func() {
 		links, _ := netlink.LinkList()
 		for _, l := range links {
-			if l.Attrs().Name != "lo" && l.Attrs().Name != "sdn0" {
+			if l.Attrs().Name != "lo" && l.Attrs().Name != "wirenet0" {
 				t.Errorf("workload namespace holds %s", l.Attrs().Name)
 			}
 		}
@@ -266,8 +266,8 @@ func TestAPortInUseFailsTheCreateAndLeavesNoDevice(t *testing.T) {
 	a, _ := pair(t, k, r)
 	other := namespace(t, k, prefix(t)+"c")
 	priv, _ := model.NewPrivateKey(r)
-	_, err := k.Run(kernel.Op{Kind: kernel.CreateDevice, Namespace: other, Device: "sdn0",
-		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: a.port, Alias: "sdn:test:c"}})
+	_, err := k.Run(kernel.Op{Kind: kernel.CreateDevice, Namespace: other, Device: "wirenet0",
+		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: a.port, Alias: "wirenet:test:c"}})
 	if !errors.Is(err, kernel.ErrPortInUse) {
 		t.Fatalf("create on a used port: %v", err)
 	}
@@ -295,8 +295,8 @@ func TestTheModelAgreesWithLinux(t *testing.T) {
 		}
 	}
 	both(kernel.Op{Kind: kernel.CreateNamespace, Namespace: name})
-	both(kernel.Op{Kind: kernel.CreateDevice, Namespace: name, Device: "sdn0",
-		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: uint16(43000 + r.Below(1000)), Alias: "sdn:test:m"}})
+	both(kernel.Op{Kind: kernel.CreateDevice, Namespace: name, Device: "wirenet0",
+		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: uint16(43000 + r.Below(1000)), Alias: "wirenet:test:m"}})
 	var keys []model.Key
 	for range 6 {
 		p, _ := model.NewPrivateKey(r)
@@ -326,7 +326,7 @@ func TestTheModelAgreesWithLinux(t *testing.T) {
 			}
 			ups = append(ups, u)
 		}
-		both(kernel.Op{Kind: kernel.SetPeers, Namespace: name, Device: "sdn0", Peers: ups})
+		both(kernel.Op{Kind: kernel.SetPeers, Namespace: name, Device: "wirenet0", Peers: ups})
 		lns, err := k.Namespace(name, "")
 		if err != nil {
 			t.Fatal(err)
@@ -443,12 +443,12 @@ func TestAnElementUpdateMovesNewConnectionsOnly(t *testing.T) {
 	a, b := pair(t, k, r)
 	// A second server address on b stands in for a second backend.
 	b2 := netip.MustParseAddr("fd00::22")
-	run(t, k, kernel.Op{Kind: kernel.ConfigureLink, Namespace: b.ns, Device: "sdn0", Link: &kernel.LinkConfig{
+	run(t, k, kernel.Op{Kind: kernel.ConfigureLink, Namespace: b.ns, Device: "wirenet0", Link: &kernel.LinkConfig{
 		Addrs:  []netip.Prefix{netip.PrefixFrom(b.addr, 128), netip.PrefixFrom(b.a4, 32), netip.PrefixFrom(b2, 128)},
 		Routes: []netip.Prefix{netip.MustParsePrefix("fd00::/64"), netip.MustParsePrefix("10.99.0.0/16")},
 		MTU:    1380,
 	}})
-	run(t, k, kernel.Op{Kind: kernel.SetPeers, Namespace: a.ns, Device: "sdn0", Peers: []kernel.PeerUpdate{{
+	run(t, k, kernel.Op{Kind: kernel.SetPeers, Namespace: a.ns, Device: "wirenet0", Peers: []kernel.PeerUpdate{{
 		PublicKey: b.pub(),
 		Allowed:   []netip.Prefix{netip.PrefixFrom(b.addr, 128), netip.PrefixFrom(b.a4, 32), netip.PrefixFrom(b2, 128)},
 		Endpoint:  netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), b.port),
@@ -579,7 +579,7 @@ func TestADeletedNamespaceAProcessHoldsIsFoundAndReaped(t *testing.T) {
 	defer holder.Process.Kill()
 	time.Sleep(200 * time.Millisecond)
 	run(t, k, kernel.Op{Kind: kernel.DeleteNamespace, Namespace: a.ns})
-	snap, err := k.Snapshot(prefix(t), "sdn:test:")
+	snap, err := k.Snapshot(prefix(t), "wirenet:test:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -592,12 +592,12 @@ func TestADeletedNamespaceAProcessHoldsIsFoundAndReaped(t *testing.T) {
 	if ref == "" {
 		t.Fatalf("the held namespace is missing: %+v", snap)
 	}
-	run(t, k, kernel.Op{Kind: kernel.Reap, Ref: ref, AliasPrefix: "sdn:test:"})
+	run(t, k, kernel.Op{Kind: kernel.Reap, Ref: ref, AliasPrefix: "wirenet:test:"})
 	// The port is free: a new device binds it.
 	other := namespace(t, k, prefix(t)+"d")
 	priv, _ := model.NewPrivateKey(r)
-	run(t, k, kernel.Op{Kind: kernel.CreateDevice, Namespace: other, Device: "sdn0",
-		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: a.port, Alias: "sdn:test:d"}})
+	run(t, k, kernel.Op{Kind: kernel.CreateDevice, Namespace: other, Device: "wirenet0",
+		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: a.port, Alias: "wirenet:test:d"}})
 }
 
 // internet builds a namespace standing for the internet behind the root
@@ -835,24 +835,24 @@ func TestADeletedNamespaceADescriptorHoldsIsFoundAndReaped(t *testing.T) {
 	}
 	defer f.Close()
 	run(t, k, kernel.Op{Kind: kernel.DeleteNamespace, Namespace: a.ns})
-	snap, err := k.Snapshot(prefix(t), "sdn:test:")
+	snap, err := k.Snapshot(prefix(t), "wirenet:test:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var ref string
 	for _, ns := range snap.Namespaces {
-		if ns.Name == "" && len(ns.Devices) == 1 && ns.Devices[0].Alias == "sdn:test:a" {
+		if ns.Name == "" && len(ns.Devices) == 1 && ns.Devices[0].Alias == "wirenet:test:a" {
 			ref = ns.Ref
 		}
 	}
 	if ref == "" {
 		t.Fatalf("the namespace a descriptor holds is missing: %+v", snap)
 	}
-	run(t, k, kernel.Op{Kind: kernel.Reap, Ref: ref, AliasPrefix: "sdn:test:"})
+	run(t, k, kernel.Op{Kind: kernel.Reap, Ref: ref, AliasPrefix: "wirenet:test:"})
 	other := namespace(t, k, prefix(t)+"e")
 	priv, _ := model.NewPrivateKey(r)
-	run(t, k, kernel.Op{Kind: kernel.CreateDevice, Namespace: other, Device: "sdn0",
-		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: a.port, Alias: "sdn:test:e"}})
+	run(t, k, kernel.Op{Kind: kernel.CreateDevice, Namespace: other, Device: "wirenet0",
+		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: a.port, Alias: "wirenet:test:e"}})
 }
 
 // TestANameAnOperatorDeletesStopsReachingTheAgentsSockets deletes a
@@ -867,16 +867,16 @@ func TestANameAnOperatorDeletesStopsReachingTheAgentsSockets(t *testing.T) {
 	if out, err := exec.Command("ip", "netns", "del", a.ns).CombinedOutput(); err != nil {
 		t.Fatalf("ip netns del: %v: %s", err, out)
 	}
-	if _, err := k.Namespace(a.ns, "sdn:test:"); !errors.Is(err, kernel.ErrNoNamespace) {
+	if _, err := k.Namespace(a.ns, "wirenet:test:"); !errors.Is(err, kernel.ErrNoNamespace) {
 		t.Fatalf("observing a deleted name: %v", err)
 	}
-	if _, err := k.Run(kernel.Op{Kind: kernel.SetPeers, Namespace: a.ns, Device: "sdn0"}); !errors.Is(err, kernel.ErrNoNamespace) {
+	if _, err := k.Run(kernel.Op{Kind: kernel.SetPeers, Namespace: a.ns, Device: "wirenet0"}); !errors.Is(err, kernel.ErrNoNamespace) {
 		t.Fatalf("configuring through a deleted name: %v", err)
 	}
 	other := namespace(t, k, prefix(t)+"f")
 	priv, _ := model.NewPrivateKey(r)
-	create := kernel.Op{Kind: kernel.CreateDevice, Namespace: other, Device: "sdn0",
-		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: a.port, Alias: "sdn:test:f"}}
+	create := kernel.Op{Kind: kernel.CreateDevice, Namespace: other, Device: "wirenet0",
+		Create: &kernel.DeviceConfig{PrivateKey: priv, ListenPort: a.port, Alias: "wirenet:test:f"}}
 	if _, err := k.Run(create); !errors.Is(err, kernel.ErrPortInUse) {
 		t.Fatalf("binding the port the agent's sockets hold: %v", err)
 	}
@@ -914,7 +914,7 @@ func TestANameACrashLeftUnmountedIsReplaced(t *testing.T) {
 	if mounted, err := isNamespace(path); err != nil || !mounted {
 		t.Fatalf("after creating over a plain file: namespace %v, %v", mounted, err)
 	}
-	if _, err := k.Namespace(name, "sdn:test:"); err != nil {
+	if _, err := k.Namespace(name, "wirenet:test:"); err != nil {
 		t.Fatalf("observing the replaced namespace: %v", err)
 	}
 	run(t, k, kernel.Op{Kind: kernel.DeleteNamespace, Namespace: name})

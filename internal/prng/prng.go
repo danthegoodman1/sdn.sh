@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package prng is the seeded random source every deterministic package draws
 // from. It lives in this module so a recorded seed replays the same run after

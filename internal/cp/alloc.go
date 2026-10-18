@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package cp
 
@@ -7,9 +7,9 @@ import (
 	"net/netip"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/store"
 )
 
 // alloc6 takes the network's next IPv6 address. A /64 holds more addresses

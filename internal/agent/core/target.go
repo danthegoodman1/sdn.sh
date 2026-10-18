@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package core
 
@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/kernel"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/nft"
-	"sdn.sh/internal/slots"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/kernel"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/nft"
+	"github.com/danthegoodman1/wirenet/internal/slots"
 )
 
 // target is what one namespace should hold now.

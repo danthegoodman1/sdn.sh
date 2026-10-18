@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package core
 
@@ -10,10 +10,10 @@ import (
 	"slices"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/kernel"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/nft"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/kernel"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/nft"
 )
 
 // Actions plans a batch for every namespace that needs one and returns

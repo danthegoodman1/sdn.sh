@@ -11,8 +11,8 @@ import (
 	"slices"
 	"strings"
 
-	agentcore "sdn.sh/internal/agent/core"
-	"sdn.sh/internal/model"
+	agentcore "github.com/danthegoodman1/wirenet/internal/agent/core"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // Journal is a directory of entries.

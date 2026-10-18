@@ -7,3 +7,4 @@
 deploy/aws/terraform/.terraform/
 deploy/aws/terraform/terraform.tfstate*
 deploy/aws/terraform/*.tfvars
+*.test

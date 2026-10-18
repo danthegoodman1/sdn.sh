@@ -12,7 +12,7 @@ import (
 // TestModuleIsDeterministic checks every deterministic package in the module.
 func TestModuleIsDeterministic(t *testing.T) {
 	touchSources(t, "../..")
-	pkgs, err := Load("../..", "sdn.sh/...")
+	pkgs, err := Load("../..", "github.com/danthegoodman1/wirenet/...")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,21 +56,21 @@ func touchSources(t *testing.T, root string) {
 // deterministic lists the packages that must carry the directive, so
 // removing it from one fails here rather than exempting the package.
 var deterministic = []string{
-	"sdn.sh/internal/agent/core",
-	"sdn.sh/internal/api",
-	"sdn.sh/internal/compile",
-	"sdn.sh/internal/cp",
-	"sdn.sh/internal/kernel",
-	"sdn.sh/internal/kernel/kmodel",
-	"sdn.sh/internal/model",
-	"sdn.sh/internal/nft",
-	"sdn.sh/internal/prng",
-	"sdn.sh/internal/regproto",
-	"sdn.sh/internal/relay/core",
-	"sdn.sh/internal/sim",
-	"sdn.sh/internal/slots",
-	"sdn.sh/internal/store",
-	"sdn.sh/internal/store/mem",
+	"github.com/danthegoodman1/wirenet/internal/agent/core",
+	"github.com/danthegoodman1/wirenet/internal/api",
+	"github.com/danthegoodman1/wirenet/internal/compile",
+	"github.com/danthegoodman1/wirenet/internal/cp",
+	"github.com/danthegoodman1/wirenet/internal/kernel",
+	"github.com/danthegoodman1/wirenet/internal/kernel/kmodel",
+	"github.com/danthegoodman1/wirenet/internal/model",
+	"github.com/danthegoodman1/wirenet/internal/nft",
+	"github.com/danthegoodman1/wirenet/internal/prng",
+	"github.com/danthegoodman1/wirenet/internal/regproto",
+	"github.com/danthegoodman1/wirenet/internal/relay/core",
+	"github.com/danthegoodman1/wirenet/internal/sim",
+	"github.com/danthegoodman1/wirenet/internal/slots",
+	"github.com/danthegoodman1/wirenet/internal/store",
+	"github.com/danthegoodman1/wirenet/internal/store/mem",
 }
 
 func TestFixtureViolatesEveryRule(t *testing.T) {

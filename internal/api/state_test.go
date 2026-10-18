@@ -3,7 +3,7 @@ package api
 import (
 	"testing"
 
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // TestAnUpdateOlderThanAnAttachKeepsItsNetwork covers an attach answer that

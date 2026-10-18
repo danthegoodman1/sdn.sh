@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package sim
 
@@ -6,11 +6,11 @@ import (
 	"net/netip"
 	"time"
 
-	"sdn.sh/internal/kernel"
-	"sdn.sh/internal/kernel/kmodel"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/nft"
-	"sdn.sh/internal/regproto"
+	"github.com/danthegoodman1/wirenet/internal/kernel"
+	"github.com/danthegoodman1/wirenet/internal/kernel/kmodel"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/nft"
+	"github.com/danthegoodman1/wirenet/internal/regproto"
 )
 
 // packet is one underlay datagram: a registration, a relay's

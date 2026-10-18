@@ -219,7 +219,7 @@ func Layers(o options) map[string]Layer {
 		goTest("agent-core", "./internal/agent/core"),
 		goTest("agent-daemon", "./internal/agent/daemon"),
 		goTest("agent-resolver", "./internal/agent/resolver"),
-		goTest("agent-cmd", "./cmd/sdn-agent"),
+		goTest("agent-cmd", "./cmd/wirenet-agent"),
 		goTest("sim", "./internal/sim"),
 		goTest("kmodel", "./internal/kernel/kmodel"),
 		goTest("model", "./internal/model"),
@@ -234,7 +234,7 @@ func Layers(o options) map[string]Layer {
 			{Dir: "internal/agent/underlay", Root: true, Args: []string{"unshare", "--net", "../../../.mutants/underlay.test", "-test.timeout", o.timeout.String()}},
 		}},
 		{Name: "e2e", Root: true, Steps: []Step{{Args: []string{"scripts/e2e"}}}},
-		{Name: "pgstore", Env: "SDN_TEST_POSTGRES", Steps: goTest("", "./internal/store/pgstore").Steps},
+		{Name: "pgstore", Env: "WIRENET_TEST_POSTGRES", Steps: goTest("", "./internal/store/pgstore").Steps},
 	}
 	out := map[string]Layer{}
 	for _, l := range ls {
@@ -343,7 +343,7 @@ func trackedFiles(root string) ([]string, error) {
 
 // copyTree copies files from root into a fresh scratch directory.
 func copyTree(root string, files []string, tag string) (string, error) {
-	dir, err := os.MkdirTemp("", "sdn-mutant-"+tag+"-")
+	dir, err := os.MkdirTemp("", "wirenet-mutant-"+tag+"-")
 	if err != nil {
 		return "", err
 	}
@@ -526,7 +526,7 @@ func runStep(dir string, s Step, root bool, o options, out io.Writer) error {
 	defer cancel()
 	args := s.Args
 	if s.Root && os.Geteuid() != 0 {
-		args = append([]string{"sudo", "--preserve-env=SDN_TEST_POSTGRES"}, args...)
+		args = append([]string{"sudo", "--preserve-env=WIRENET_TEST_POSTGRES"}, args...)
 	}
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Dir = filepath.Join(dir, s.Dir)

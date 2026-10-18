@@ -12,7 +12,7 @@ import (
 
 	"github.com/vishvananda/netlink"
 
-	"sdn.sh/internal/regproto"
+	"github.com/danthegoodman1/wirenet/internal/regproto"
 )
 
 // fresh skips unless the test runs as root in a namespace of its own, and

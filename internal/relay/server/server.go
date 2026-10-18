@@ -18,9 +18,9 @@ import (
 	"golang.org/x/net/ipv6"
 	"golang.org/x/sys/unix"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/regproto"
-	relaycore "sdn.sh/internal/relay/core"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/regproto"
+	relaycore "github.com/danthegoodman1/wirenet/internal/relay/core"
 )
 
 // ControlPlane is the relay's side of the control plane's API.

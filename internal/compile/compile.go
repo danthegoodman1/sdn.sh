@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package compile turns a network's records into each host's desired state,
 // and a relay's edges into its port table. Both are pure functions of the
@@ -12,10 +12,10 @@ import (
 	"slices"
 	"strings"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/regproto"
-	"sdn.sh/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/regproto"
+	"github.com/danthegoodman1/wirenet/internal/store"
 )
 
 // Snapshot is everything about one network that its hosts' state depends

@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package cp is the control plane's logic: allocation, leases, policy and
 // edges, as transitions over a store transaction. It reads no clock and draws
@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/store"
 )
 
 // Config holds the control plane's clocks.

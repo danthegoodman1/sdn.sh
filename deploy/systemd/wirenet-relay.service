@@ -1,0 +1,19 @@
+[Unit]
+Description=wirenet relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# relay.env holds WIRENET_RELAY_ARGS: the control plane's URL, the relay's
+# credentials file, its state directory, probe address and telemetry
+# address. The port table and registration secrets persist in the state
+# directory, so a restart during a control-plane outage strands nothing.
+EnvironmentFile=/etc/wirenet/relay.env
+ExecStart=/usr/local/bin/wirenet-relay $WIRENET_RELAY_ARGS
+Restart=always
+RestartSec=1
+# A socket per directed port.
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

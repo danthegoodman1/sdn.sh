@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package regproto is the registration datagram an agent sends a relay to
 // claim a direction's endpoint, the acknowledgment the relay sends back once
@@ -29,7 +29,7 @@ import (
 	"encoding/binary"
 	"net/netip"
 
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // Sizes of the datagrams.
@@ -44,7 +44,7 @@ const (
 // RelayKey derives one relay's registration key for a direction.
 func RelayKey(secret model.Secret, relay model.RelayID) model.Secret {
 	m := hmac.New(sha256.New, secret[:])
-	m.Write([]byte("sdn relay key v1\x00"))
+	m.Write([]byte("wirenet relay key v1\x00"))
 	m.Write([]byte(relay))
 	var k model.Secret
 	copy(k[:], m.Sum(nil))
@@ -81,7 +81,7 @@ func Verify(key model.Secret, advertised netip.AddrPort, b []byte) (uint64, bool
 
 func mac(key model.Secret, advertised netip.AddrPort, header []byte) []byte {
 	m := hmac.New(sha256.New, key[:])
-	m.Write([]byte("sdn registration v1\x00"))
+	m.Write([]byte("wirenet registration v1\x00"))
 	a16 := advertised.Addr().As16()
 	m.Write(a16[:])
 	var port [2]byte

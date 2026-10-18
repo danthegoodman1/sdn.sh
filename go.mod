@@ -1,4 +1,4 @@
-module sdn.sh
+module github.com/danthegoodman1/wirenet
 
 go 1.27.2
 

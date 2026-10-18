@@ -3,10 +3,10 @@ package sim
 import (
 	"testing"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/cp"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/cp"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/store"
 )
 
 // TestAParkedPollWakesForItsNetwork holds the simulator's control plane to

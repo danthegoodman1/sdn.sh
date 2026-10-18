@@ -9,7 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	relaycore "sdn.sh/internal/relay/core"
+	relaycore "github.com/danthegoodman1/wirenet/internal/relay/core"
 )
 
 // Metrics are the relay's Prometheus metrics.
@@ -36,48 +36,48 @@ type Metrics struct {
 func NewMetrics(reg prometheus.Registerer, perPortCap int) *Metrics {
 	m := &Metrics{
 		forwarded: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "sdn_relay_forwarded_packets_total", Help: "Packets forwarded.",
+			Name: "wirenet_relay_forwarded_packets_total", Help: "Packets forwarded.",
 		}),
 		forwardedBytes: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "sdn_relay_forwarded_bytes_total", Help: "Bytes forwarded.",
+			Name: "wirenet_relay_forwarded_bytes_total", Help: "Bytes forwarded.",
 		}),
 		writeFailed: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "sdn_relay_write_failed_packets_total", Help: "Packets the relay decided to forward and failed to send.",
+			Name: "wirenet_relay_write_failed_packets_total", Help: "Packets the relay decided to forward and failed to send.",
 		}),
 		dropped: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "sdn_relay_dropped_packets_total", Help: "Packets dropped, by reason.",
+			Name: "wirenet_relay_dropped_packets_total", Help: "Packets dropped, by reason.",
 		}, []string{"reason"}),
 		registrations: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "sdn_relay_registrations_total", Help: "Registrations by outcome.",
+			Name: "wirenet_relay_registrations_total", Help: "Registrations by outcome.",
 		}, []string{"result"}),
 		waits: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "sdn_relay_waiting_packets_total", Help: "Data packets that waited for a registration, by outcome.",
+			Name: "wirenet_relay_waiting_packets_total", Help: "Data packets that waited for a registration, by outcome.",
 		}, []string{"outcome"}),
 		probes: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "sdn_relay_probes_answered_total", Help: "Probes answered.",
+			Name: "wirenet_relay_probes_answered_total", Help: "Probes answered.",
 		}),
 		probesLimited: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "sdn_relay_probes_limited_total", Help: "Probes left unanswered by the relay-wide cap.",
+			Name: "wirenet_relay_probes_limited_total", Help: "Probes left unanswered by the relay-wide cap.",
 		}),
 		readBatch: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name: "sdn_relay_read_batch_size", Help: "Datagrams per receive batch.",
+			Name: "wirenet_relay_read_batch_size", Help: "Datagrams per receive batch.",
 			Buckets: []float64{1, 2, 4, 8, 16, 32, 64, 128},
 		}),
 		fsync: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name: "sdn_relay_registration_fsync_seconds", Help: "Time to make a group of registrations durable.",
+			Name: "wirenet_relay_registration_fsync_seconds", Help: "Time to make a group of registrations durable.",
 			Buckets: prometheus.ExponentialBuckets(0.00005, 2, 16),
 		}),
 		ports: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "sdn_relay_ports", Help: "Directions' ports bound.",
+			Name: "wirenet_relay_ports", Help: "Directions' ports bound.",
 		}),
 		unbound: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "sdn_relay_unbound_ports", Help: "Directions' ports the relay failed to bind and is retrying.",
+			Name: "wirenet_relay_unbound_ports", Help: "Directions' ports the relay failed to bind and is retrying.",
 		}),
 		bindFailed: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "sdn_relay_bind_failures_total", Help: "Attempts to bind a direction's port that failed.",
+			Name: "wirenet_relay_bind_failures_total", Help: "Attempts to bind a direction's port that failed.",
 		}),
 		generation: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "sdn_relay_generation", Help: "The port table's control-plane generation.",
+			Name: "wirenet_relay_generation", Help: "The port table's control-plane generation.",
 		}),
 		perPort: &portCollector{cap: perPortCap},
 	}
@@ -89,9 +89,9 @@ func NewMetrics(reg prometheus.Registerer, perPortCap int) *Metrics {
 func (m *Metrics) attach(s *Server) { m.perPort.s = s }
 
 var (
-	portPackets = prometheus.NewDesc("sdn_relay_port_forwarded_packets_total", "Packets forwarded from a port, for the busiest ports.", []string{"port"}, nil)
-	portBytes   = prometheus.NewDesc("sdn_relay_port_forwarded_bytes_total", "Bytes forwarded from a port, for the busiest ports.", []string{"port"}, nil)
-	portDropped = prometheus.NewDesc("sdn_relay_port_dropped_packets_total", "Packets dropped on a port by reason, for the busiest ports.", []string{"port", "reason"}, nil)
+	portPackets = prometheus.NewDesc("wirenet_relay_port_forwarded_packets_total", "Packets forwarded from a port, for the busiest ports.", []string{"port"}, nil)
+	portBytes   = prometheus.NewDesc("wirenet_relay_port_forwarded_bytes_total", "Bytes forwarded from a port, for the busiest ports.", []string{"port"}, nil)
+	portDropped = prometheus.NewDesc("wirenet_relay_port_dropped_packets_total", "Packets dropped on a port by reason, for the busiest ports.", []string{"port", "reason"}, nil)
 )
 
 // portCollector reports per-port counters for at most cap ports, the ones
@@ -140,7 +140,7 @@ func int64Cmp(a, b uint64) int {
 	return 0
 }
 
-var rcvbufDesc = prometheus.NewDesc("sdn_relay_udp_rcvbuf_errors_total",
+var rcvbufDesc = prometheus.NewDesc("wirenet_relay_udp_rcvbuf_errors_total",
 	"The host's UdpRcvbufErrors and Udp6RcvbufErrors: datagrams dropped because a socket's receive queue was full.", []string{"family"}, nil)
 
 // rcvbufErrors reads the host's UDP receive-queue drops, the sign of a

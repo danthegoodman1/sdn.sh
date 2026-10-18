@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 package sim
 
@@ -9,12 +9,12 @@ import (
 	"slices"
 	"time"
 
-	agentcore "sdn.sh/internal/agent/core"
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/kernel"
-	"sdn.sh/internal/kernel/kmodel"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/prng"
+	agentcore "github.com/danthegoodman1/wirenet/internal/agent/core"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/kernel"
+	"github.com/danthegoodman1/wirenet/internal/kernel/kmodel"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/prng"
 )
 
 // callTimeout is how long an agent waits on the control plane for a call.

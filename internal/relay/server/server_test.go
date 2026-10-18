@@ -15,10 +15,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/regproto"
-	relaycore "sdn.sh/internal/relay/core"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/regproto"
+	relaycore "github.com/danthegoodman1/wirenet/internal/relay/core"
 )
 
 // fakeCP serves one port table and parks every later poll.
@@ -411,7 +411,7 @@ func TestAPortThatFailsToBindLeavesTheRestServing(t *testing.T) {
 		t.Fatalf("the relay stopped over one port: %v", err)
 	}
 	defer func() { cancel(); <-done }()
-	if n := metric(t, reg, "sdn_relay_unbound_ports"); n != 1 {
+	if n := metric(t, reg, "wirenet_relay_unbound_ports"); n != 1 {
 		t.Fatalf("%v ports unbound, want 1", n)
 	}
 	a, b := udp(t), udp(t)
@@ -420,10 +420,10 @@ func TestAPortThatFailsToBindLeavesTheRestServing(t *testing.T) {
 	blocker.Close()
 	c, d := udp(t), udp(t)
 	connect(t, e2, c, d)
-	if n := metric(t, reg, "sdn_relay_unbound_ports"); n != 0 {
+	if n := metric(t, reg, "wirenet_relay_unbound_ports"); n != 0 {
 		t.Fatalf("%v ports unbound after the port freed", n)
 	}
-	if n := metric(t, reg, "sdn_relay_bind_failures_total"); n < 1 {
+	if n := metric(t, reg, "wirenet_relay_bind_failures_total"); n < 1 {
 		t.Fatal("the failed bind went uncounted")
 	}
 }

@@ -12,14 +12,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/cpclient"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/prng"
-	"sdn.sh/internal/store"
-	"sdn.sh/internal/store/locked"
-	"sdn.sh/internal/store/mem"
-	"sdn.sh/internal/store/pgstore/pgtest"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/cpclient"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/prng"
+	"github.com/danthegoodman1/wirenet/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/store/locked"
+	"github.com/danthegoodman1/wirenet/internal/store/mem"
+	"github.com/danthegoodman1/wirenet/internal/store/pgstore/pgtest"
 )
 
 const adminToken = "test-admin-token-0123456789"
@@ -41,7 +41,7 @@ func testConfig() Config {
 }
 
 // eachStore runs a test against the in-memory store and, when
-// SDN_TEST_POSTGRES names a database, against Postgres.
+// WIRENET_TEST_POSTGRES names a database, against Postgres.
 func eachStore(t *testing.T, fn func(t *testing.T, open func() store.Store)) {
 	t.Run("mem", func(t *testing.T) {
 		fn(t, func() store.Store { return locked.New(mem.New()) })
@@ -432,17 +432,17 @@ func TestTheCensusExportsPoolGauges(t *testing.T) {
 			PortLo:    20000, PortHi: 20099, ProbePort: 19999,
 		}))
 		capacity := map[string]string{"relay": "r1", "pool": "capacity"}
-		waitFor(t, func() bool { v, ok := gauge(t, e.reg, "sdn_cp_relay_ports", capacity); return ok && v == 100 })
-		if v, ok := gauge(t, e.reg, "sdn_cp_interfaces", map[string]string{"state": "live"}); !ok || v != 0 {
+		waitFor(t, func() bool { v, ok := gauge(t, e.reg, "wirenet_cp_relay_ports", capacity); return ok && v == 100 })
+		if v, ok := gauge(t, e.reg, "wirenet_cp_interfaces", map[string]string{"state": "live"}); !ok || v != 0 {
 			t.Fatalf("live interfaces: %v %v", v, ok)
 		}
-		if _, ok := gauge(t, e.reg, "sdn_cp_ipv4_quarantined", nil); !ok {
+		if _, ok := gauge(t, e.reg, "wirenet_cp_ipv4_quarantined", nil); !ok {
 			t.Fatal("no IPv4 quarantine gauge")
 		}
 		if err := e.admin.DeleteRelay(e.ctx, "r1"); err != nil {
 			t.Fatal(err)
 		}
-		waitFor(t, func() bool { _, ok := gauge(t, e.reg, "sdn_cp_relay_ports", capacity); return !ok })
+		waitFor(t, func() bool { _, ok := gauge(t, e.reg, "wirenet_cp_relay_ports", capacity); return !ok })
 	})
 }
 

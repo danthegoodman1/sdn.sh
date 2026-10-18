@@ -1,7 +1,7 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package nft models the one nftables table the agent installs in each
-// interface's namespace, `table inet sdn`:
+// interface's namespace, `table inet wirenet`:
 //
 //	map s_<service>_6 { typeof numgen random mod 1024 : ip6 daddr; }
 //	map s_<service>_4 { typeof numgen random mod 1024 : ip daddr; }
@@ -36,11 +36,11 @@ import (
 	"slices"
 	"strings"
 
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // Table is the table's name in the inet family.
-const Table = "sdn"
+const Table = "wirenet"
 
 // Slots is the length of every slot map.
 const Slots = 1024

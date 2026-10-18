@@ -1,5 +1,5 @@
 // Package pgtest opens Postgres stores for tests against the database
-// SDN_TEST_POSTGRES names, each in a schema of its own, so tests that share
+// WIRENET_TEST_POSTGRES names, each in a schema of its own, so tests that share
 // the database never see each other's records.
 package pgtest
 
@@ -14,11 +14,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"sdn.sh/internal/store/pgstore"
+	"github.com/danthegoodman1/wirenet/internal/store/pgstore"
 )
 
 // Env names the variable that holds the test database's DSN.
-const Env = "SDN_TEST_POSTGRES"
+const Env = "WIRENET_TEST_POSTGRES"
 
 // DSN returns the test database's DSN, and skips t when Env is unset.
 func DSN(t testing.TB) string {
@@ -41,7 +41,7 @@ func Open(t testing.TB) *pgstore.Store {
 func NewSchema(t testing.TB) string {
 	t.Helper()
 	dsn := DSN(t)
-	schema := "sdntest_" + strings.ToLower(rand.Text())
+	schema := "wirenettest_" + strings.ToLower(rand.Text())
 	exec(t, dsn, "CREATE SCHEMA "+schema)
 	t.Cleanup(func() { exec(t, dsn, "DROP SCHEMA "+schema+" CASCADE") })
 	scoped, err := withSearchPath(dsn, schema)

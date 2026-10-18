@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package api holds the wire types the control plane, agents, relays and
 // clients exchange, and the rules for merging desired-state updates.
@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // Kind is what an interface fronts.

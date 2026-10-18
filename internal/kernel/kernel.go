@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package kernel names the kernel operations the agent performs and the
 // state it observes, behind one interface. The Linux implementation speaks
@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/nft"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/nft"
 )
 
 // Errors a Kernel returns for conditions the agent handles.

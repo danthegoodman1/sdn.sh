@@ -2,7 +2,7 @@
 
 // Package lab builds a whole deployment inside one Linux kernel: an
 // underlay namespace holding a bridge, a namespace per host and per relay
-// attached to it, and the real sdn-cp, sdn-relay and sdn-agent processes,
+// attached to it, and the real wirenet-cp, wirenet-relay and wirenet-agent processes,
 // one per role. The end-to-end tests run on it, and so do the benchmark
 // plans when no cloud is at hand.
 //
@@ -34,10 +34,10 @@ import (
 	"github.com/vishvananda/netns"
 	"golang.org/x/net/dns/dnsmessage"
 
-	"sdn.sh/internal/agent/localapi"
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/cpclient"
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/agent/localapi"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/cpclient"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // Options configure a lab.
@@ -46,11 +46,11 @@ type Options struct {
 	Name string
 	// Dir holds binaries' logs, credentials, journals and state.
 	Dir string
-	// Bin holds sdn-cp, sdn-agent and sdn-relay.
+	// Bin holds wirenet-cp, wirenet-agent and wirenet-relay.
 	Bin string
-	// Store is sdn-cp's --store.
+	// Store is wirenet-cp's --store.
 	Store string
-	// CPArgs are extra sdn-cp flags, such as short lease clocks.
+	// CPArgs are extra wirenet-cp flags, such as short lease clocks.
 	CPArgs []string
 	// LogLevel is every daemon's --log-level; debug when empty.
 	LogLevel string
@@ -80,7 +80,7 @@ type Lab struct {
 }
 
 // lockPath is the lock every lab holds while it exists.
-const lockPath = "/run/lock/sdn-lab.lock"
+const lockPath = "/run/lock/wirenet-lab.lock"
 
 // Underlay addressing. Internet4 and Internet6 stand for the internet: the
 // underlay namespace answers them.
@@ -106,7 +106,7 @@ func Build(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.Command("go", "build", "-o", dir+"/", "./cmd/sdn-cp", "./cmd/sdn-agent", "./cmd/sdn-relay", "./cmd/sdnctl")
+	cmd := exec.Command("go", "build", "-o", dir+"/", "./cmd/wirenet-cp", "./cmd/wirenet-agent", "./cmd/wirenet-relay", "./cmd/wirenetctl")
 	cmd.Dir = root
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("go build: %v\n%s", err, out)
@@ -241,7 +241,7 @@ func (l *Lab) spawn(name, ns string, args ...string) (*Proc, error) {
 	}
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdout, cmd.Stderr = f, f
-	cmd.Env = append(os.Environ(), "SDN_ADMIN_TOKEN="+adminToken)
+	cmd.Env = append(os.Environ(), "WIRENET_ADMIN_TOKEN="+adminToken)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	if err := cmd.Start(); err != nil {
 		f.Close()
@@ -303,7 +303,7 @@ func (l *Lab) bin(name string) string { return filepath.Join(l.opts.Bin, name) }
 
 func (l *Lab) startCP() error {
 	addr := netip.AddrPortFrom(cpRoot, 18443)
-	args := append([]string{l.bin("sdn-cp"), "--listen", addr.String(), "--telemetry", netip.AddrPortFrom(cpRoot, 19090).String(),
+	args := append([]string{l.bin("wirenet-cp"), "--listen", addr.String(), "--telemetry", netip.AddrPortFrom(cpRoot, 19090).String(),
 		"--store", l.opts.Store, "--log-format", "json", "--log-level", l.opts.LogLevel}, l.opts.CPArgs...)
 	p, err := l.spawn("cp", "", args...)
 	if err != nil {
@@ -405,7 +405,7 @@ type Relay struct {
 }
 
 // AddRelay registers a relay with the control plane and starts it. args
-// are extra sdn-relay flags.
+// are extra wirenet-relay flags.
 func (l *Lab) AddRelay(ctx context.Context, name string, args ...string) (*Relay, error) {
 	n, err := l.addNode(name)
 	if err != nil {
@@ -435,7 +435,7 @@ func (r *Relay) Kill() { r.Proc.Kill() }
 // Start starts the relay's process.
 func (r *Relay) Start() error {
 	r.Telemetry = "http://" + netip.AddrPortFrom(r.Addr, 9092).String()
-	args := append([]string{r.lab.bin("sdn-relay"), "--cp", r.lab.CPURL, "--credentials", r.creds,
+	args := append([]string{r.lab.bin("wirenet-relay"), "--cp", r.lab.CPURL, "--credentials", r.creds,
 		"--state", r.state, "--probe", r.Probe.String(), "--telemetry", netip.AddrPortFrom(r.Addr, 9092).String(),
 		"--log-format", "json", "--log-level", r.lab.opts.LogLevel, "--socket-buffer", "0"}, r.args...)
 	p, err := r.lab.spawn(r.Name, r.NS, args...)
@@ -471,7 +471,7 @@ type Host struct {
 	args     []string
 }
 
-// AddHost registers a host and starts its agent. args are extra sdn-agent
+// AddHost registers a host and starts its agent. args are extra wirenet-agent
 // flags.
 func (l *Lab) AddHost(ctx context.Context, name string, args ...string) (*Host, error) {
 	n, err := l.addNode(name)
@@ -513,7 +513,7 @@ func (l *Lab) register(ctx context.Context, h *Host) error {
 // Start starts the host's agent.
 func (h *Host) Start() error {
 	h.Telemetry = "http://" + netip.AddrPortFrom(h.Addr, 9091).String()
-	args := append([]string{h.lab.bin("sdn-agent"), "--cp", h.lab.CPURL, "--credentials", h.creds,
+	args := append([]string{h.lab.bin("wirenet-agent"), "--cp", h.lab.CPURL, "--credentials", h.creds,
 		"--journal", h.journal, "--socket", h.Socket, "--telemetry", netip.AddrPortFrom(h.Addr, 9091).String(),
 		"--prefix", h.Prefix, "--log-format", "json", "--log-level", h.lab.opts.LogLevel}, h.args...)
 	if h.Unit != "" {

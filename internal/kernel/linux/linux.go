@@ -29,8 +29,8 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
-	"sdn.sh/internal/kernel"
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/kernel"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // Kernel is the host's kernel, from the namespace the agent runs in.

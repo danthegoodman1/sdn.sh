@@ -1,7 +1,7 @@
 variable "name" {
   description = "Prefixes every resource's Name tag, so two fleets can share an account."
   type        = string
-  default     = "sdn-bench"
+  default     = "wirenet-bench"
 }
 
 variable "region" {
@@ -78,7 +78,7 @@ variable "relay_count" {
 }
 
 variable "cp_instance_type" {
-  description = "The control-plane host's instance type; it runs Postgres and sdn-cp."
+  description = "The control-plane host's instance type; it runs Postgres and wirenet-cp."
   type        = string
   default     = "c6i.xlarge"
 }

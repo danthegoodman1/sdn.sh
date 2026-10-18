@@ -13,8 +13,8 @@ import (
 	"github.com/google/nftables/expr"
 	"golang.org/x/sys/unix"
 
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/nft"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/nft"
 )
 
 // Chains of the agent's table. Rules live in the first four; the inbound

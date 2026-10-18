@@ -20,7 +20,7 @@ import (
 var migrations embed.FS
 
 // migrationLock is the advisory lock that makes openers migrate one at a
-// time. It spells "sdn.sh".
+// time. It spells "wirenet".
 const migrationLock = 0x73646e2e7368
 
 // migrate applies every migration schema_migrations does not record, in one

@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/compile"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/prng"
-	"sdn.sh/internal/store"
-	"sdn.sh/internal/store/mem"
-	"sdn.sh/internal/store/pgstore/pgtest"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/compile"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/prng"
+	"github.com/danthegoodman1/wirenet/internal/store"
+	"github.com/danthegoodman1/wirenet/internal/store/mem"
+	"github.com/danthegoodman1/wirenet/internal/store/pgstore/pgtest"
 )
 
 var t0 = time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -42,7 +42,7 @@ func newFixture(t *testing.T, s store.Store) *fixture {
 }
 
 // eachStore runs fn over the memory store, and again over Postgres when
-// SDN_TEST_POSTGRES names a database.
+// WIRENET_TEST_POSTGRES names a database.
 func eachStore(t *testing.T, fn func(t *testing.T, f *fixture)) {
 	t.Run("mem", func(t *testing.T) { fn(t, newFixture(t, mem.New())) })
 	t.Run("postgres", func(t *testing.T) { fn(t, newFixture(t, pgtest.Open(t))) })

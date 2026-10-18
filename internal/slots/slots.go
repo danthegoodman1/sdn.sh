@@ -1,4 +1,4 @@
-//sdn:deterministic
+//wirenet:deterministic
 
 // Package slots assigns a service's fixed slots to its backends.
 //
@@ -11,7 +11,7 @@
 package slots
 
 import (
-	"sdn.sh/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
 // Count is every service's slot count, fixed for the service's life.

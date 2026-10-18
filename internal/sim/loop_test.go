@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"sdn.sh/internal/prng"
+	"github.com/danthegoodman1/wirenet/internal/prng"
 )
 
 var epoch = time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)

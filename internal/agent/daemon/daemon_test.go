@@ -14,13 +14,13 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/rs/zerolog"
 
-	agentcore "sdn.sh/internal/agent/core"
-	"sdn.sh/internal/api"
-	"sdn.sh/internal/dns"
-	"sdn.sh/internal/kernel"
-	"sdn.sh/internal/kernel/kmodel"
-	"sdn.sh/internal/model"
-	"sdn.sh/internal/prng"
+	agentcore "github.com/danthegoodman1/wirenet/internal/agent/core"
+	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/dns"
+	"github.com/danthegoodman1/wirenet/internal/kernel"
+	"github.com/danthegoodman1/wirenet/internal/kernel/kmodel"
+	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/prng"
 )
 
 // lockedKernel serializes the model, which the daemon's workers share.
@@ -134,14 +134,14 @@ func TestAnAttachIsAnsweredOnceItsResolverListens(t *testing.T) {
 		t.Fatal("attach never answered after the resolver synced")
 	}
 	if n := testutil.ToFloat64(d.m.localCalls.WithLabelValues("attach", "ok")); n != 1 {
-		t.Fatalf("sdn_agent_local_calls_total{call=attach,result=ok} = %v, want 1", n)
+		t.Fatalf("wirenet_agent_local_calls_total{call=attach,result=ok} = %v, want 1", n)
 	}
 	var conv dto.Metric
 	if err := d.m.convergence.Write(&conv); err != nil {
 		t.Fatal(err)
 	}
 	if n := conv.GetHistogram().GetSampleCount(); n != 1 {
-		t.Fatalf("sdn_agent_convergence_seconds holds %d samples after one namespace settled, want 1", n)
+		t.Fatalf("wirenet_agent_convergence_seconds holds %d samples after one namespace settled, want 1", n)
 	}
 	// The census gauges refresh once a second.
 	deadline := time.Now().Add(3 * time.Second)

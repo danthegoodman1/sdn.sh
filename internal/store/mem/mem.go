@@ -67,19 +67,19 @@ type portKey struct {
 // New returns an empty store.
 func New() *Store {
 	return &Store{
-		networks:   newTable[model.NetworkID, store.Network](cmp.Compare[model.NetworkID]),
-		services:   newTable[model.ServiceID, store.Service](cmp.Compare[model.ServiceID]),
-		interfaces: newTable[model.InterfaceID, store.Interface](cmp.Compare[model.InterfaceID]),
-		rules:      newTable[model.RuleID, store.Rule](cmp.Compare[model.RuleID]),
-		edges:      newTable[edgeKey, store.Edge](edgeKey.compare),
-		hosts:      newTable[model.HostID, store.Host](cmp.Compare[model.HostID]),
-		relays:     newTable[model.RelayID, store.Relay](cmp.Compare[model.RelayID]),
-		released4:  newTable[addrKey, store.Released4](cmp.Compare[addrKey]),
+		networks:   newTable(cmp.Compare[model.NetworkID], cloneNetwork),
+		services:   newTable[model.ServiceID, store.Service](cmp.Compare[model.ServiceID], nil),
+		interfaces: newTable[model.InterfaceID, store.Interface](cmp.Compare[model.InterfaceID], nil),
+		rules:      newTable[model.RuleID, store.Rule](cmp.Compare[model.RuleID], nil),
+		edges:      newTable(edgeKey.compare, cloneEdge),
+		hosts:      newTable[model.HostID, store.Host](cmp.Compare[model.HostID], nil),
+		relays:     newTable(cmp.Compare[model.RelayID], cloneRelay),
+		released4:  newTable[addrKey, store.Released4](cmp.Compare[addrKey], nil),
 		ports: newTable[portKey, store.ReleasedPort](func(a, b portKey) int {
 			return cmp.Or(cmp.Compare(a.addr, b.addr), cmp.Compare(a.port, b.port))
-		}),
-		cursors: newTable[addrKey, uint16](cmp.Compare[addrKey]),
-		meta:    newTable[string, string](cmp.Compare[string]),
+		}, nil),
+		cursors: newTable[addrKey, uint16](cmp.Compare[addrKey], nil),
+		meta:    newTable[string, string](cmp.Compare[string], nil),
 	}
 }
 
@@ -105,6 +105,10 @@ func (s *Store) View(_ context.Context, fn func(store.ReadTx) error) error {
 
 // Revision is the last revision committed.
 func (s *Store) Revision() uint64 { return s.revision }
+
+// SingleThreaded marks the store for the conformance suite as one that
+// serves a transaction at a time.
+func (*Store) SingleThreaded() {}
 
 type tx struct {
 	s          *Store
@@ -373,11 +377,25 @@ func capped[V any](vs []V, limit int) []V {
 type table[K comparable, V any] struct {
 	rows    map[K]V
 	compare func(K, K) int
+	// clone copies the slices a row holds, for the record types that hold
+	// any, so a caller and the store never share one.
+	clone func(V) V
 }
 
-func newTable[K comparable, V any](compare func(K, K) int) table[K, V] {
-	return table[K, V]{rows: map[K]V{}, compare: compare}
+func newTable[K comparable, V any](compare func(K, K) int, clone func(V) V) table[K, V] {
+	return table[K, V]{rows: map[K]V{}, compare: compare, clone: clone}
 }
+
+func (t *table[K, V]) detach(v V) V {
+	if t.clone == nil {
+		return v
+	}
+	return t.clone(v)
+}
+
+func cloneNetwork(n store.Network) store.Network { n.Relays = slices.Clone(n.Relays); return n }
+func cloneRelay(r store.Relay) store.Relay       { r.Addresses = slices.Clone(r.Addresses); return r }
+func cloneEdge(e store.Edge) store.Edge          { e.Ports = slices.Clone(e.Ports); return e }
 
 func (t *table[K, V]) overlay() *overlay[K, V] {
 	return &overlay[K, V]{base: t, put: map[K]V{}, del: map[K]bool{}}
@@ -391,6 +409,15 @@ type overlay[K comparable, V any] struct {
 }
 
 func (o *overlay[K, V]) get(k K) (V, bool) {
+	v, ok := o.peek(k)
+	if ok {
+		v = o.base.detach(v)
+	}
+	return v, ok
+}
+
+// peek returns the row itself, which the caller only reads.
+func (o *overlay[K, V]) peek(k K) (V, bool) {
 	if o.del[k] {
 		var zero V
 		return zero, false
@@ -404,7 +431,7 @@ func (o *overlay[K, V]) get(k K) (V, bool) {
 
 func (o *overlay[K, V]) set(k K, v V) {
 	delete(o.del, k)
-	o.put[k] = v
+	o.put[k] = o.base.detach(v)
 }
 
 func (o *overlay[K, V]) delete(k K) {
@@ -421,8 +448,8 @@ func (o *overlay[K, V]) scan(match func(V) bool) []V {
 	keys = slices.CompactFunc(keys, func(a, b K) bool { return o.base.compare(a, b) == 0 })
 	var out []V
 	for _, k := range keys {
-		if v, ok := o.get(k); ok && (match == nil || match(v)) {
-			out = append(out, v)
+		if v, ok := o.peek(k); ok && (match == nil || match(v)) {
+			out = append(out, o.base.detach(v))
 		}
 	}
 	return out

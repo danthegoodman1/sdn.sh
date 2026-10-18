@@ -169,7 +169,7 @@ Status ledger:
 | Status | Type | Item | Evidence / Gap |
 | --- | --- | --- | --- |
 | Incomplete | Scope | Resource model and store | Missing: schema and implementation. |
-| Incomplete | Work | 2C: `store.Store`, in-memory store, `pgstore`, conformance suite | Missing: implementation and the suite against both. |
+| Complete | Work | 2C: `store.Store`, in-memory store, `pgstore`, conformance suite | `internal/store/storetest`: 35 subtests, passing on `locked.New(mem.New())` and on Postgres 18 with `SDN_TEST_POSTGRES` set; the three concurrency tests passed 20 consecutive runs against Postgres, which logged ~2,900 serialization failures retried and no unique violations. `internal/cp` tests run on both stores. |
 | Incomplete | Scope | Address and edge-port allocation with quarantine | Missing: allocator, exhaustion and quarantine tests. |
 | Incomplete | Scope | Lease lifecycle, public keys only | Missing: implementation. |
 | Incomplete | Work | 2A: Policy compiler | Missing: implementation plus sparse and dense tests. |

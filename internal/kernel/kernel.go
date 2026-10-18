@@ -159,11 +159,14 @@ type LinkConfig struct {
 	Addrs  []netip.Prefix `json:"addrs"`
 	Routes []netip.Prefix `json:"routes"`
 	MTU    int            `json:"mtu"`
+	// Forward turns on forwarding in the namespace, for a gateway.
+	Forward bool `json:"forward,omitempty"`
 }
 
 // Equal reports whether two configurations match.
 func (l *LinkConfig) Equal(o *LinkConfig) bool {
-	return l != nil && o != nil && slices.Equal(l.Addrs, o.Addrs) && slices.Equal(l.Routes, o.Routes) && l.MTU == o.MTU
+	return l != nil && o != nil && slices.Equal(l.Addrs, o.Addrs) && slices.Equal(l.Routes, o.Routes) && l.MTU == o.MTU &&
+		l.Forward == o.Forward
 }
 
 // EgressConfig is an interface's internet egress grant: a veth pair to

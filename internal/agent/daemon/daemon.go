@@ -55,7 +55,7 @@ type Prober interface {
 
 // Resolver serves each namespace's stub resolver.
 type Resolver interface {
-	Sync(zones map[string]dns.Zone, settled bool)
+	Sync(zones map[string]dns.Served, settled bool)
 }
 
 // EgressHost keeps the host's egress filter blocking what no egress link
@@ -151,7 +151,7 @@ func New(cfg Config, core *agentcore.Core, kern kernel.Kernel, cp ControlPlane, 
 }
 
 type resolverSync struct {
-	zones   map[string]dns.Zone
+	zones   map[string]dns.Served
 	settled bool
 }
 
@@ -179,12 +179,21 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go d.renewLoop(ctx)
 	if d.Resolver != nil {
 		go func() {
+			// A socket that failed to open, as on an address not yet
+			// configured, gets another try at the next sync or tick.
+			tick := time.NewTicker(10 * time.Second)
+			defer tick.Stop()
+			var last *resolverSync
 			for {
 				select {
 				case <-ctx.Done():
 					return
 				case s := <-d.syncs:
-					d.Resolver.Sync(s.zones, s.settled)
+					last = &s
+				case <-tick.C:
+				}
+				if last != nil {
+					d.Resolver.Sync(last.zones, last.settled)
 				}
 			}
 		}()
@@ -298,14 +307,14 @@ func (d *Daemon) syncResolver() {
 		return
 	}
 	d.resolverDirty, d.resolverGen = false, gen
-	zones := map[string]dns.Zone{}
+	zones := map[string]dns.Served{}
 	desired := d.core.Desired()
 	for _, li := range d.core.Interfaces() {
 		if !li.Ready {
 			continue
 		}
 		if n, x, ok := desired.Interface(li.Interface); ok {
-			zones[li.Namespace] = dns.ZoneFor(n, x)
+			zones[li.Namespace] = dns.ServedFor(n, x)
 		}
 	}
 	select {

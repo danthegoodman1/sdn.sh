@@ -39,6 +39,22 @@ type Zone struct {
 	Forward bool
 }
 
+// Served is a zone and the addresses beyond 127.0.0.53 it answers on: a
+// gateway's own, for its development machines.
+type Served struct {
+	Zone  Zone
+	Addrs []netip.Addr
+}
+
+// ServedFor builds what one interface's namespace serves.
+func ServedFor(n *api.NetworkState, x *api.Interface) Served {
+	s := Served{Zone: ZoneFor(n, x)}
+	if x.Kind == api.Gateway {
+		s.Addrs = x.Addrs()
+	}
+	return s
+}
+
 // Name is one service's addresses. A is zero when the client must not
 // receive one.
 type Name struct {
@@ -49,7 +65,9 @@ type Name struct {
 
 // ZoneFor builds the zone for one interface of a network.
 func ZoneFor(n *api.NetworkState, x *api.Interface) Zone {
-	z := Zone{Domain: strings.ToLower(n.Domain()) + ".", Forward: len(x.Egress) > 0}
+	// A gateway forwards for the development machines it serves, which
+	// use it as their only resolver.
+	z := Zone{Domain: strings.ToLower(n.Domain()) + ".", Forward: len(x.Egress) > 0 || x.Kind == api.Gateway}
 	for _, r := range x.Reach {
 		s, ok := n.Service(r.Service)
 		if !ok {

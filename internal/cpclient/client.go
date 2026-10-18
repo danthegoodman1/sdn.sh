@@ -171,6 +171,12 @@ func (c *Client) Interfaces(ctx context.Context, net string) ([]api.InterfaceInf
 	return call[[]api.InterfaceInfo](c, ctx, "GET", "/v1/networks/"+esc(net)+"/interfaces", nil)
 }
 
+// CreateDevice registers a development machine behind a gateway; the
+// caller keeps the private key.
+func (c *Client) CreateDevice(ctx context.Context, net string, req api.CreateDevice) (api.DeviceConfig, error) {
+	return call[api.DeviceConfig](c, ctx, "POST", "/v1/networks/"+esc(net)+"/devices", req)
+}
+
 func (c *Client) Revoke(ctx context.Context, id model.InterfaceID) error {
 	return c.do(ctx, "POST", "/v1/interfaces/"+esc(string(id))+"/revoke", nil, nil, c.timeout)
 }

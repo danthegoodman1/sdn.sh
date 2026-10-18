@@ -91,38 +91,47 @@ func Upstream(path string) (netip.AddrPort, error) {
 	return netip.AddrPort{}, fmt.Errorf("%s names no nameserver", path)
 }
 
-// Sync serves exactly the namespaces zones names, each with its zone. Until
-// the agent holds desired state, settled is false and descriptors handed
-// over at start wait for their namespaces' zones, their queries queued.
-func (r *Resolver) Sync(zones map[string]dns.Zone, settled bool) {
+// Sync serves exactly the namespaces zones names, each with its zone, on
+// 127.0.0.53 and on the zone's extra addresses. Until the agent holds
+// desired state, settled is false and descriptors handed over at start
+// wait for their namespaces' zones, their queries queued.
+func (r *Resolver) Sync(zones map[string]dns.Served, settled bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	next := make(map[string]*dns.Zone, len(zones))
+	want := map[string]bool{}
 	for ns, z := range zones {
-		next[ns] = &z
+		next[ns] = &z.Zone
+		want[sockKey(ns, dns.ListenAddr().Addr())] = true
+		for _, a := range z.Addrs {
+			want[sockKey(ns, a)] = true
+		}
 	}
 	r.zones = next
-	for ns, s := range r.served {
-		if _, ok := zones[ns]; !ok {
+	for key, s := range r.served {
+		if !want[key] {
 			s.udp.Close()
 			s.tcp.Close()
-			delete(r.served, ns)
-			r.store.remove(ns + ".udp")
-			r.store.remove(ns + ".tcp")
+			delete(r.served, key)
+			r.store.remove(key + ".udp")
+			r.store.remove(key + ".tcp")
 		}
 	}
-	for ns := range zones {
-		if _, ok := r.served[ns]; ok {
-			continue
+	for ns, z := range zones {
+		for _, a := range append([]netip.Addr{dns.ListenAddr().Addr()}, z.Addrs...) {
+			key := sockKey(ns, a)
+			if _, ok := r.served[key]; ok {
+				continue
+			}
+			s, err := r.open(ns, key, netip.AddrPortFrom(a, 53))
+			if err != nil {
+				r.log.Warn().Err(err).Str("namespace", ns).Stringer("addr", a).Msg("resolver socket")
+				continue
+			}
+			r.served[key] = s
+			go r.serveUDP(ns, s.udp)
+			go r.serveTCP(ns, s.tcp)
 		}
-		s, err := r.open(ns)
-		if err != nil {
-			r.log.Warn().Err(err).Str("namespace", ns).Msg("resolver socket")
-			continue
-		}
-		r.served[ns] = s
-		go r.serveUDP(ns, s.udp)
-		go r.serveTCP(ns, s.tcp)
 	}
 	if !settled {
 		return
@@ -153,12 +162,21 @@ func (r *Resolver) zone(ns string) *dns.Zone {
 	return r.zones[ns]
 }
 
-// open adopts a namespace's sockets from the descriptor store, or binds
-// new ones inside it and stores them.
-func (r *Resolver) open(ns string) (*served, error) {
-	if u, t := r.adopted[ns+".udp"], r.adopted[ns+".tcp"]; u != nil && t != nil {
-		delete(r.adopted, ns+".udp")
-		delete(r.adopted, ns+".tcp")
+// sockKey names a namespace's socket pair on one address, in the
+// descriptor store as everywhere: the store forbids ':' in names.
+func sockKey(ns string, a netip.Addr) string {
+	if a == dns.ListenAddr().Addr() {
+		return ns
+	}
+	return ns + "." + strings.ReplaceAll(a.String(), ":", "-")
+}
+
+// open adopts a namespace's sockets on one address from the descriptor
+// store, or binds new ones inside it and stores them.
+func (r *Resolver) open(ns, key string, addr netip.AddrPort) (*served, error) {
+	if u, t := r.adopted[key+".udp"], r.adopted[key+".tcp"]; u != nil && t != nil {
+		delete(r.adopted, key+".udp")
+		delete(r.adopted, key+".tcp")
 		pc, err := net.FilePacketConn(u)
 		u.Close()
 		if err != nil {
@@ -174,13 +192,16 @@ func (r *Resolver) open(ns string) (*served, error) {
 		return &served{udp: pc.(*net.UDPConn), tcp: ln.(*net.TCPListener)}, nil
 	}
 	var s served
-	addr := dns.ListenAddr()
+	udp, tcp := "udp4", "tcp4"
+	if addr.Addr().Is6() {
+		udp, tcp = "udp6", "tcp6"
+	}
 	err := inNamespace(ns, func() error {
 		var err error
-		if s.udp, err = net.ListenUDP("udp4", net.UDPAddrFromAddrPort(addr)); err != nil {
+		if s.udp, err = net.ListenUDP(udp, net.UDPAddrFromAddrPort(addr)); err != nil {
 			return err
 		}
-		if s.tcp, err = net.ListenTCP("tcp4", net.TCPAddrFromAddrPort(addr)); err != nil {
+		if s.tcp, err = net.ListenTCP(tcp, net.TCPAddrFromAddrPort(addr)); err != nil {
 			s.udp.Close()
 			return err
 		}
@@ -194,7 +215,7 @@ func (r *Resolver) open(ns string) (*served, error) {
 		if err != nil {
 			continue
 		}
-		if err := r.store.add(ns+"."+kind, file); err != nil {
+		if err := r.store.add(key+"."+kind, file); err != nil {
 			r.log.Debug().Err(err).Str("namespace", ns).Msg("descriptor store")
 		}
 		file.Close()

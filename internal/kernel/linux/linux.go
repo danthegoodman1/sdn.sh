@@ -189,7 +189,13 @@ func (k *Kernel) Run(op kernel.Op) (kernel.Result, error) {
 	case kernel.DeleteDevice:
 		return kernel.Result{}, deleteDevice(h, op.Device)
 	case kernel.ConfigureLink:
-		return kernel.Result{}, configureLink(h, op.Device, *op.Link)
+		if err := configureLink(h, op.Device, *op.Link); err != nil {
+			return kernel.Result{}, err
+		}
+		if op.Link.Forward {
+			return kernel.Result{}, k.forwarding(h)
+		}
+		return kernel.Result{}, nil
 	case kernel.SetPeers:
 		return kernel.Result{}, setPeers(h, op.Device, op.Peers)
 	case kernel.ApplyRules:
@@ -205,6 +211,19 @@ func (k *Kernel) Run(op kernel.Op) (kernel.Result, error) {
 		})
 	}
 	return kernel.Result{}, fmt.Errorf("unknown operation %q", op.Kind)
+}
+
+// forwarding turns on forwarding in a namespace, for a gateway. The
+// sysctls are per namespace, read through the opener's.
+func (k *Kernel) forwarding(h *nsHandles) error {
+	return k.inNS(h.fd, func() error {
+		for _, path := range []string{"/proc/sys/net/ipv4/conf/all/forwarding", "/proc/sys/net/ipv6/conf/all/forwarding"} {
+			if err := os.WriteFile(path, []byte("1"), 0o644); err != nil {
+				return fmt.Errorf("forwarding: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 // createDevice creates a WireGuard device straight into the namespace, so

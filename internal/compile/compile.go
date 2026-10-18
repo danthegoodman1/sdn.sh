@@ -56,6 +56,72 @@ func NewAdjacency(rules []store.Rule) Adjacency {
 // Connects reports whether policy connects interfaces of a and b.
 func (a Adjacency) Connects(x, y model.ServiceID) bool { return a[[2]model.ServiceID{x, y}] }
 
+// Links decides which interfaces peer: those whose services policy
+// connects, and a gateway with every interface one of its live development
+// machines may reach or be reached by.
+type Links struct {
+	adj Adjacency
+	// devices holds each gateway's live development machines, by
+	// identifier.
+	devices map[model.InterfaceID][]store.Interface
+}
+
+// NewLinks builds the links among a network's interfaces.
+func NewLinks(adj Adjacency, ifaces []store.Interface) Links {
+	l := Links{adj: adj, devices: map[model.InterfaceID][]store.Interface{}}
+	for _, i := range ifaces {
+		if i.Kind == api.Device && i.State == api.Live {
+			l.devices[i.Gateway] = append(l.devices[i.Gateway], i)
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(l.devices)) {
+		slices.SortFunc(l.devices[id], func(a, b store.Interface) int { return strings.Compare(string(a.ID), string(b.ID)) })
+	}
+	return l
+}
+
+// Connects reports whether two interfaces, neither a development machine,
+// need each other as peers.
+func (l Links) Connects(x, y store.Interface) bool {
+	if l.adj.Connects(x.Service, y.Service) {
+		return true
+	}
+	for _, d := range l.devices[x.ID] {
+		if l.adj.Connects(d.Service, y.Service) {
+			return true
+		}
+	}
+	for _, d := range l.devices[y.ID] {
+		if l.adj.Connects(x.Service, d.Service) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasDevices reports whether any gateway fronts a live development machine.
+func (l Links) HasDevices() bool { return len(l.devices) > 0 }
+
+// Devices lists a gateway's live development machines.
+func (l Links) Devices(gateway model.InterfaceID) []store.Interface { return l.devices[gateway] }
+
+// fronts lists the development machines behind gateway y that policy
+// connects with x, with their addresses in the families x has.
+func (l Links) fronts(x, y store.Interface) []api.Fronted {
+	var out []api.Fronted
+	for _, d := range l.devices[y.ID] {
+		if !l.adj.Connects(x.Service, d.Service) {
+			continue
+		}
+		f := api.Fronted{Interface: d.ID, Service: d.Service, Allowed: []netip.Prefix{netip.PrefixFrom(d.Addr6, 128)}}
+		if x.Addr4.IsValid() && d.Addr4.IsValid() {
+			f.Allowed = append(f.Allowed, netip.PrefixFrom(d.Addr4, 32))
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
 // Pair orders two interface identifiers as an edge stores them.
 func Pair(x, y model.InterfaceID) (model.InterfaceID, model.InterfaceID) {
 	if x < y {
@@ -71,6 +137,7 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 		services[svc.ID] = svc
 	}
 	adj := NewAdjacency(s.Rules)
+	links := NewLinks(adj, s.Interfaces)
 	edges := map[[2]model.InterfaceID]store.Edge{}
 	for _, e := range s.Edges {
 		edges[[2]model.InterfaceID{e.A, e.B}] = e
@@ -126,18 +193,37 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 		}
 		if x.State == api.Live {
 			for _, y := range connected {
-				if y.ID == x.ID || y.Kind == api.Device || !adj.Connects(x.Service, y.Service) {
+				if y.ID == x.ID || y.Kind == api.Device || !links.Connects(x, y) {
 					continue
 				}
 				if p, ok := peer(x, y, edges, relays, s.Network.Relays); ok {
+					p.Fronts = links.fronts(x, y)
 					iface.Peers = append(iface.Peers, p)
 				}
+			}
+			// A gateway peers with its development machines, reaches what
+			// they may reach, and answers their names.
+			fronted := map[model.ServiceID]bool{}
+			for _, d := range links.Devices(x.ID) {
+				p := api.Peer{Interface: d.ID, Service: d.Service, PublicKey: d.PublicKey, DialsIn: true,
+					Allowed: []netip.Prefix{netip.PrefixFrom(d.Addr6, 128)}}
+				if d.Addr4.IsValid() {
+					p.Allowed = append(p.Allowed, netip.PrefixFrom(d.Addr4, 32))
+				}
+				iface.Peers = append(iface.Peers, p)
+				fronted[d.Service] = true
+			}
+			slices.SortFunc(iface.Peers, func(a, b api.Peer) int { return strings.Compare(string(a.Interface), string(b.Interface)) })
+			for _, svc := range slices.Sorted(maps.Keys(fronted)) {
+				iface.Inbound = append(iface.Inbound,
+					api.Inbound{From: svc, Proto: model.UDP, Ports: model.PortRange{Lo: 53, Hi: 53}},
+					api.Inbound{From: svc, Proto: model.TCP, Ports: model.PortRange{Lo: 53, Hi: 53}})
 			}
 			for _, r := range s.Rules {
 				switch {
 				case r.From == x.Service && r.To == "":
 					iface.Egress = append(iface.Egress, api.Egress{Proto: r.Proto, Ports: r.Ports})
-				case r.From == x.Service:
+				case r.From == x.Service || fronted[r.From]:
 					if _, ok := services[r.To]; ok {
 						iface.Reach = append(iface.Reach, api.Reach{Service: r.To, Proto: r.Proto, Ports: r.Ports})
 						reached[x.Host][r.To] = true

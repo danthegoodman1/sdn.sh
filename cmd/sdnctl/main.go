@@ -11,6 +11,7 @@
 //	sdnctl host create NAME [--endpoint ADDR:PORT]
 //	sdnctl relay create NAME --address LOCAL[=ADVERTISED] [--address ...] --ports LO-HI --probe-port N
 //	sdnctl relay list
+//	sdnctl device create NET SVC --gateway IFACE [--ttl 24h] [--out FILE]
 //	sdnctl attach NAME NET SVC      (local agent)
 //	sdnctl detach IFACE             (local agent)
 //	sdnctl interfaces | status      (local agent)
@@ -21,6 +22,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -33,6 +35,7 @@ import (
 	"sdn.sh/internal/agent/localapi"
 	"sdn.sh/internal/api"
 	"sdn.sh/internal/cpclient"
+	"sdn.sh/internal/devconf"
 	"sdn.sh/internal/model"
 )
 
@@ -190,6 +193,30 @@ func run(args []string) error {
 		return show(c.CreateRelay(ctx, api.CreateRelay{Name: a[0], Addresses: addrs, PortLo: pr.Lo, PortHi: pr.Hi, ProbePort: uint16(*probe)}))
 	case "relay list":
 		return show(c.Relays(ctx))
+	case "device create":
+		gateway := fs.String("gateway", "", "the gateway interface the machine peers with")
+		ttl := fs.Duration("ttl", 24*time.Hour, "the lease's fixed term; generate a new config to extend it")
+		out := fs.String("out", "", "write the wg-quick config here instead of stdout")
+		a, err := parse(fs, rest, 2)
+		if err != nil {
+			return err
+		}
+		// The key is minted here and never sent: the control plane sees
+		// its public half alone.
+		priv, err := model.NewPrivateKey(rand.Reader)
+		if err != nil {
+			return err
+		}
+		cfg, err := c.CreateDevice(ctx, a[0], api.CreateDevice{Service: a[1], Gateway: model.InterfaceID(*gateway), PublicKey: priv.Public(), TTL: *ttl})
+		if err != nil {
+			return err
+		}
+		text := devconf.WGQuick(priv, cfg)
+		if *out == "" {
+			_, err = os.Stdout.WriteString(text)
+			return err
+		}
+		return os.WriteFile(*out, []byte(text), 0o600)
 	}
 	return usage()
 }

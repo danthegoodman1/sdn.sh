@@ -12,5 +12,5 @@ trap 'rm -rf "$work"' EXIT
 go build -o "$work/bin/" ./cmd/sdn-cp ./cmd/sdn-agent ./cmd/sdn-relay ./cmd/sdnctl
 go test -c -o "$work/e2e.test" ./e2e
 cd e2e
-sudo env SDN_LAB_BIN="$work/bin" SDN_TEST_POSTGRES="${SDN_TEST_POSTGRES:-}" SDN_LAB_KEEP="${SDN_LAB_KEEP:-}" \
+sudo env SDN_LAB_BIN="$work/bin" SDN_TEST_POSTGRES="${SDN_TEST_POSTGRES:-}" SDN_LAB_KEEP="${SDN_LAB_KEEP:-}" SDN_LAB_KEEP_ALWAYS="${SDN_LAB_KEEP_ALWAYS:-}" \
 	"$work/e2e.test" -test.timeout 20m "$@"

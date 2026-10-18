@@ -286,6 +286,16 @@ func (w *nftWriter) rules(r nft.Rules) error {
 			w.add(chain, append(match, &expr.Reject{Type: unix.NFT_REJECT_ICMPX_UNREACH, Code: unix.NFT_REJECT_ICMPX_PORT_UNREACH})...)
 		}
 	}
+	for _, name := range r.Shield {
+		if !w.forward {
+			break
+		}
+		set := w.set(name)
+		_, f := nft.ParseName(name)
+		exprs := append(family(f), ctState(expr.CtStateBitNEW)...)
+		exprs = append(exprs, addrField(f, false), &expr.Lookup{SourceRegister: 1, SetName: set.Name, SetID: set.ID}, drop())
+		w.add("untranslated_fwd", exprs...)
+	}
 	clamp := append(l4(unix.IPPROTO_TCP),
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 13, Len: 1},
 		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 1, Mask: []byte{0x06}, Xor: []byte{0}},

@@ -97,6 +97,19 @@ type Rules struct {
 	Reject []netip.Addr `json:"reject,omitempty"`
 	// Accept lists the inbound flows policy permits.
 	Accept []Accept `json:"accept,omitempty"`
+	// Shield names sets whose addresses take no new forwarded flow, only
+	// replies: the development machines behind a gateway.
+	Shield []string `json:"shield,omitempty"`
+}
+
+// Clone copies the rules.
+func (r Rules) Clone() Rules {
+	return Rules{
+		Translate: slices.Clone(r.Translate),
+		Reject:    slices.Clone(r.Reject),
+		Accept:    slices.Clone(r.Accept),
+		Shield:    slices.Clone(r.Shield),
+	}
 }
 
 // Translate sends a service address's flows through a slot map.
@@ -125,8 +138,12 @@ func SetName(svc model.ServiceID, f Family) string {
 	return fmt.Sprintf("f_%s_%d", model.Short(string(svc)), f)
 }
 
-// ParseName reports whether a name MapName or SetName made names a slot map,
-// and its family.
+// DeviceSetName names the set of the development machines a gateway fronts,
+// in one family.
+func DeviceSetName(f Family) string { return fmt.Sprintf("d_%d", f) }
+
+// ParseName reports whether a name MapName, SetName or DeviceSetName made
+// names a slot map, and its family.
 func ParseName(name string) (isMap bool, f Family) {
 	f = IPv6
 	if strings.HasSuffix(name, "_4") {
@@ -151,6 +168,8 @@ func (r *Ruleset) Normalize() {
 	slices.SortFunc(r.Rules.Accept, func(a, b Accept) int {
 		return cmp.Or(cmp.Compare(a.Set, b.Set), cmp.Compare(a.Proto, b.Proto), cmp.Compare(a.Ports.Lo, b.Ports.Lo), cmp.Compare(a.Ports.Hi, b.Ports.Hi))
 	})
+	slices.Sort(r.Rules.Shield)
+	r.Rules.Shield = slices.Compact(r.Rules.Shield)
 }
 
 // Validate checks what nftables would otherwise accept and then misbehave
@@ -190,6 +209,11 @@ func (r *Ruleset) Validate() error {
 			return fmt.Errorf("accept names set %s, which is missing or of another family", a.Set)
 		}
 	}
+	for _, name := range r.Rules.Shield {
+		if _, ok := sets[name]; !ok {
+			return fmt.Errorf("shield names set %s, which is missing", name)
+		}
+	}
 	return nil
 }
 
@@ -205,11 +229,7 @@ func (r *Ruleset) Clone() *Ruleset {
 	for _, s := range r.Sets {
 		c.Sets = append(c.Sets, Set{Name: s.Name, Family: s.Family, Addrs: slices.Clone(s.Addrs)})
 	}
-	c.Rules = Rules{
-		Translate: slices.Clone(r.Rules.Translate),
-		Reject:    slices.Clone(r.Rules.Reject),
-		Accept:    slices.Clone(r.Rules.Accept),
-	}
+	c.Rules = r.Rules.Clone()
 	return c
 }
 
@@ -253,5 +273,6 @@ func Equal(a, b *Ruleset) bool {
 }
 
 func rulesEqual(a, b Rules) bool {
-	return slices.Equal(a.Translate, b.Translate) && slices.Equal(a.Reject, b.Reject) && slices.Equal(a.Accept, b.Accept)
+	return slices.Equal(a.Translate, b.Translate) && slices.Equal(a.Reject, b.Reject) && slices.Equal(a.Accept, b.Accept) &&
+		slices.Equal(a.Shield, b.Shield)
 }

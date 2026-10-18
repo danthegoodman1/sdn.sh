@@ -566,6 +566,96 @@ func (p *Plane) Attach(tx store.Tx, now time.Time, host model.HostID, req api.At
 	return iface, bump(tx, &n, host)
 }
 
+// MaxDeviceTTL bounds a development machine's lease term.
+const MaxDeviceTTL = 30 * 24 * time.Hour
+
+// CreateDevice registers a development machine behind a gateway interface
+// with a fixed-term lease. The caller minted the key and sends only its
+// public half.
+func (p *Plane) CreateDevice(tx store.Tx, now time.Time, netRef string, req api.CreateDevice) (store.Interface, error) {
+	if req.PublicKey.IsZero() {
+		return store.Interface{}, apiErr(api.CodeInvalid, "a device needs a public key")
+	}
+	if req.TTL <= 0 || req.TTL > MaxDeviceTTL {
+		return store.Interface{}, apiErr(api.CodeInvalid, "a device's term must lie between zero and %v", MaxDeviceTTL)
+	}
+	n, err := ResolveNetwork(tx, netRef)
+	if err != nil {
+		return store.Interface{}, err
+	}
+	svc, err := ResolveService(tx, n.ID, req.Service)
+	if err != nil {
+		return store.Interface{}, err
+	}
+	gw, err := tx.Interface(req.Gateway)
+	if err != nil {
+		return store.Interface{}, notFound(err, "gateway "+string(req.Gateway))
+	}
+	if gw.Kind != api.Gateway || gw.State != api.Live || gw.Network != n.ID {
+		return store.Interface{}, apiErr(api.CodeInvalid, "%s is not a live gateway of network %s", gw.ID, n.Name)
+	}
+	if h, err := tx.Host(gw.Host); err != nil || !h.Endpoint.IsValid() {
+		return store.Interface{}, apiErr(api.CodeInvalid, "gateway %s's host has no endpoint development machines can reach", gw.ID)
+	}
+	id, err := p.id(model.InterfacePrefix)
+	if err != nil {
+		return store.Interface{}, err
+	}
+	d := store.Interface{
+		ID: model.InterfaceID(id), Network: n.ID, Service: svc.ID, Host: gw.Host, Kind: api.Device, Gateway: gw.ID,
+		PublicKey: req.PublicKey, State: api.Live, Expires: now.Add(req.TTL), Created: now,
+	}
+	d.Addr6 = alloc6(&n)
+	if svc.IPv4 {
+		if d.Addr4, err = p.alloc4(tx, &n, now); err != nil {
+			return store.Interface{}, err
+		}
+	}
+	if err := tx.PutInterface(d); err != nil {
+		return store.Interface{}, err
+	}
+	if err := p.reconcileEdges(tx, now, &n, interfaceScope(gw.ID)); err != nil {
+		return store.Interface{}, err
+	}
+	return d, bump(tx, &n, gw.Host)
+}
+
+// DeviceConfig returns what a development machine's WireGuard config needs.
+func DeviceConfig(tx store.ReadTx, id model.InterfaceID) (api.DeviceConfig, error) {
+	d, err := tx.Interface(id)
+	if err != nil || d.Kind != api.Device {
+		return api.DeviceConfig{}, apiErr(api.CodeNotFound, "device %s not found", id)
+	}
+	n, err := tx.Network(d.Network)
+	if err != nil {
+		return api.DeviceConfig{}, err
+	}
+	gw, err := tx.Interface(d.Gateway)
+	if err != nil {
+		return api.DeviceConfig{}, notFound(err, "gateway "+string(d.Gateway))
+	}
+	h, err := tx.Host(gw.Host)
+	if err != nil {
+		return api.DeviceConfig{}, notFound(err, "host "+string(gw.Host))
+	}
+	// The host's endpoint names the address development machines reach;
+	// its port, when set, is a port forwarded to the gateway's own.
+	port := gw.ListenPort
+	if h.Endpoint.Port() != 0 {
+		port = h.Endpoint.Port()
+	}
+	c := api.DeviceConfig{
+		Interface: d.ID, Addr6: d.Addr6, Addr4: d.Addr4, DNS: gw.Addr6,
+		Domain: (&api.NetworkState{Name: n.Name}).Domain(), MTU: n.MTU,
+		GatewayKey: gw.PublicKey, GatewayAddress: netip.AddrPortFrom(h.Endpoint.Addr(), port),
+		Routes: []netip.Prefix{n.Prefix6}, Expires: d.Expires,
+	}
+	if d.Addr4.IsValid() && n.Prefix4.IsValid() {
+		c.Routes = append(c.Routes, n.Prefix4)
+	}
+	return c, nil
+}
+
 // Release ends a host's interfaces as a planned removal: peers drain them
 // over the grace period. Releasing an interface already ended, or one the
 // host does not hold, changes nothing.
@@ -624,7 +714,12 @@ func (p *Plane) end(tx store.Tx, now time.Time, i store.Interface, quarantine bo
 		return err
 	}
 	if i.Drained {
-		if err := p.reconcileEdges(tx, now, &n, interfaceScope(i.ID)); err != nil {
+		// A development machine's edges are its gateway's.
+		sc := interfaceScope(i.ID)
+		if i.Kind == api.Device {
+			sc = interfaceScope(i.Gateway)
+		}
+		if err := p.reconcileEdges(tx, now, &n, sc); err != nil {
 			return err
 		}
 	}
@@ -642,7 +737,9 @@ func (p *Plane) Renew(tx store.Tx, now time.Time, host model.HostID, ids []model
 		} else if err != nil {
 			return nil, err
 		}
-		if i.Host != host || i.State != api.Live {
+		// A development machine's lease has a fixed term; regenerating its
+		// config extends it.
+		if i.Host != host || i.State != api.Live || i.Kind == api.Device {
 			continue
 		}
 		i.Expires = now.Add(p.Config.LeaseTTL)

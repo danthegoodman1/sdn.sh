@@ -157,6 +157,20 @@ type Peer struct {
 	// Registration is this direction's secret, from which the agent derives
 	// each relay's registration key.
 	Registration model.Secret `json:"registration,omitzero"`
+	// DialsIn marks a development machine at its gateway: it dials the
+	// gateway, so roaming alone sets its endpoint.
+	DialsIn bool `json:"dials_in,omitempty"`
+	// Fronts lists the development machines this peer, a gateway, carries
+	// traffic for: their addresses join the peer's allowed IPs, and each
+	// counts as a source of its own service.
+	Fronts []Fronted `json:"fronts,omitempty"`
+}
+
+// Fronted is a development machine behind a gateway peer.
+type Fronted struct {
+	Interface model.InterfaceID `json:"interface"`
+	Service   model.ServiceID   `json:"service"`
+	Allowed   []netip.Prefix    `json:"allowed"`
 }
 
 // RelayPath is where an interface sends to reach a peer through one relay.

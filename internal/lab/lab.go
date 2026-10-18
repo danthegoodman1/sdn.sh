@@ -442,12 +442,13 @@ type Host struct {
 	Local *localapi.Client
 	// NATNS and Public are the NAT in front of a host behind one, and the
 	// address it translates to.
-	NATNS   string
-	Public  netip.Addr
-	creds   string
-	journal string
-	lab     *Lab
-	args    []string
+	NATNS    string
+	Public   netip.Addr
+	endpoint netip.AddrPort
+	creds    string
+	journal  string
+	lab      *Lab
+	args     []string
 }
 
 // AddHost registers a host and starts its agent. args are extra sdn-agent
@@ -461,8 +462,19 @@ func (l *Lab) AddHost(ctx context.Context, name string, args ...string) (*Host, 
 	return h, l.register(ctx, h)
 }
 
+// AddGatewayHost registers a host development machines can reach, at its
+// underlay address, and starts its agent.
+func (l *Lab) AddGatewayHost(ctx context.Context, name string, args ...string) (*Host, error) {
+	n, err := l.addNode(name)
+	if err != nil {
+		return nil, err
+	}
+	h := &Host{node: n, Name: name, Prefix: l.opts.Name + name + "w", lab: l, args: args, endpoint: netip.AddrPortFrom(n.Addr, 0)}
+	return h, l.register(ctx, h)
+}
+
 func (l *Lab) register(ctx context.Context, h *Host) error {
-	creds, err := l.Admin.CreateHost(ctx, api.CreateHost{Name: h.Name})
+	creds, err := l.Admin.CreateHost(ctx, api.CreateHost{Name: h.Name, Endpoint: h.endpoint})
 	if err != nil {
 		return err
 	}
@@ -606,6 +618,11 @@ func (h *Host) startUnit(args []string) error {
 }
 
 type unitLog struct{ unit, log string }
+
+// AttachGateway asks the host's agent for a gateway interface.
+func (h *Host) AttachGateway(ctx context.Context, name, network, service string) (api.LocalInterface, error) {
+	return h.Local.Attach(ctx, api.LocalAttach{Name: name, Network: network, Service: service, Kind: api.Gateway})
+}
 
 // Detach asks the host's agent to tear an interface down.
 func (h *Host) Detach(ctx context.Context, id model.InterfaceID) (api.LocalInterface, error) {
@@ -814,6 +831,10 @@ func Lookup(ns, name string, typ dnsmessage.Type) ([]netip.Addr, dnsmessage.RCod
 
 // LookupWithin is Lookup, waiting up to d for the answer.
 func LookupWithin(ns, name string, typ dnsmessage.Type, d time.Duration) ([]netip.Addr, dnsmessage.RCode, error) {
+	return lookup(ns, netip.MustParseAddrPort("127.0.0.53:53"), name, typ, d)
+}
+
+func lookup(ns string, server netip.AddrPort, name string, typ dnsmessage.Type, d time.Duration) ([]netip.Addr, dnsmessage.RCode, error) {
 	q := dnsmessage.Message{
 		Header:    dnsmessage.Header{ID: 1, RecursionDesired: true},
 		Questions: []dnsmessage.Question{{Name: dnsmessage.MustNewName(name), Type: typ, Class: dnsmessage.ClassINET}},
@@ -825,7 +846,7 @@ func LookupWithin(ns, name string, typ dnsmessage.Type, d time.Duration) ([]neti
 	var c *net.UDPConn
 	if err := InNS(ns, func() error {
 		var err error
-		c, err = net.DialUDP("udp4", nil, net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.53:53")))
+		c, err = net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(server))
 		return err
 	}); err != nil {
 		return nil, 0, err
@@ -854,4 +875,125 @@ func LookupWithin(ns, name string, typ dnsmessage.Type, d time.Duration) ([]neti
 		}
 	}
 	return out, m.RCode, nil
+}
+
+// Laptop is a development machine on the underlay running a stock
+// WireGuard client.
+type Laptop struct {
+	NS   string
+	Addr netip.Addr
+}
+
+// AddLaptop builds a namespace on the underlay and brings up a wg-quick
+// config in it with the stock tools, as wg-quick would, but for DNS:
+// queries go to the config's resolver explicitly.
+func (l *Lab) AddLaptop(name, config string) (*Laptop, error) {
+	n, err := l.addNode(name)
+	if err != nil {
+		return nil, err
+	}
+	conf := filepath.Join(l.opts.Dir, name+".conf")
+	if err := os.WriteFile(conf, []byte(config), 0o600); err != nil {
+		return nil, err
+	}
+	// What wg-quick strip does: wg setconf takes the file without the
+	// lines wg-quick itself handles.
+	var kept []string
+	for _, line := range strings.Split(config, "\n") {
+		k, _, _ := strings.Cut(line, " = ")
+		switch k {
+		case "Address", "DNS", "MTU", "Table", "PreUp", "PostUp", "PreDown", "PostDown", "SaveConfig":
+			continue
+		}
+		kept = append(kept, line)
+	}
+	stripped := []byte(strings.Join(kept, "\n"))
+	// wg's AppArmor profile reads configs from /etc/wireguard alone.
+	if err := os.MkdirAll("/etc/wireguard", 0o700); err != nil {
+		return nil, err
+	}
+	wgconf := filepath.Join("/etc/wireguard", l.opts.Name+"-"+name+".conf")
+	if err := os.WriteFile(wgconf, stripped, 0o600); err != nil {
+		return nil, err
+	}
+	defer os.Remove(wgconf)
+	steps := [][]string{
+		{"ip", "-n", n.NS, "link", "add", "wg0", "type", "wireguard"},
+		{"ip", "netns", "exec", n.NS, "wg", "setconf", "wg0", wgconf},
+	}
+	var addrs, routes []string
+	for _, line := range strings.Split(config, "\n") {
+		k, v, ok := strings.Cut(line, " = ")
+		if !ok {
+			continue
+		}
+		for _, part := range strings.Split(v, ", ") {
+			switch k {
+			case "Address":
+				addrs = append(addrs, part)
+			case "AllowedIPs":
+				routes = append(routes, part)
+			case "MTU":
+				steps = append(steps, []string{"ip", "-n", n.NS, "link", "set", "wg0", "mtu", part})
+			}
+		}
+	}
+	for _, a := range addrs {
+		steps = append(steps, []string{"ip", "-n", n.NS, "addr", "add", a, "dev", "wg0"})
+	}
+	steps = append(steps, []string{"ip", "-n", n.NS, "link", "set", "wg0", "up"})
+	for _, r := range routes {
+		steps = append(steps, []string{"ip", "-n", n.NS, "route", "add", r, "dev", "wg0"})
+	}
+	for _, st := range steps {
+		if err := sh(st...); err != nil {
+			return nil, err
+		}
+	}
+	lp := &Laptop{NS: n.NS}
+	if len(addrs) > 0 {
+		p, err := netip.ParsePrefix(addrs[0])
+		if err == nil {
+			lp.Addr = p.Addr()
+		}
+	}
+	return lp, nil
+}
+
+// ServeRemote accepts TCP connections in a namespace and answers each with
+// the address it came from, so a test sees the source a server sees.
+func ServeRemote(ns string, addr netip.AddrPort) (net.Listener, error) {
+	var ln net.Listener
+	if err := InNS(ns, func() error {
+		var err error
+		ln, err = net.Listen("tcp", addr.String())
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				ap, _ := netip.ParseAddrPort(c.RemoteAddr().String())
+				io.WriteString(c, ap.Addr().Unmap().String())
+				io.Copy(io.Discard, c)
+			}()
+		}
+	}()
+	return ln, nil
+}
+
+// LookupAt asks a resolver at server, from a namespace, one question.
+func LookupAt(ns string, server netip.Addr, name string, typ dnsmessage.Type) ([]netip.Addr, dnsmessage.RCode, error) {
+	return lookup(ns, netip.AddrPortFrom(server, 53), name, typ, 2*time.Second)
+}
+
+// Exec runs a command inside a namespace.
+func Exec(ns string, args ...string) error {
+	return nsh(ns, args...)
 }

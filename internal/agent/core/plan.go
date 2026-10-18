@@ -156,6 +156,9 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 		need := !installed || !slices.Equal(inst.Allowed, tp.peer.Allowed) || inst.Keepalive != tp.keepalive
 		chosen, hasChosen := st.chosen[key]
 		switch {
+		case !tp.endpoint.IsValid():
+			// A development machine dials in: roaming alone sets its
+			// endpoint.
 		case !installed:
 			u.Endpoint = tp.endpoint
 		case !hasChosen:

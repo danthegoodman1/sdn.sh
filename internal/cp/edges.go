@@ -6,6 +6,7 @@ import (
 	"slices"
 	"time"
 
+	"sdn.sh/internal/api"
 	"sdn.sh/internal/compile"
 	"sdn.sh/internal/model"
 	"sdn.sh/internal/store"
@@ -15,13 +16,21 @@ import (
 type scope struct {
 	iface    model.InterfaceID
 	services [2]model.ServiceID
+	all      bool
 }
 
 func interfaceScope(id model.InterfaceID) scope { return scope{iface: id} }
 
 func servicesScope(a, b model.ServiceID) scope { return scope{services: [2]model.ServiceID{a, b}} }
 
+// networkScope covers every pair, for a change whose reach a gateway's
+// development machines widen.
+func networkScope() scope { return scope{all: true} }
+
 func (s scope) covers(x, y store.Interface) bool {
+	if s.all {
+		return true
+	}
 	if s.iface != "" {
 		return x.ID == s.iface || y.ID == s.iface
 	}
@@ -33,6 +42,14 @@ func (s scope) covers(x, y store.Interface) bool {
 // an edge stores it. connected is sorted by identifier.
 func (s scope) pairs(connected []store.Interface) [][2]store.Interface {
 	var out [][2]store.Interface
+	if s.all {
+		for i, x := range connected {
+			for _, y := range connected[i+1:] {
+				out = append(out, [2]store.Interface{x, y})
+			}
+		}
+		return out
+	}
 	if s.iface != "" {
 		i := slices.IndexFunc(connected, func(x store.Interface) bool { return x.ID == s.iface })
 		if i < 0 {
@@ -74,13 +91,22 @@ func (p *Plane) reconcileEdges(tx store.Tx, now time.Time, n *store.Network, sc 
 	if err != nil {
 		return err
 	}
-	adj := compile.NewAdjacency(rules)
-	connected := slices.DeleteFunc(slices.Clone(ifaces), func(i store.Interface) bool { return !compile.Connected(i) })
+	links := compile.NewLinks(compile.NewAdjacency(rules), ifaces)
+	if links.HasDevices() && sc.iface == "" {
+		// A rule naming a development machine's service changes which
+		// interfaces its gateway peers with.
+		sc = networkScope()
+	}
+	// A development machine reaches the network through its gateway, so
+	// edges join the interfaces agents run.
+	connected := slices.DeleteFunc(slices.Clone(ifaces), func(i store.Interface) bool {
+		return !compile.Connected(i) || i.Kind == api.Device
+	})
 	var wanted [][2]model.InterfaceID
 	want := map[[2]model.InterfaceID]bool{}
 	for _, pair := range sc.pairs(connected) {
 		x, y := pair[0], pair[1]
-		if x.Host != y.Host && adj.Connects(x.Service, y.Service) {
+		if x.Host != y.Host && links.Connects(x, y) {
 			key := [2]model.InterfaceID{x.ID, y.ID}
 			want[key] = true
 			wanted = append(wanted, key)

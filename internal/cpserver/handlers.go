@@ -166,6 +166,28 @@ func (s *Server) listInterfaces(r *http.Request, _ principal) (any, error) {
 	return out, err
 }
 
+func (s *Server) createDevice(r *http.Request, _ principal) (any, error) {
+	req, err := decode[api.CreateDevice](r)
+	if err != nil {
+		return nil, err
+	}
+	var d store.Interface
+	var cfg api.DeviceConfig
+	if _, err := s.update(r.Context(), "create_device", func(tx store.Tx) error {
+		if d, err = s.plane.CreateDevice(tx, s.now(), r.PathValue("net"), req); err != nil {
+			return err
+		}
+		cfg, err = cp.DeviceConfig(tx, d.ID)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	s.m.leaseEvents.WithLabelValues("device").Inc()
+	s.log.Info().Str("network", string(d.Network)).Str("interface", string(d.ID)).Str("gateway", string(d.Gateway)).
+		Time("expires", d.Expires).Msg("development machine registered")
+	return cfg, nil
+}
+
 func (s *Server) revoke(r *http.Request, _ principal) (any, error) {
 	id := model.InterfaceID(r.PathValue("id"))
 	_, err := s.update(r.Context(), "revoke", func(tx store.Tx) error { return s.plane.Revoke(tx, s.now(), id) })

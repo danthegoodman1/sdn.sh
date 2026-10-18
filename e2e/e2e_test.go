@@ -7,6 +7,7 @@ package e2e
 
 import (
 	"context"
+	crand "crypto/rand"
 	"errors"
 	"fmt"
 	"net"
@@ -23,6 +24,7 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 
 	"sdn.sh/internal/api"
+	"sdn.sh/internal/devconf"
 	"sdn.sh/internal/lab"
 	"sdn.sh/internal/model"
 )
@@ -53,9 +55,9 @@ func newLab(t *testing.T, name string, cpArgs ...string) *lab.Lab {
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Log(l.Logs(40))
-			if keep := os.Getenv("SDN_LAB_KEEP"); keep != "" {
-				keepFiles(dir, filepath.Join(keep, name))
-			}
+		}
+		if keep := os.Getenv("SDN_LAB_KEEP"); keep != "" && (t.Failed() || os.Getenv("SDN_LAB_KEEP_ALWAYS") != "") {
+			keepFiles(dir, filepath.Join(keep, name))
 		}
 		l.Close()
 	})
@@ -636,6 +638,105 @@ func TestAnEgressGrantReachesTheInternetOnItsPortsAlone(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("the internet stayed reachable after the grant went")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// laptop registers a development machine behind gw and brings it up from
+// its generated config, minting the key here as sdnctl does.
+func laptop(t *testing.T, l *lab.Lab, name string, gw model.InterfaceID, ttl time.Duration) (*lab.Laptop, api.DeviceConfig) {
+	t.Helper()
+	priv := must(model.NewPrivateKey(crand.Reader))
+	cfg := must(l.Admin.CreateDevice(context.Background(), "prod", api.CreateDevice{Service: "dev", Gateway: gw, PublicKey: priv.Public(), TTL: ttl}))
+	lp := must(l.AddLaptop(name, devconf.WGQuick(priv, cfg)))
+	return lp, cfg
+}
+
+func TestADevelopmentMachineReachesServicesThroughItsGatewayAndLosesThemOnRevocation(t *testing.T) {
+	l := newLab(t, "e2ek", fastClocks...)
+	ctx := context.Background()
+	relay := must(l.AddRelay(ctx, "r1"))
+	h1 := must(l.AddHost(ctx, "h1"))
+	h2 := must(l.AddGatewayHost(ctx, "h2"))
+	must(l.Admin.CreateNetwork(ctx, api.CreateNetwork{Name: "prod", Relays: []model.RelayID{relay.ID}}))
+	db := must(l.Admin.CreateService(ctx, "prod", api.CreateService{Name: "db"}))
+	must(l.Admin.CreateService(ctx, "prod", api.CreateService{Name: "gw"}))
+	must(l.Admin.CreateService(ctx, "prod", api.CreateService{Name: "dev"}))
+	must(l.Admin.CreateRule(ctx, "prod", api.CreateRule{From: "dev", To: "db", Proto: model.TCP, Ports: model.PortRange{Lo: 5432, Hi: 5432}}))
+	gw := must(h2.AttachGateway(ctx, "gw-1", "prod", "gw"))
+	db1 := must(h1.Attach(ctx, "db-1", "prod", "db"))
+	must(lab.ServeRemote(db1.Namespace, netip.AddrPortFrom(db1.Addr6, 5432)))
+	must(lab.Serve(db1.Namespace, netip.AddrPortFrom(db1.Addr6, 2222), "secret"))
+
+	lp, cfg := laptop(t, l, "lap1", gw.Interface, time.Hour)
+	if cfg.DNS != gw.Addr6 || cfg.Domain != "prod.internal" {
+		t.Fatalf("the config names resolver %v and domain %q", cfg.DNS, cfg.Domain)
+	}
+	// By name, through the gateway's resolver.
+	var addrs []netip.Addr
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		var err error
+		addrs, _, err = lab.LookupAt(lp.NS, cfg.DNS, "db.prod.internal.", dnsmessage.TypeAAAA)
+		if err == nil && len(addrs) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the laptop never resolved db: %v %v", addrs, err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if addrs[0] != db.Addr6 {
+		t.Fatalf("db resolved to %v, want %v", addrs[0], db.Addr6)
+	}
+	// The backend sees the laptop's own address as the source.
+	got, err := lab.DialUntil(lp.NS, netip.AddrPortFrom(addrs[0], 5432), 15*time.Second)
+	if err != nil || got != cfg.Addr6.String() {
+		t.Fatalf("laptop to db: %q %v, want the source %v", got, err, cfg.Addr6)
+	}
+	mustNotReach(t, lp.NS, netip.AddrPortFrom(db1.Addr6, 2222), "a port policy does not name")
+	// Laptops take replies alone: a backend cannot open a flow to one.
+	must(lab.Serve(lp.NS, netip.AddrPortFrom(cfg.Addr6, 8080), "laptop"))
+	mustNotReach(t, db1.Namespace, netip.AddrPortFrom(cfg.Addr6, 8080), "a backend opening a flow to a laptop")
+
+	// A second laptop sending as the first is dropped at the gateway.
+	spoof, cfg2 := laptop(t, l, "lap2", gw.Interface, time.Hour)
+	if err := lab.Exec(spoof.NS, "ip", "addr", "replace", netip.PrefixFrom(cfg.Addr6, 128).String(), "dev", "wg0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := lab.Exec(spoof.NS, "ip", "addr", "del", netip.PrefixFrom(cfg2.Addr6, 128).String(), "dev", "wg0"); err != nil {
+		t.Fatal(err)
+	}
+	mustNotReach(t, spoof.NS, netip.AddrPortFrom(db.Addr6, 5432), "one laptop sending as another")
+
+	// A backend replacement needs no new config.
+	db2 := must(h1.Attach(ctx, "db-2", "prod", "db"))
+	must(lab.Serve(db2.Namespace, netip.AddrPortFrom(db2.Addr6, 5432), "db-2"))
+	must(h1.Detach(ctx, db1.Interface))
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		got, err := lab.Dial(lp.NS, netip.AddrPortFrom(db.Addr6, 5432), time.Second)
+		if err == nil && got == "db-2" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after the replacement the laptop reached %q (%v)", got, err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Revocation, with no grace period.
+	if err := l.Admin.Revoke(ctx, cfg.Interface); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		if _, err := lab.Dial(lp.NS, netip.AddrPortFrom(db.Addr6, 5432), time.Second); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a revoked laptop still reaches db")
 		}
 		time.Sleep(200 * time.Millisecond)
 	}

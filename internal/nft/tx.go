@@ -60,11 +60,7 @@ func Diff(have, want *Ruleset) Transaction {
 	}
 	t := Transaction{Forward: want.Forward}
 	if !rulesEqual(have.Rules, want.Rules) {
-		r := Rules{
-			Translate: slices.Clone(want.Rules.Translate),
-			Reject:    slices.Clone(want.Rules.Reject),
-			Accept:    slices.Clone(want.Rules.Accept),
-		}
+		r := want.Rules.Clone()
 		t.Rules = &r
 	}
 	for _, m := range have.Maps {
@@ -195,11 +191,7 @@ func Apply(have *Ruleset, t Transaction) (*Ruleset, error) {
 		s.Addrs = slices.DeleteFunc(s.Addrs, func(a netip.Addr) bool { return slices.Contains(e.Addrs, a) })
 	}
 	if t.Rules != nil {
-		out.Rules = Rules{
-			Translate: slices.Clone(t.Rules.Translate),
-			Reject:    slices.Clone(t.Rules.Reject),
-			Accept:    slices.Clone(t.Rules.Accept),
-		}
+		out.Rules = t.Rules.Clone()
 	}
 	out.Normalize()
 	if err := out.Validate(); err != nil {
@@ -218,7 +210,7 @@ func (t *Transaction) Size() int {
 		for _, s := range t.Replace.Sets {
 			n += len(s.Addrs) + 1
 		}
-		return n + len(t.Replace.Rules.Translate) + len(t.Replace.Rules.Reject) + len(t.Replace.Rules.Accept)
+		return n + len(t.Replace.Rules.Translate) + len(t.Replace.Rules.Reject) + len(t.Replace.Rules.Accept) + len(t.Replace.Rules.Shield)
 	}
 	n := len(t.DelMaps) + len(t.DelSets) + len(t.Slots)
 	for _, m := range t.AddMaps {
@@ -234,7 +226,7 @@ func (t *Transaction) Size() int {
 		n += len(e.Addrs)
 	}
 	if t.Rules != nil {
-		n += len(t.Rules.Translate) + len(t.Rules.Reject) + len(t.Rules.Accept)
+		n += len(t.Rules.Translate) + len(t.Rules.Reject) + len(t.Rules.Accept) + len(t.Rules.Shield)
 	}
 	return n
 }

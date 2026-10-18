@@ -649,6 +649,23 @@ func TestAQuerySentWhileTheAgentRestartsWaitsAndIsAnswered(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	// A socket the resolver opened and stored closes when its interface
+	// detaches, and the attach after it is answered.
+	extra := must(h1.Attach(ctx, "web-2", "prod", "web"))
+	must(h1.Detach(ctx, extra.Interface))
+	attached := make(chan error, 1)
+	go func() {
+		_, err := h1.Attach(ctx, "web-3", "prod", "web")
+		attached <- err
+	}()
+	select {
+	case err := <-attached:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("an attach after a detach was never answered")
+	}
 	if err := sh("systemctl", "kill", "--signal=KILL", "--kill-whom=main", h1.Unit); err != nil {
 		t.Fatal(err)
 	}

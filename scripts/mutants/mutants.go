@@ -2,37 +2,38 @@ package main
 
 // Files the mutants edit.
 const (
-	agentCore   = "internal/agent/core/core.go"
-	agentLife   = "internal/agent/core/lifecycle.go"
-	agentPlan   = "internal/agent/core/plan.go"
-	agentTarget = "internal/agent/core/target.go"
-	agentRelays = "internal/agent/core/relays.go"
-	agentDaemon = "internal/agent/daemon/daemon.go"
-	agentResolv = "internal/agent/resolver/resolver.go"
-	agentMain   = "cmd/sdn-agent/main.go"
-	agentUnder  = "internal/agent/underlay/underlay.go"
-	linuxEgress = "internal/kernel/linux/egress.go"
-	linuxNetns  = "internal/kernel/linux/netns.go"
-	nftTx       = "internal/nft/tx.go"
-	compileGo   = "internal/compile/compile.go"
-	cpAlloc     = "internal/cp/alloc.go"
-	cpEdges     = "internal/cp/edges.go"
-	cpPlane     = "internal/cp/plane.go"
-	cpCensus    = "internal/cp/census.go"
-	cpServer    = "internal/cpserver/server.go"
-	apiState    = "internal/api/state.go"
-	pgTx        = "internal/store/pgstore/tx.go"
-	cpHub       = "internal/cpserver/hub.go"
-	linuxKernel = "internal/kernel/linux/linux.go"
-	linuxNFT    = "internal/kernel/linux/nftables.go"
-	nftGo       = "internal/nft/nft.go"
-	regprotoGo  = "internal/regproto/regproto.go"
-	relayCore   = "internal/relay/core/core.go"
-	relayServer = "internal/relay/server/server.go"
-	relayDisk   = "internal/relay/server/disk.go"
-	simCP       = "internal/sim/cpnode.go"
-	kmodelGo    = "internal/kernel/kmodel/kmodel.go"
-	modelWeight = "internal/model/relayweight.go"
+	agentCore    = "internal/agent/core/core.go"
+	agentLife    = "internal/agent/core/lifecycle.go"
+	agentPlan    = "internal/agent/core/plan.go"
+	agentTarget  = "internal/agent/core/target.go"
+	agentRelays  = "internal/agent/core/relays.go"
+	agentDaemon  = "internal/agent/daemon/daemon.go"
+	agentResolv  = "internal/agent/resolver/resolver.go"
+	agentMain    = "cmd/sdn-agent/main.go"
+	agentUnder   = "internal/agent/underlay/underlay.go"
+	linuxEgress  = "internal/kernel/linux/egress.go"
+	linuxNetns   = "internal/kernel/linux/netns.go"
+	nftTx        = "internal/nft/tx.go"
+	compileGo    = "internal/compile/compile.go"
+	cpAlloc      = "internal/cp/alloc.go"
+	cpEdges      = "internal/cp/edges.go"
+	cpPlane      = "internal/cp/plane.go"
+	cpCensus     = "internal/cp/census.go"
+	cpServer     = "internal/cpserver/server.go"
+	apiState     = "internal/api/state.go"
+	pgTx         = "internal/store/pgstore/tx.go"
+	cpHub        = "internal/cpserver/hub.go"
+	linuxKernel  = "internal/kernel/linux/linux.go"
+	linuxNFT     = "internal/kernel/linux/nftables.go"
+	nftGo        = "internal/nft/nft.go"
+	regprotoGo   = "internal/regproto/regproto.go"
+	relayCore    = "internal/relay/core/core.go"
+	relayServer  = "internal/relay/server/server.go"
+	relayDisk    = "internal/relay/server/disk.go"
+	simCP        = "internal/sim/cpnode.go"
+	kmodelGo     = "internal/kernel/kmodel/kmodel.go"
+	modelWeight  = "internal/model/relayweight.go"
+	agentFDStore = "internal/agent/resolver/fdstore.go"
 )
 
 // Code that more than one edit moves or matches.
@@ -676,5 +677,12 @@ var Mutants = []Mutant{
 		Breaks: "a relay that answers again takes back the edges whose heaviest relay it is",
 		Edits:  []Edit{{agentRelays, "\t\th.up = true\n\t\tc.relaysChanged(map[model.RelayID]bool{relay: true})\n", "\t\th.up = true\n"}},
 		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "stored-socket-made-blocking",
+		Breaks: "a resolver socket handed to the descriptor store stays non-blocking, so closing it on detach returns",
+		Edits: []Edit{{agentFDStore, "\tif err := rc.Control(func(fd uintptr) {\n\t\tserr = unix.Sendmsg(s.fd, []byte(msg), unix.UnixRights(int(fd)), s.addr, 0)\n\t}); err != nil {\n\t\treturn err\n\t}\n",
+			"\tif f, ok := c.(interface{ File() (*os.File, error) }); ok {\n\t\tif file, err := f.File(); err == nil {\n\t\t\tdefer file.Close()\n\t\t\tserr = unix.Sendmsg(s.fd, []byte(msg), unix.UnixRights(int(file.Fd())), s.addr, 0)\n\t\t}\n\t}\n\t_ = rc\n"}},
+		Catch: []string{"agent-resolver", "e2e"},
 	},
 }

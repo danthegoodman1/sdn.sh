@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -32,13 +33,27 @@ func openFDStore() *fdStore {
 	return &fdStore{addr: &unix.SockaddrUnix{Name: path}, fd: fd}
 }
 
-// add stores a descriptor under a name, replacing one stored before.
-func (s *fdStore) add(name string, f *os.File) error {
+// add stores a socket's descriptor under a name, replacing one stored
+// before. It sends the socket's own descriptor from inside RawConn.Control,
+// since asking a copy from File for its number (os.File.Fd) puts the open
+// file description the two share into blocking mode, and a read the kernel
+// then blocks never returns to the Close that waits for it.
+func (s *fdStore) add(name string, c syscall.Conn) error {
 	if s.fd < 0 {
 		return nil
 	}
+	rc, err := c.SyscallConn()
+	if err != nil {
+		return err
+	}
 	msg := "FDSTORE=1\nFDNAME=" + name + "\nFDPOLL=0"
-	return unix.Sendmsg(s.fd, []byte(msg), unix.UnixRights(int(f.Fd())), s.addr, 0)
+	var serr error
+	if err := rc.Control(func(fd uintptr) {
+		serr = unix.Sendmsg(s.fd, []byte(msg), unix.UnixRights(int(fd)), s.addr, 0)
+	}); err != nil {
+		return err
+	}
+	return serr
 }
 
 // remove drops a stored descriptor.

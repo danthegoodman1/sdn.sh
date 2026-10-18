@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -210,15 +211,13 @@ func (r *Resolver) open(ns, key string, addr netip.AddrPort) (*served, error) {
 	if err != nil {
 		return nil, err
 	}
-	for kind, f := range map[string]interface{ File() (*os.File, error) }{"udp": s.udp, "tcp": s.tcp} {
-		file, err := f.File()
-		if err != nil {
-			continue
-		}
-		if err := r.store.add(key+"."+kind, file); err != nil {
+	for _, c := range []struct {
+		kind string
+		conn syscall.Conn
+	}{{"udp", s.udp}, {"tcp", s.tcp}} {
+		if err := r.store.add(key+"."+c.kind, c.conn); err != nil {
 			r.log.Warn().Err(err).Str("namespace", ns).Msg("descriptor store; queries during a restart will fail")
 		}
-		file.Close()
 	}
 	return &s, nil
 }

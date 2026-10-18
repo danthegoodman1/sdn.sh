@@ -142,7 +142,7 @@ Completion gate:
 On three machines in one datacenter the relay carries more traffic per CPU-second than a WireGuard-terminating gateway on the same box, with the underlay ceiling measured in the same run. Relay failover completes in under 1s. A direction cannot be claimed by a sender the control plane has not authorized.
 
 Testing plan:
-- The three-path comparison — direct, relay, gateway — as a committed benchmark, ceiling first.
+- The three-path comparison — direct, relay, gateway — as a committed benchmark, ceiling first. It records round-trip p50 and p99 on each path against the plain underlay's, both idle and while the throughput run saturates the path.
 - A test asserting an unknown port and an unauthorized source are both dropped.
 - A NAT test: a host whose public address and port change re-registers and traffic resumes.
 - A NAT-mapping test, run in CI against a conntrack NAT built from namespaces: a registration datagram from a raw socket on the interface's listen port keeps the same mapping alive that WireGuard's own socket uses, so a relay peer with no keepalive still receives after the mapping's idle timeout has passed.
@@ -165,6 +165,7 @@ Status ledger:
 | Incomplete | Work | 3E: Relay peers without `persistent-keepalive` | Missing: implementation, gated on the NAT-mapping test. |
 | Incomplete | Test | Raw-socket registration holds WireGuard's NAT mapping; simultaneous attach loses no round | Missing: both tests. |
 | Incomplete | Gate | Relay beats gateway per CPU-second, ceiling in the same run | Missing: committed benchmark. Measured once by hand; see SPEC.md. |
+| Incomplete | Test | Round-trip time per path, idle and under load, against the plain underlay | Missing: measurement. Only throughput has been measured; under load the relay's socket buffers decide it. See SPEC.md "Targets". |
 | Incomplete | Test | Unknown port, unauthorized source, and hijack all rejected | Missing: tests. |
 
 ## Phase 4: Services, selection and convergence

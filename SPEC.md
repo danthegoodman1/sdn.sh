@@ -548,6 +548,7 @@ Still to measure.
 | Service change to converged, p99 in one region | < 250 ms | The cost of a change, and the number the product is judged on. |
 | Attach to first packet, peer already converged, degree ≤ 20 | < 100 ms | Device work is ~5ms and the interface's own peer table is ~3ms at degree 20. The figure is a latency, which the 64-way throughput numbers do not measure. |
 | Relay failover | < 1 s | A 200 ms probe interval plus an endpoint rewrite on both sides. |
+| Round-trip time added by a relay, p50 and p99, idle and under load | — | Unmeasured. Idle, the detour through the relay sets it. Under load, a relay that falls behind queues in its 64 MB socket buffers before it drops, and at the measured 1307 Mbit/s they hold hundreds of milliseconds. |
 | Interfaces per host | 1000+ | A netdev and a peer table each. |
 | Attaches per second, one network, degree ≤ 20 | 100+ | Device work allows 621/s. Peer work shares one RTNL lane of ~10,000–12,000 operations a second per host, so the target depends on degree and on how many hosts the network spreads across. |
 | Slot-map rewrite across many namespaces | — | Unmeasured. A 1024-entry map in each of 400 namespaces could take most of the convergence budget. |

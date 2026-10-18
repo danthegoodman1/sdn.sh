@@ -220,16 +220,20 @@ type Interface struct {
 	Drained bool `json:"drained,omitempty"`
 }
 
-// Rule permits flows from one service to another, or to the internet when
-// To is empty.
+// Rule allows or denies flows from a service to a service or the internet.
+// Either side may be every service.
 type Rule struct {
 	ID      model.RuleID    `json:"id"`
 	Network model.NetworkID `json:"network"`
-	From    model.ServiceID `json:"from"`
+	// From is a service or model.AnyService.
+	From model.ServiceID `json:"from"`
+	// To is a service, model.AnyService, or empty for internet egress.
 	To      model.ServiceID `json:"to,omitempty"`
 	Proto   model.Proto     `json:"proto"`
 	Ports   model.PortRange `json:"ports"`
 	Created time.Time       `json:"created"`
+	// Deny takes the flows the rule names out of every allow.
+	Deny bool `json:"deny,omitempty"`
 }
 
 // Edge is a pair of policy-connected interfaces on different hosts, with a

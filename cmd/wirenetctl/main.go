@@ -5,8 +5,9 @@
 //	wirenetctl network list | get NET | delete NET
 //	wirenetctl service create NET NAME [--ipv4] [--mode flip|cutover]
 //	wirenetctl service list NET | delete NET SVC
-//	wirenetctl rule create NET FROM TO [--proto tcp|udp|any] [--ports 80 | 8000-8100]
+//	wirenetctl rule create NET FROM TO [--deny] [--proto tcp|udp|any] [--ports 80 | 8000-8100]
 //	wirenetctl rule list NET | delete NET RULE
+//	wirenetctl policy NET               (the flows the rules leave open)
 //	wirenetctl interface list NET | revoke IFACE
 //	wirenetctl host create NAME [--endpoint ADDR:PORT]
 //	wirenetctl host delete HOST         (revokes its interfaces)
@@ -16,6 +17,9 @@
 //	wirenetctl attach NAME NET SVC      (local agent)
 //	wirenetctl detach IFACE             (local agent)
 //	wirenetctl interfaces | status      (local agent)
+//
+// A rule's FROM or TO may be '*', every service but the one on the other
+// side, and TO may be internet.
 //
 // The control plane is $WIRENET_CP, authenticated by $WIRENET_ADMIN_TOKEN; the
 // agent's socket is $WIRENET_AGENT_SOCKET.
@@ -48,7 +52,7 @@ func main() {
 }
 
 func usage() error {
-	return errors.New("usage: wirenetctl network|service|rule|interface|host|relay|attach|detach|interfaces|status ...; see the package documentation")
+	return errors.New("usage: wirenetctl network|service|rule|policy|interface|host|relay|attach|detach|interfaces|status ...; see the package documentation")
 }
 
 func run(args []string) error {
@@ -67,6 +71,12 @@ func run(args []string) error {
 	c, err := cpclient.New(env("WIRENET_CP", "http://127.0.0.1:8443"), os.Getenv("WIRENET_ADMIN_TOKEN"), cpclient.Options{CAFile: os.Getenv("WIRENET_CA_FILE")})
 	if err != nil {
 		return err
+	}
+	if args[0] == "policy" {
+		if len(args) != 2 {
+			return usage()
+		}
+		return show(c.Policy(ctx, args[1]))
 	}
 	verb, rest := args[0]+" "+args[1], args[2:]
 	fs := flag.NewFlagSet(verb, flag.ContinueOnError)
@@ -130,6 +140,7 @@ func run(args []string) error {
 	case "rule create":
 		proto := fs.String("proto", "tcp", "tcp, udp or any")
 		ports := fs.String("ports", "", "a port or a range, all ports when empty")
+		deny := fs.Bool("deny", false, "take the flows out of every allow")
 		a, err := parse(fs, rest, 3)
 		if err != nil {
 			return err
@@ -140,7 +151,11 @@ func run(args []string) error {
 				return err
 			}
 		}
-		return show(c.CreateRule(ctx, a[0], api.CreateRule{From: a[1], To: a[2], Proto: model.Proto(*proto), Ports: pr}))
+		action := api.Allow
+		if *deny {
+			action = api.Deny
+		}
+		return show(c.CreateRule(ctx, a[0], api.CreateRule{From: a[1], To: a[2], Proto: model.Proto(*proto), Ports: pr, Action: action}))
 	case "rule list":
 		a, err := parse(fs, rest, 1)
 		if err != nil {

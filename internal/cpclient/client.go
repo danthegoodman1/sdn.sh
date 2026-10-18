@@ -163,6 +163,11 @@ func (c *Client) Rules(ctx context.Context, net string) ([]api.Rule, error) {
 	return call[[]api.Rule](c, ctx, "GET", "/v1/networks/"+esc(net)+"/rules", nil)
 }
 
+// Policy lists the flows a network's rules leave open.
+func (c *Client) Policy(ctx context.Context, net string) ([]api.Grant, error) {
+	return call[[]api.Grant](c, ctx, "GET", "/v1/networks/"+esc(net)+"/policy", nil)
+}
+
 func (c *Client) DeleteRule(ctx context.Context, net string, id model.RuleID) error {
 	return c.do(ctx, "DELETE", "/v1/networks/"+esc(net)+"/rules/"+esc(string(id)), nil, nil, c.timeout)
 }

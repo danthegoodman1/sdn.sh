@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/compile"
 	"github.com/danthegoodman1/wirenet/internal/cp"
 	"github.com/danthegoodman1/wirenet/internal/model"
 	"github.com/danthegoodman1/wirenet/internal/store"
@@ -118,8 +119,40 @@ func (s *Server) createRule(r *http.Request, _ principal) (any, error) {
 	}); err != nil {
 		return nil, err
 	}
-	s.log.Info().Str("network", string(rule.Network)).Str("rule", string(rule.ID)).Str("from", req.From).Str("to", req.To).Msg("rule created")
-	return ruleInfo(rule), nil
+	info := ruleInfo(rule)
+	s.log.Info().Str("network", string(rule.Network)).Str("rule", string(rule.ID)).Str("action", string(info.Action)).
+		Str("from", req.From).Str("to", req.To).Msg("rule created")
+	return info, nil
+}
+
+// policy lists the flows a network's rules leave open, resolved as its
+// hosts receive them.
+func (s *Server) policy(r *http.Request, _ principal) (any, error) {
+	var out []api.Grant
+	err := s.view(r.Context(), "policy", func(tx store.ReadTx) error {
+		n, err := cp.ResolveNetwork(tx, r.PathValue("net"))
+		if err != nil {
+			return err
+		}
+		svcs, err := tx.Services(n.ID)
+		if err != nil {
+			return err
+		}
+		rules, err := tx.Rules(n.ID)
+		if err != nil {
+			return err
+		}
+		name := map[model.ServiceID]string{"": api.Internet}
+		for _, svc := range svcs {
+			name[svc.ID] = svc.Name
+		}
+		out = []api.Grant{}
+		for _, g := range compile.Resolve(svcs, rules) {
+			out = append(out, api.Grant{From: g.From, FromName: name[g.From], To: g.To, ToName: name[g.To], Proto: g.Proto, Ports: g.Ports})
+		}
+		return nil
+	})
+	return out, err
 }
 
 func (s *Server) listRules(r *http.Request, _ principal) (any, error) {
@@ -487,7 +520,11 @@ func serviceInfo(s store.Service) api.ServiceInfo {
 }
 
 func ruleInfo(r store.Rule) api.Rule {
-	return api.Rule{ID: r.ID, Network: r.Network, From: r.From, To: r.To, Proto: r.Proto, Ports: r.Ports}
+	action := api.Allow
+	if r.Deny {
+		action = api.Deny
+	}
+	return api.Rule{ID: r.ID, Network: r.Network, Action: action, From: r.From, To: r.To, Proto: r.Proto, Ports: r.Ports}
 }
 
 func interfaceInfo(i store.Interface) api.InterfaceInfo {

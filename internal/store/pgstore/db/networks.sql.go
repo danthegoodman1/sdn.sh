@@ -85,7 +85,7 @@ func (q *Queries) GetNetworkByName(ctx context.Context, name string) (Network, e
 }
 
 const getRule = `-- name: GetRule :one
-SELECT id, network, from_service, to_service, proto, port_lo, port_hi, created FROM rules WHERE id = $1
+SELECT id, network, from_service, to_service, proto, port_lo, port_hi, created, deny FROM rules WHERE id = $1
 `
 
 func (q *Queries) GetRule(ctx context.Context, id string) (Rule, error) {
@@ -100,6 +100,7 @@ func (q *Queries) GetRule(ctx context.Context, id string) (Rule, error) {
 		&i.PortLo,
 		&i.PortHi,
 		&i.Created,
+		&i.Deny,
 	)
 	return i, err
 }
@@ -186,7 +187,7 @@ func (q *Queries) ListNetworks(ctx context.Context) ([]Network, error) {
 }
 
 const listRules = `-- name: ListRules :many
-SELECT id, network, from_service, to_service, proto, port_lo, port_hi, created FROM rules WHERE network = $1 ORDER BY id
+SELECT id, network, from_service, to_service, proto, port_lo, port_hi, created, deny FROM rules WHERE network = $1 ORDER BY id
 `
 
 func (q *Queries) ListRules(ctx context.Context, network string) ([]Rule, error) {
@@ -207,6 +208,7 @@ func (q *Queries) ListRules(ctx context.Context, network string) ([]Rule, error)
 			&i.PortLo,
 			&i.PortHi,
 			&i.Created,
+			&i.Deny,
 		); err != nil {
 			return nil, err
 		}
@@ -301,12 +303,13 @@ func (q *Queries) PutNetwork(ctx context.Context, arg PutNetworkParams) (int64, 
 }
 
 const putRule = `-- name: PutRule :exec
-INSERT INTO rules (id, network, from_service, to_service, proto, port_lo, port_hi, created)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO rules (id, network, from_service, to_service, proto, port_lo, port_hi, created, deny)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (id) DO UPDATE SET
 	network = excluded.network, from_service = excluded.from_service,
 	to_service = excluded.to_service, proto = excluded.proto,
-	port_lo = excluded.port_lo, port_hi = excluded.port_hi, created = excluded.created
+	port_lo = excluded.port_lo, port_hi = excluded.port_hi, created = excluded.created,
+	deny = excluded.deny
 `
 
 type PutRuleParams struct {
@@ -318,6 +321,7 @@ type PutRuleParams struct {
 	PortLo      int32
 	PortHi      int32
 	Created     time.Time
+	Deny        bool
 }
 
 func (q *Queries) PutRule(ctx context.Context, arg PutRuleParams) error {
@@ -330,6 +334,7 @@ func (q *Queries) PutRule(ctx context.Context, arg PutRuleParams) error {
 		arg.PortLo,
 		arg.PortHi,
 		arg.Created,
+		arg.Deny,
 	)
 	return err
 }

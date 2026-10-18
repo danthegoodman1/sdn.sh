@@ -348,8 +348,13 @@ func l4(proto byte) []expr.Any {
 
 // protoMatch matches a policy rule's protocol and ports.
 func protoMatch(proto model.Proto, ports model.PortRange) []expr.Any {
-	if proto == model.AnyProto {
+	switch proto {
+	case model.AnyProto:
 		return nil
+	case model.OtherProto:
+		return []expr.Any{&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
+			&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{unix.IPPROTO_UDP}}}
 	}
 	p := byte(unix.IPPROTO_TCP)
 	if proto == model.UDP {

@@ -156,10 +156,30 @@ const (
 	UDP Proto = "udp"
 	// AnyProto permits every IP protocol, without ports.
 	AnyProto Proto = "any"
+	// OtherProto is every IP protocol but TCP and UDP, without ports. Rules
+	// cannot name it; the compiler produces it when a deny takes TCP or UDP
+	// flows out of an allow for any protocol.
+	OtherProto Proto = "other"
 )
 
-// Valid reports whether p is a known protocol.
+// Valid reports whether p is a protocol a rule may name.
 func (p Proto) Valid() bool { return p == TCP || p == UDP || p == AnyProto }
+
+// Matches reports whether a grant for p over ports admits a packet of
+// protocol proto to port.
+func (p Proto) Matches(ports PortRange, proto Proto, port uint16) bool {
+	switch p {
+	case AnyProto:
+		return true
+	case OtherProto:
+		return proto != TCP && proto != UDP
+	}
+	return p == proto && ports.Contains(port)
+}
+
+// AnyService is the wildcard a rule names in place of a service: every
+// service of the network but the one on the rule's other side.
+const AnyService ServiceID = "*"
 
 // PortRange is an inclusive range of ports. A zero range means every port.
 type PortRange struct {

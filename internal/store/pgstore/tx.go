@@ -277,6 +277,7 @@ func (t *tx) PutRule(r store.Rule) error {
 	return t.check(t.q.PutRule(t.ctx, db.PutRuleParams{
 		ID: string(r.ID), Network: string(r.Network), FromService: string(r.From), ToService: string(r.To),
 		Proto: string(r.Proto), PortLo: int32(r.Ports.Lo), PortHi: int32(r.Ports.Hi), Created: r.Created,
+		Deny: r.Deny,
 	}))
 }
 
@@ -452,6 +453,7 @@ func rule(r db.Rule) (store.Rule, error) {
 		ID: model.RuleID(r.ID), Network: model.NetworkID(r.Network), From: model.ServiceID(r.FromService),
 		To: model.ServiceID(r.ToService), Proto: model.Proto(r.Proto),
 		Ports: model.PortRange{Lo: uint16(r.PortLo), Hi: uint16(r.PortHi)}, Created: r.Created.UTC(),
+		Deny: r.Deny,
 	}, nil
 }
 

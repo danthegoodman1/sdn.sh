@@ -277,6 +277,7 @@ func (s *Server) Handler() http.Handler {
 	route("POST /v1/networks/{net}/rules", admin, s.createRule)
 	route("GET /v1/networks/{net}/rules", admin, s.listRules)
 	route("DELETE /v1/networks/{net}/rules/{rule}", admin, s.deleteRule)
+	route("GET /v1/networks/{net}/policy", admin, s.policy)
 	route("GET /v1/networks/{net}/interfaces", admin, s.listInterfaces)
 	route("POST /v1/interfaces/{id}/revoke", admin, s.revoke)
 	route("POST /v1/networks/{net}/devices", admin, s.createDevice)

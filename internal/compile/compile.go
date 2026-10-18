@@ -45,15 +45,15 @@ func Built(i store.Interface) bool { return i.Kind != api.Device }
 // direction, since a WireGuard session needs a peer at both ends.
 type Adjacency map[[2]model.ServiceID]bool
 
-// NewAdjacency builds the adjacency of rules.
-func NewAdjacency(rules []store.Rule) Adjacency {
+// NewAdjacency builds the adjacency of resolved grants.
+func NewAdjacency(grants []Grant) Adjacency {
 	adj := Adjacency{}
-	for _, r := range rules {
-		if r.To == "" {
+	for _, g := range grants {
+		if g.To == "" {
 			continue
 		}
-		adj[[2]model.ServiceID{r.From, r.To}] = true
-		adj[[2]model.ServiceID{r.To, r.From}] = true
+		adj[[2]model.ServiceID{g.From, g.To}] = true
+		adj[[2]model.ServiceID{g.To, g.From}] = true
 	}
 	return adj
 }
@@ -150,8 +150,8 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 	for _, svc := range s.Services {
 		services[svc.ID] = svc
 	}
-	adj := NewAdjacency(s.Rules)
-	links := NewLinks(adj, s.Interfaces)
+	grants := Resolve(s.Services, s.Rules)
+	links := NewLinks(NewAdjacency(grants), s.Interfaces)
 	edges := map[[2]model.InterfaceID]store.Edge{}
 	for _, e := range s.Edges {
 		edges[[2]model.InterfaceID{e.A, e.B}] = e
@@ -234,18 +234,18 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 					api.Inbound{From: svc, Proto: model.UDP, Ports: model.PortRange{Lo: 53, Hi: 53}},
 					api.Inbound{From: svc, Proto: model.TCP, Ports: model.PortRange{Lo: 53, Hi: 53}})
 			}
-			for _, r := range s.Rules {
+			for _, g := range grants {
 				switch {
-				case r.From == x.Service && r.To == "":
-					iface.Egress = append(iface.Egress, api.Egress{Proto: r.Proto, Ports: r.Ports})
-				case r.From == x.Service || fronted[r.From]:
-					if _, ok := services[r.To]; ok {
-						iface.Reach = append(iface.Reach, api.Reach{Service: r.To, Proto: r.Proto, Ports: r.Ports})
-						reached[x.Host][r.To] = true
+				case g.From == x.Service && g.To == "":
+					iface.Egress = append(iface.Egress, api.Egress{Proto: g.Proto, Ports: g.Ports})
+				case g.From == x.Service || fronted[g.From]:
+					if _, ok := services[g.To]; ok {
+						iface.Reach = append(iface.Reach, api.Reach{Service: g.To, Proto: g.Proto, Ports: g.Ports})
+						reached[x.Host][g.To] = true
 					}
 				}
-				if r.To == x.Service {
-					iface.Inbound = append(iface.Inbound, api.Inbound{From: r.From, Proto: r.Proto, Ports: r.Ports})
+				if g.To == x.Service {
+					iface.Inbound = append(iface.Inbound, api.Inbound{From: g.From, Proto: g.Proto, Ports: g.Ports})
 				}
 			}
 			slices.SortFunc(iface.Reach, compareReach)

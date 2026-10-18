@@ -3,8 +3,10 @@ package cpserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -454,4 +456,36 @@ func waitFor(t *testing.T, cond func() bool) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// TestThePolicyRouteListsTheFlowsTheRulesLeave checks a wildcard and a deny
+// through the API: the rules come back with their actions, and the policy
+// route lists the grants by name, with the denied service left out.
+func TestThePolicyRouteListsTheFlowsTheRulesLeave(t *testing.T) {
+	eachStore(t, func(t *testing.T, open func() store.Store) {
+		e := newEnv(t, open(), testConfig())
+		must(e.admin.CreateNetwork(e.ctx, api.CreateNetwork{Name: "prod"}))
+		for _, name := range []string{"db", "web", "box"} {
+			must(e.admin.CreateService(e.ctx, "prod", api.CreateService{Name: name}))
+		}
+		must(e.admin.CreateRule(e.ctx, "prod", api.CreateRule{From: api.Wildcard, To: "db", Proto: model.TCP, Ports: model.PortRange{Lo: 5432, Hi: 5432}}))
+		denied := must(e.admin.CreateRule(e.ctx, "prod", api.CreateRule{From: "box", To: "db", Proto: model.AnyProto, Action: api.Deny}))
+		if denied.Action != api.Deny {
+			t.Fatalf("the deny came back as %q", denied.Action)
+		}
+		rules := must(e.admin.Rules(e.ctx, "prod"))
+		if len(rules) != 2 || rules[0].Action == rules[1].Action {
+			t.Fatalf("rules %+v, want one allow and one deny", rules)
+		}
+		var got []string
+		for _, g := range must(e.admin.Policy(e.ctx, "prod")) {
+			got = append(got, fmt.Sprintf("%s>%s %s/%s", g.FromName, g.ToName, g.Proto, g.Ports))
+		}
+		if want := []string{"web>db tcp/5432"}; !slices.Equal(got, want) {
+			t.Fatalf("policy %v, want %v", got, want)
+		}
+		if _, err := e.admin.Policy(e.ctx, "none"); code(err) != api.CodeNotFound {
+			t.Fatalf("an unknown network's policy: %v", err)
+		}
+	})
 }

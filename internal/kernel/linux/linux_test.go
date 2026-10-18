@@ -435,6 +435,35 @@ func TestServicesTranslateInBothFamilies(t *testing.T) {
 	}
 }
 
+// TestOtherProtocolsPassWhereTCPAndUDPStop admits a peer for every protocol
+// but TCP and UDP, the grant a deny leaves when it takes TCP out of an
+// allow for any protocol: ICMP reaches the receiver in each family, and TCP
+// does not.
+func TestOtherProtocolsPassWhereTCPAndUDPStop(t *testing.T) {
+	k := newKernel(t)
+	a, b := pair(t, k, prng.New(9))
+	rules := &nft.Ruleset{
+		Sets: []nft.Set{{Name: "f_cli_6", Family: nft.IPv6, Addrs: []netip.Addr{a.addr}}, {Name: "f_cli_4", Family: nft.IPv4, Addrs: []netip.Addr{a.a4}}},
+		Rules: nft.Rules{Accept: []nft.Accept{
+			{Set: "f_cli_6", Family: nft.IPv6, Proto: model.OtherProto},
+			{Set: "f_cli_4", Family: nft.IPv4, Proto: model.OtherProto},
+		}},
+	}
+	rules.Normalize()
+	run(t, k, kernel.Op{Kind: kernel.ApplyRules, Namespace: b.ns, Rules: &nft.Transaction{Replace: rules}})
+	for _, addr := range []netip.Addr{b.addr, b.a4} {
+		if out, err := exec.Command("ip", "netns", "exec", a.ns, "ping", "-c", "1", "-W", "5", addr.String()).CombinedOutput(); err != nil {
+			dump(t, a.ns, b.ns)
+			t.Fatalf("ping %v through a grant for other protocols: %v\n%s", addr, err, out)
+		}
+		serve(t, b.ns, netip.AddrPortFrom(addr, 9999), "secret")
+		if c, err := dial(t, a.ns, netip.AddrPortFrom(addr, 9999), time.Second); err == nil {
+			c.Close()
+			t.Fatalf("reached %v over TCP through a grant for other protocols", addr)
+		}
+	}
+}
+
 // TestAnElementUpdateMovesNewConnectionsOnly replaces a service's backend
 // through element updates: a connection open before stays where it was.
 func TestAnElementUpdateMovesNewConnectionsOnly(t *testing.T) {

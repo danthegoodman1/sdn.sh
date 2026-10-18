@@ -35,19 +35,24 @@ import (
 	"sdn.sh/internal/regproto"
 )
 
-// Config bounds what one direction may cost the relay.
+// Config bounds what one port, and the relay as a whole, may cost. A zero
+// rate means no cap.
 type Config struct {
-	// Rate and Burst cap data packets per second per port; zero means no
-	// cap.
+	// Rate and Burst cap data packets per second per port.
 	Rate  float64
 	Burst float64
-	// RegistrationRate caps registrations per second per port, bounding
-	// the MACs an attacker can make the relay compute.
+	// RegistrationRate caps the registrations per second a port accepts.
+	// Only a registration that verifies spends it, so junk sent to a port
+	// leaves its owner's budget whole.
 	RegistrationRate float64
-	// EarlyHold is how long a registration for a port not yet pushed waits
-	// for the port to arrive, and EarlyMax how many may wait.
-	EarlyHold time.Duration
-	EarlyMax  int
+	// RejectRate caps, across the relay, the registrations per second that
+	// fail verification. Once it is spent the relay verifies none until it
+	// refills, which bounds the MACs a flood can make the relay compute.
+	RejectRate float64
+	// ProbeRate caps probe answers per second across the relay. A probe's
+	// source can be forged, so the cap bounds what the probe port sends to
+	// whoever a probe names.
+	ProbeRate float64
 	// WaitFor is how long a data packet waits for its sender's or its
 	// peer's registration to commit, WaitMax how many may wait on one
 	// port, and WaitTotal how many on the relay. A direction's first
@@ -58,9 +63,10 @@ type Config struct {
 	WaitTotal int
 }
 
-// DefaultConfig returns production limits.
+// DefaultConfig returns production limits. Agents probe each relay every
+// 200ms, so the probe cap answers 10,000 hosts.
 func DefaultConfig() Config {
-	return Config{Rate: 0, Burst: 0, RegistrationRate: 20, EarlyHold: 5 * time.Second, EarlyMax: 4096,
+	return Config{Rate: 0, Burst: 0, RegistrationRate: 20, RejectRate: 50000, ProbeRate: 50000,
 		WaitFor: 2 * time.Second, WaitMax: 8, WaitTotal: 65536}
 }
 
@@ -73,9 +79,6 @@ const (
 	Forward
 	// Register is a verified registration to make durable, then Commit.
 	Register
-	// Held is a registration for an unknown port, kept until the port
-	// arrives or the hold ends.
-	Held
 	// Wait is a data packet kept, under Decision.Token, until a
 	// registration lets it through or its wait ends. The shell keeps the
 	// bytes; Release says what to send.
@@ -134,12 +137,20 @@ type Table struct {
 	cfg        Config
 	ports      map[netip.AddrPort]*Dir
 	generation uint64
-	early      []early
-	// waiting holds data packets awaiting a registration, oldest first;
-	// expired holds the tokens of those whose wait ended.
-	waiting   []waiting
-	expired   []uint64
+	// oldest and newest end the relay's list of waiting packets in arrival
+	// order, which expiry walks from the front, and held counts them. Each
+	// packet is also on its port's list, so admission counts a port's
+	// packets without looking at any other port's.
+	oldest, newest *waiting
+	held           int
+	// touched names ports whose waiting packets a commit or a load may
+	// have let through, and dropped holds the tokens of waits that ended.
+	// Release reads only these, so its cost follows what changed rather
+	// than how many packets wait.
+	touched   []netip.AddrPort
+	dropped   []uint64
 	nextToken uint64
+	rejects   bucket
 	// Unknown counts packets to ports the table lacks.
 	Unknown uint64
 }
@@ -150,29 +161,32 @@ type Dir struct {
 	Endpoint netip.AddrPort
 	Counter  uint64
 	Stats    Counters
-	tokens   float64
-	regs     float64
-	last     time.Time
+	data     bucket
+	regs     bucket
+	// waits holds the packets waiting on this port, oldest first.
+	waits []*waiting
 }
 
+// waiting is a data packet kept for the registration that would admit it.
 type waiting struct {
-	token uint64
-	at    time.Time
-	local netip.AddrPort
-	src   netip.AddrPort
-	bytes int
-}
-
-type early struct {
-	at    time.Time
-	local netip.AddrPort
-	src   netip.AddrPort
-	b     [regproto.Size]byte
+	token      uint64
+	at         time.Time
+	local, src netip.AddrPort
+	bytes      int
+	prev, next *waiting
 }
 
 // New returns an empty table.
 func New(cfg Config) *Table {
-	return &Table{cfg: cfg, ports: map[netip.AddrPort]*Dir{}}
+	return &Table{cfg: cfg, ports: map[netip.AddrPort]*Dir{}, rejects: bucket{rate: cfg.RejectRate, burst: cfg.RejectRate}}
+}
+
+func (t *Table) newDir(p api.RelayPort) *Dir {
+	return &Dir{
+		RelayPort: p,
+		data:      bucket{rate: t.cfg.Rate, burst: t.cfg.Burst},
+		regs:      bucket{rate: t.cfg.RegistrationRate, burst: t.cfg.RegistrationRate},
+	}
 }
 
 // Generation is the port table's control-plane generation.
@@ -195,36 +209,31 @@ func (t *Table) Dir(local netip.AddrPort) (*Dir, bool) {
 
 // Load replaces the pushed table. A direction whose key is unchanged keeps
 // its endpoint and counter; one whose key changed starts over, since its
-// port was reallocated. It returns registrations held for ports that just
-// arrived and now verify.
-func (t *Table) Load(now time.Time, st api.RelayState) []Registration {
+// port was reallocated. Packets waiting on a port the table keeps go on
+// waiting, and those on a port it drops end.
+func (t *Table) Load(st api.RelayState) {
 	next := map[netip.AddrPort]*Dir{}
 	for _, p := range st.Ports {
-		d := &Dir{RelayPort: p}
-		if old, ok := t.ports[p.Local]; ok && old.Key == p.Key && old.Advertised == p.Advertised {
-			d.Endpoint, d.Counter, d.Stats = old.Endpoint, old.Counter, old.Stats
+		d := t.newDir(p)
+		if old, ok := t.ports[p.Local]; ok {
+			if old.Key == p.Key && old.Advertised == p.Advertised {
+				d.Endpoint, d.Counter, d.Stats = old.Endpoint, old.Counter, old.Stats
+			}
+			d.waits = old.waits
+			t.touch(d)
 		}
 		next[p.Local] = d
 	}
 	t.ports = next
 	t.generation = st.Generation
-	var out []Registration
-	kept := t.early[:0]
-	for _, e := range t.early {
-		if now.Sub(e.at) > t.cfg.EarlyHold {
-			continue
+	for w := t.oldest; w != nil; {
+		after := w.next
+		if _, ok := t.ports[w.local]; !ok {
+			t.unlink(w)
+			t.dropped = append(t.dropped, w.token)
 		}
-		d, ok := t.ports[e.local]
-		if !ok {
-			kept = append(kept, e)
-			continue
-		}
-		if r, reason := t.verify(d, e.src, e.b[:]); reason == "" {
-			out = append(out, r)
-		}
+		w = after
 	}
-	t.early = kept
-	return out
 }
 
 // Packet decides one packet's fate. It changes no endpoint; a Register
@@ -233,46 +242,27 @@ func (t *Table) Packet(now time.Time, local, src netip.AddrPort, b []byte) Decis
 	d, ok := t.ports[local]
 	if !ok {
 		t.Unknown++
-		if regproto.IsRegistration(b) && t.cfg.EarlyMax > 0 {
-			t.hold(now, local, src, b)
-			return Decision{Verdict: Held, Reason: Unknown}
-		}
 		return Decision{Reason: Unknown}
 	}
-	t.refill(d, now)
 	if regproto.IsRegistration(b) {
-		if t.cfg.RegistrationRate > 0 {
-			if d.regs < 1 {
-				d.Stats.Limited++
-				return Decision{Reason: Limited}
-			}
-			d.regs--
-		}
-		r, reason := t.verify(d, src, b)
-		if reason != "" {
-			return Decision{Reason: reason}
-		}
-		return Decision{Verdict: Register, Registration: r}
+		return t.register(now, d, src, b)
 	}
 	if !d.Endpoint.IsValid() || src != d.Endpoint {
 		// The sender's registration may still be committing; the packet
 		// goes nowhere unless one from this source commits.
-		if t.wait(now, local, src, len(b)) {
+		if t.wait(now, d, src, len(b)) {
 			return Decision{Verdict: Wait, Reason: Unregistered, Token: t.nextToken}
 		}
 		d.Stats.Unregistered++
 		return Decision{Reason: Unregistered}
 	}
-	if t.cfg.Rate > 0 {
-		if d.tokens < 1 {
-			d.Stats.Limited++
-			return Decision{Reason: Limited}
-		}
-		d.tokens--
+	if !d.data.take(now) {
+		d.Stats.Limited++
+		return Decision{Reason: Limited}
 	}
 	peer, ok := t.ports[netip.AddrPortFrom(local.Addr(), d.Peer)]
 	if !ok || !peer.Endpoint.IsValid() {
-		if ok && t.wait(now, local, src, len(b)) {
+		if ok && t.wait(now, d, src, len(b)) {
 			return Decision{Verdict: Wait, Reason: PeerAbsent, Token: t.nextToken}
 		}
 		d.Stats.PeerAbsent++
@@ -283,67 +273,123 @@ func (t *Table) Packet(now time.Time, local, src netip.AddrPort, b []byte) Decis
 	return Decision{Verdict: Forward, From: peer.Local, To: peer.Endpoint}
 }
 
-// wait keeps a data packet, if the port and the relay have room.
-func (t *Table) wait(now time.Time, local, src netip.AddrPort, n int) bool {
-	if t.cfg.WaitFor <= 0 || len(t.waiting) >= t.cfg.WaitTotal {
+// register verifies a registration under two budgets. One that fails
+// spends the relay's reject budget, which bounds the MACs junk can make the
+// relay compute; one that verifies spends its port's budget, which junk
+// cannot reach. While either is empty the port verifies nothing, so only a
+// flood past the relay-wide budget delays an owner's registration.
+func (t *Table) register(now time.Time, d *Dir, src netip.AddrPort, b []byte) Decision {
+	if !t.rejects.ready(now) || !d.regs.ready(now) {
+		d.Stats.Limited++
+		return Decision{Reason: Limited}
+	}
+	r, reason := t.verify(d, src, b)
+	if reason != "" {
+		t.rejects.spend()
+		return Decision{Reason: reason}
+	}
+	d.regs.spend()
+	return Decision{Verdict: Register, Registration: r}
+}
+
+// wait keeps a data packet, if its port and the relay have room.
+func (t *Table) wait(now time.Time, d *Dir, src netip.AddrPort, n int) bool {
+	if t.cfg.WaitFor <= 0 {
 		return false
 	}
 	t.expire(now)
-	count := 0
-	for _, w := range t.waiting {
-		if w.local == local {
-			count++
-		}
-	}
-	if count >= t.cfg.WaitMax {
+	if t.held >= t.cfg.WaitTotal || len(d.waits) >= t.cfg.WaitMax {
 		return false
 	}
 	t.nextToken++
-	t.waiting = append(t.waiting, waiting{token: t.nextToken, at: now, local: local, src: src, bytes: n})
+	w := &waiting{token: t.nextToken, at: now, local: d.Local, src: src, bytes: n, prev: t.newest}
+	if t.newest != nil {
+		t.newest.next = w
+	} else {
+		t.oldest = w
+	}
+	t.newest = w
+	t.held++
+	d.waits = append(d.waits, w)
 	return true
 }
 
-// expire drops waits that ran out, keeping their tokens for Release.
+// unlink takes w out of the relay's arrival order. Its port's list is the
+// caller's to update.
+func (t *Table) unlink(w *waiting) {
+	if w.prev != nil {
+		w.prev.next = w.next
+	} else {
+		t.oldest = w.next
+	}
+	if w.next != nil {
+		w.next.prev = w.prev
+	} else {
+		t.newest = w.prev
+	}
+	w.prev, w.next = nil, nil
+	t.held--
+}
+
+// expire ends the waits that ran out, oldest first, keeping their tokens
+// for Release.
 func (t *Table) expire(now time.Time) {
-	for len(t.waiting) > 0 && now.Sub(t.waiting[0].at) > t.cfg.WaitFor {
-		t.expired = append(t.expired, t.waiting[0].token)
-		t.waiting = t.waiting[1:]
+	for w := t.oldest; w != nil && now.Sub(w.at) > t.cfg.WaitFor; w = t.oldest {
+		t.unlink(w)
+		if d, ok := t.ports[w.local]; ok {
+			d.waits = slices.DeleteFunc(d.waits, func(x *waiting) bool { return x == w })
+		}
+		t.dropped = append(t.dropped, w.token)
 	}
 }
 
-// Release returns the waiting packets a registration has let through,
-// in the order they arrived, and those whose wait ended. A packet goes only
-// once its source is its direction's registered endpoint and the peer has
-// registered, exactly as Packet would forward it now.
+// touch marks a port whose waiting packets may now go.
+func (t *Table) touch(d *Dir) {
+	if len(d.waits) > 0 {
+		t.touched = append(t.touched, d.Local)
+	}
+}
+
+// Release returns the waiting packets a registration has let through, in
+// the order they arrived on each port, and those whose wait ended. A packet
+// goes only once its source is its direction's registered endpoint and the
+// peer has registered, exactly as Packet would forward it now.
 func (t *Table) Release(now time.Time) []Release {
 	t.expire(now)
 	var out []Release
-	for _, tok := range t.expired {
+	for _, tok := range t.dropped {
 		out = append(out, Release{Token: tok, Drop: true})
 	}
-	t.expired = t.expired[:0]
-	kept := t.waiting[:0]
-	for _, w := range t.waiting {
-		d, ok := t.ports[w.local]
+	t.dropped = t.dropped[:0]
+	for _, local := range t.touched {
+		d, ok := t.ports[local]
 		if !ok {
-			out = append(out, Release{Token: w.token, Drop: true})
 			continue
 		}
-		peer, pok := t.ports[netip.AddrPortFrom(w.local.Addr(), d.Peer)]
-		if d.Endpoint.IsValid() && w.src == d.Endpoint && pok && peer.Endpoint.IsValid() {
+		peer, pok := t.ports[netip.AddrPortFrom(local.Addr(), d.Peer)]
+		if !d.Endpoint.IsValid() || !pok || !peer.Endpoint.IsValid() {
+			continue
+		}
+		kept := d.waits[:0]
+		for _, w := range d.waits {
+			if w.src != d.Endpoint {
+				kept = append(kept, w)
+				continue
+			}
+			t.unlink(w)
 			d.Stats.Forwarded++
 			d.Stats.Bytes += uint64(w.bytes)
 			out = append(out, Release{Token: w.token, From: peer.Local, To: peer.Endpoint})
-			continue
 		}
-		kept = append(kept, w)
+		clear(d.waits[len(kept):])
+		d.waits = kept
 	}
-	t.waiting = kept
+	t.touched = t.touched[:0]
 	return out
 }
 
 // Waiting reports how many packets wait, for metrics.
-func (t *Table) Waiting() int { return len(t.waiting) }
+func (t *Table) Waiting() int { return t.held }
 
 // verify checks a registration and returns it, or why it fails.
 func (t *Table) verify(d *Dir, src netip.AddrPort, b []byte) (Registration, Reason) {
@@ -367,30 +413,13 @@ func (t *Table) Commit(r Registration) bool {
 	}
 	d.Counter, d.Endpoint = r.Counter, r.Endpoint
 	d.Stats.Registered++
+	// Packets waiting on this port, and on its peer for this port to
+	// register, may now go.
+	t.touch(d)
+	if peer, ok := t.ports[netip.AddrPortFrom(r.Local.Addr(), d.Peer)]; ok {
+		t.touch(peer)
+	}
 	return true
-}
-
-func (t *Table) hold(now time.Time, local, src netip.AddrPort, b []byte) {
-	for len(t.early) > 0 && (len(t.early) >= t.cfg.EarlyMax || now.Sub(t.early[0].at) > t.cfg.EarlyHold) {
-		t.early = t.early[1:]
-	}
-	e := early{at: now, local: local, src: src}
-	copy(e.b[:], b)
-	t.early = append(t.early, e)
-}
-
-func (t *Table) refill(d *Dir, now time.Time) {
-	if d.last.IsZero() {
-		d.tokens, d.regs, d.last = t.cfg.Burst, t.cfg.RegistrationRate, now
-		return
-	}
-	dt := now.Sub(d.last).Seconds()
-	if dt <= 0 {
-		return
-	}
-	d.last = now
-	d.tokens = min(t.cfg.Burst, d.tokens+dt*t.cfg.Rate)
-	d.regs = min(t.cfg.RegistrationRate, d.regs+dt*t.cfg.RegistrationRate)
 }
 
 // State is what survives a restart: the pushed table and what each direction
@@ -413,13 +442,13 @@ func (t *Table) Persisted() State {
 	return st
 }
 
-// Restore loads durable state after a restart, then replays registrations
-// logged since it was written.
+// Restore loads durable state into a new table after a restart, then
+// replays registrations logged since it was written.
 func (t *Table) Restore(st State, log []Registration) {
 	t.ports = map[netip.AddrPort]*Dir{}
 	t.generation = st.Generation
 	for _, p := range st.Ports {
-		t.ports[p.Local] = &Dir{RelayPort: p}
+		t.ports[p.Local] = t.newDir(p)
 	}
 	for _, r := range st.Registrations {
 		t.Commit(r)
@@ -429,11 +458,63 @@ func (t *Table) Restore(st State, log []Registration) {
 	}
 }
 
-// ProbeReply answers a probe with its own bytes, so an answer is never
-// larger than what asked for it.
-func ProbeReply(b []byte) ([]byte, bool) {
+// Probes answers the probe port under the relay-wide cap.
+type Probes struct {
+	b bucket
+}
+
+// NewProbes returns a probe answerer capped at cfg.ProbeRate.
+func NewProbes(cfg Config) *Probes {
+	return &Probes{b: bucket{rate: cfg.ProbeRate, burst: cfg.ProbeRate}}
+}
+
+// Reply answers a probe with its own bytes, so an answer is never larger
+// than what asked for it. It answers nothing that is not a probe, and
+// returns Limited for a probe the cap leaves unanswered.
+func (p *Probes) Reply(now time.Time, b []byte) ([]byte, Reason) {
 	if _, ok := regproto.ProbeNonce(b); !ok {
-		return nil, false
+		return nil, ""
 	}
-	return b, true
+	if !p.b.take(now) {
+		return nil, Limited
+	}
+	return b, ""
+}
+
+// bucket is a token bucket that starts full. A zero rate means no cap.
+type bucket struct {
+	rate, burst float64
+	tokens      float64
+	last        time.Time
+}
+
+// ready refills the bucket for the time since it last did, and reports
+// whether a token is left to spend.
+func (b *bucket) ready(now time.Time) bool {
+	if b.rate <= 0 {
+		return true
+	}
+	switch {
+	case b.last.IsZero():
+		b.tokens, b.last = b.burst, now
+	case now.After(b.last):
+		b.tokens, b.last = min(b.burst, b.tokens+now.Sub(b.last).Seconds()*b.rate), now
+	}
+	return b.tokens >= 1
+}
+
+// spend takes the token ready reported.
+func (b *bucket) spend() {
+	if b.rate > 0 {
+		b.tokens--
+	}
+}
+
+// take spends a token, if one is left.
+func (b *bucket) take(now time.Time) bool {
+	if !b.ready(now) {
+		return false
+	}
+	b.spend()
+	return true
 }

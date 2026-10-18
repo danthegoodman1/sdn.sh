@@ -42,7 +42,9 @@ func run() error {
 	flag.IntVar(&cfg.SocketBuffer, "socket-buffer", cfg.SocketBuffer, "bytes of receive and send buffer per socket; raise net.core.rmem_max to match")
 	flag.Float64Var(&cfg.Core.Rate, "rate", cfg.Core.Rate, "data packets per second per port, 0 for no cap")
 	flag.Float64Var(&cfg.Core.Burst, "burst", cfg.Core.Burst, "data packet burst per port")
-	flag.Float64Var(&cfg.Core.RegistrationRate, "registration-rate", cfg.Core.RegistrationRate, "registrations per second per port")
+	flag.Float64Var(&cfg.Core.RegistrationRate, "registration-rate", cfg.Core.RegistrationRate, "verified registrations per second per port")
+	flag.Float64Var(&cfg.Core.RejectRate, "reject-rate", cfg.Core.RejectRate, "registrations per second, across the relay, that may fail verification")
+	flag.Float64Var(&cfg.Core.ProbeRate, "probe-rate", cfg.Core.ProbeRate, "probe answers per second across the relay; agents probe every 200ms")
 	flag.Parse()
 
 	log, err := telemetry.NewLogger("relay", telemetry.LogConfig{Level: *logLevel, Format: *logFormat})

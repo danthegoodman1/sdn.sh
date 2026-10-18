@@ -34,6 +34,9 @@ type Config struct {
 	Probe netip.AddrPort
 	// Batch is how many datagrams one read or write moves.
 	Batch int
+	// MaxDatagram is the largest datagram the relay forwards. A larger one
+	// arrives truncated and drops.
+	MaxDatagram int
 	// SocketBuffer sizes each socket's receive and send buffers.
 	SocketBuffer int
 	// PollWait bounds one long poll; it exceeds the server's poll timeout.
@@ -41,16 +44,21 @@ type Config struct {
 	// SnapshotEvery is how often the state file is rewritten and the log
 	// emptied.
 	SnapshotEvery time.Duration
+	// RebindEvery is how often the relay retries ports that failed to bind.
+	RebindEvery time.Duration
 }
 
-// DefaultConfig returns production settings.
+// DefaultConfig returns production settings. MaxDatagram is WireGuard's 32
+// bytes over the largest overlay MTU the control plane allows, 9000.
 func DefaultConfig() Config {
 	return Config{
 		Core:          relaycore.DefaultConfig(),
 		Batch:         64,
+		MaxDatagram:   9032,
 		SocketBuffer:  8 << 20,
 		PollWait:      40 * time.Second,
 		SnapshotEvery: 10 * time.Second,
+		RebindEvery:   5 * time.Second,
 	}
 }
 
@@ -70,8 +78,13 @@ type Server struct {
 	smu   sync.RWMutex // guards socks
 	socks map[netip.AddrPort]*sock
 
+	// durable is the generation of the table the state file holds. Once Run
+	// starts, only the committer uses it.
+	durable uint64
+
 	regs     chan relaycore.Registration
 	snapshot chan struct{}
+	rebind   chan struct{}
 	ready    chan struct{}
 }
 
@@ -99,8 +112,10 @@ func New(cfg Config, cp ControlPlane, dir string, m *Metrics, log zerolog.Logger
 	s := &Server{
 		cfg: cfg, cp: cp, disk: disk, log: log, m: m, table: t, waiting: map[uint64][]byte{},
 		socks:    map[netip.AddrPort]*sock{},
+		durable:  st.Generation,
 		regs:     make(chan relaycore.Registration, 4096),
 		snapshot: make(chan struct{}, 1),
+		rebind:   make(chan struct{}, 1),
 		ready:    make(chan struct{}),
 	}
 	m.attach(s)
@@ -108,19 +123,21 @@ func New(cfg Config, cp ControlPlane, dir string, m *Metrics, log zerolog.Logger
 	return s, nil
 }
 
-// Ready closes once the restored table's ports are bound.
+// Ready closes once the relay has tried to bind the restored table's ports.
 func (s *Server) Ready() <-chan struct{} { return s.ready }
 
 // Run binds the table's ports, answers probes, polls the control plane and
-// commits registrations until ctx ends.
+// commits registrations until ctx ends. A port that fails to bind leaves
+// the rest serving, and the relay retries it.
 func (s *Server) Run(ctx context.Context) error {
 	defer s.disk.Close()
-	s.mu.Lock()
-	dirs := s.table.Dirs()
-	s.mu.Unlock()
-	if err := s.sync(dirs); err != nil {
-		return err
-	}
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	defer s.closeAll()
+	// Nothing binds a port or touches the disk once Run returns.
+	defer wg.Wait()
+	defer cancel()
+	failed := s.bind()
 	if s.cfg.Probe.IsValid() {
 		probe, err := s.listen(s.cfg.Probe)
 		if err != nil {
@@ -130,12 +147,12 @@ func (s *Server) Run(ctx context.Context) error {
 		defer probe.conn.Close()
 	}
 	// The restored table is the state file from here on.
-	s.requestSnapshot()
+	notify(s.snapshot)
 	close(s.ready)
 	errs := make(chan error, 1)
-	go func() { errs <- s.committer(ctx) }()
+	wg.Go(func() { errs <- s.committer(ctx) })
+	wg.Go(func() { s.binder(ctx, failed) })
 	go s.poll(ctx)
-	defer s.closeAll()
 	select {
 	case <-ctx.Done():
 		return nil
@@ -148,9 +165,7 @@ func (s *Server) Run(ctx context.Context) error {
 func (s *Server) poll(ctx context.Context) {
 	backoff := time.Second
 	for ctx.Err() == nil {
-		s.mu.Lock()
-		since := s.table.Generation()
-		s.mu.Unlock()
+		since := s.generation()
 		asked := time.Now()
 		st, err := s.cp.RelayState(ctx, since, s.cfg.PollWait)
 		if err != nil {
@@ -179,23 +194,48 @@ func (s *Server) poll(ctx context.Context) {
 			continue
 		}
 		s.mu.Lock()
-		held := s.table.Load(time.Now(), st)
-		dirs := s.table.Dirs()
+		s.table.Load(st)
 		s.mu.Unlock()
-		for _, r := range held {
-			s.enqueue(r)
-		}
-		if err := s.sync(dirs); err != nil {
-			s.log.Error().Err(err).Msg("binding the port table")
-		}
-		s.requestSnapshot()
+		notify(s.rebind)
+		notify(s.snapshot)
 		s.m.generation.Set(float64(st.Generation))
-		s.log.Info().Uint64("generation", st.Generation).Int("ports", len(st.Ports)).Int("held_registrations", len(held)).Msg("port table loaded")
+		s.log.Info().Uint64("generation", st.Generation).Int("ports", len(st.Ports)).Msg("port table loaded")
 	}
 }
 
-// sync opens a socket for every direction's port and closes the rest.
-func (s *Server) sync(dirs []*relaycore.Dir) error {
+func (s *Server) generation() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.table.Generation()
+}
+
+// binder binds again after each new table, and every RebindEvery while a
+// port has failed to bind.
+func (s *Server) binder(ctx context.Context, failed bool) {
+	retry := time.NewTicker(s.cfg.RebindEvery)
+	defer retry.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.rebind:
+		case <-retry.C:
+			if !failed {
+				continue
+			}
+		}
+		failed = s.bind()
+	}
+}
+
+// bind opens a socket for every direction's port and closes the rest. A
+// port that fails to bind, such as one on an address the host lost or one
+// another program holds, is logged and counted while the rest serve. It
+// reports whether any port failed.
+func (s *Server) bind() bool {
+	s.mu.Lock()
+	dirs := s.table.Dirs()
+	s.mu.Unlock()
 	want := map[netip.AddrPort]bool{}
 	for _, d := range dirs {
 		want[d.Local] = true
@@ -222,6 +262,7 @@ func (s *Server) sync(dirs []*relaycore.Dir) error {
 		s.socks[local] = k
 		opened = append(opened, k)
 	}
+	bound := len(s.socks)
 	s.smu.Unlock()
 	for _, k := range gone {
 		k.conn.Close()
@@ -229,8 +270,13 @@ func (s *Server) sync(dirs []*relaycore.Dir) error {
 	for _, k := range opened {
 		go s.serve(k)
 	}
-	s.m.ports.Set(float64(len(want)))
-	return errors.Join(errs...)
+	s.m.ports.Set(float64(bound))
+	s.m.unbound.Set(float64(len(errs)))
+	if len(errs) > 0 {
+		s.m.bindFailed.Add(float64(len(errs)))
+		s.log.Error().Err(errors.Join(errs...)).Int("unbound", len(errs)).Dur("retry", s.cfg.RebindEvery).Msg("ports failed to bind; serving the rest")
+	}
+	return len(errs) > 0
 }
 
 func (s *Server) listen(local netip.AddrPort) (*sock, error) {
@@ -278,13 +324,18 @@ func (s *Server) closeAll() {
 	}
 }
 
+// oversized marks a datagram longer than MaxDatagram. The kernel cuts it to
+// the buffer and says so only in the message's flags, and forwarding the
+// rest would send a fragment of it on.
+const oversized relaycore.Reason = "oversized"
+
 // serve reads one port in batches until its socket closes, and writes each
 // forward through the socket of the port the core names.
 func (s *Server) serve(k *sock) {
 	batch := max(s.cfg.Batch, 1)
 	rms := make([]ipv4.Message, batch)
 	for i := range rms {
-		rms[i].Buffers = [][]byte{make([]byte, 2048)}
+		rms[i].Buffers = [][]byte{make([]byte, s.cfg.MaxDatagram)}
 	}
 	type out struct {
 		from netip.AddrPort
@@ -301,6 +352,10 @@ func (s *Server) serve(k *sock) {
 		now := time.Now()
 		s.mu.Lock()
 		for i := range n {
+			if rms[i].Flags&unix.MSG_TRUNC != 0 {
+				decisions[i] = relaycore.Decision{Reason: oversized}
+				continue
+			}
 			src := addrPort(rms[i].Addr)
 			b := rms[i].Buffers[0][:rms[i].N]
 			decisions[i] = s.table.Packet(now, k.local, src, b)
@@ -325,8 +380,6 @@ func (s *Server) serve(k *sock) {
 				})
 			case relaycore.Register:
 				s.enqueue(d.Registration)
-			case relaycore.Held:
-				s.m.registrations.WithLabelValues("held").Inc()
 			case relaycore.Wait:
 				s.m.waits.WithLabelValues("waiting").Inc()
 			default:
@@ -386,9 +439,11 @@ func (s *Server) enqueue(r relaycore.Registration) {
 	}
 }
 
-func (s *Server) requestSnapshot() {
+// notify wakes the goroutine waiting on c, unless a wake is already
+// pending.
+func notify(c chan struct{}) {
 	select {
-	case s.snapshot <- struct{}{}:
+	case c <- struct{}{}:
 	default:
 	}
 }
@@ -444,6 +499,14 @@ func (s *Server) committer(ctx context.Context) error {
 					break drain
 				}
 			}
+			// A registration verified under a table the state file lacks
+			// would replay after a crash against the older table and
+			// commit nothing, so that table reaches disk first.
+			if s.generation() != s.durable {
+				if err := s.writeSnapshot(); err != nil {
+					return err
+				}
+			}
 			start := time.Now()
 			if err := s.disk.Append(batch); err != nil {
 				return fmt.Errorf("registration log: %w", err)
@@ -486,20 +549,25 @@ func (s *Server) writeSnapshot() error {
 	if err := s.disk.Snapshot(st); err != nil {
 		return fmt.Errorf("relay state: %w", err)
 	}
+	s.durable = st.Generation
 	return nil
 }
 
-// answerProbes echoes probes on the probe port.
+// answerProbes echoes probes on the probe port, up to the relay-wide cap.
 func (s *Server) answerProbes(k *sock) {
+	probes := relaycore.NewProbes(s.cfg.Core)
 	buf := make([]byte, 64)
 	for {
 		n, from, err := k.conn.ReadFromUDPAddrPort(buf)
 		if err != nil {
 			return
 		}
-		if b, ok := relaycore.ProbeReply(buf[:n]); ok {
-			k.conn.WriteToUDPAddrPort(b, from)
+		switch reply, reason := probes.Reply(time.Now(), buf[:n]); {
+		case reply != nil:
+			k.conn.WriteToUDPAddrPort(reply, from)
 			s.m.probes.Inc()
+		case reason == relaycore.Limited:
+			s.m.probesLimited.Inc()
 		}
 	}
 }

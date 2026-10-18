@@ -21,9 +21,12 @@ type Metrics struct {
 	registrations  *prometheus.CounterVec
 	waits          *prometheus.CounterVec
 	probes         prometheus.Counter
+	probesLimited  prometheus.Counter
 	readBatch      prometheus.Histogram
 	fsync          prometheus.Histogram
 	ports          prometheus.Gauge
+	unbound        prometheus.Gauge
+	bindFailed     prometheus.Counter
 	generation     prometheus.Gauge
 	perPort        *portCollector
 }
@@ -53,6 +56,9 @@ func NewMetrics(reg prometheus.Registerer, perPortCap int) *Metrics {
 		probes: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "sdn_relay_probes_answered_total", Help: "Probes answered.",
 		}),
+		probesLimited: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "sdn_relay_probes_limited_total", Help: "Probes left unanswered by the relay-wide cap.",
+		}),
 		readBatch: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name: "sdn_relay_read_batch_size", Help: "Datagrams per receive batch.",
 			Buckets: []float64{1, 2, 4, 8, 16, 32, 64, 128},
@@ -64,13 +70,19 @@ func NewMetrics(reg prometheus.Registerer, perPortCap int) *Metrics {
 		ports: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "sdn_relay_ports", Help: "Directions' ports bound.",
 		}),
+		unbound: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "sdn_relay_unbound_ports", Help: "Directions' ports the relay failed to bind and is retrying.",
+		}),
+		bindFailed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "sdn_relay_bind_failures_total", Help: "Attempts to bind a direction's port that failed.",
+		}),
 		generation: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "sdn_relay_generation", Help: "The port table's control-plane generation.",
 		}),
 		perPort: &portCollector{cap: perPortCap},
 	}
 	reg.MustRegister(m.forwarded, m.forwardedBytes, m.writeFailed, m.dropped, m.registrations, m.waits, m.probes,
-		m.readBatch, m.fsync, m.ports, m.generation, m.perPort, rcvbufErrors{})
+		m.probesLimited, m.readBatch, m.fsync, m.ports, m.unbound, m.bindFailed, m.generation, m.perPort, rcvbufErrors{})
 	return m
 }
 

@@ -481,6 +481,7 @@ Scope:
 - Control-plane write throughput: every write takes one revision row today.
 - The cost of deleting a configured device, which sets detach latency.
 - Per-edge relay subsets: each edge holds ports on its own few relays of a larger pool, chosen by the same hash, rather than on every relay a network names.
+- Peering on demand: an edge's peers, relay ports and registrations built on its first packet rather than at attach, so allowed-but-idle pairs cost nothing.
 
 Out of scope:
 - Anycast relay addressing.
@@ -508,6 +509,7 @@ Status ledger:
 | In Progress | Work | 9F: Detach cost | `wg_destruct` drops RTNL before it removes the device's peers (`drivers/net/wireguard/device.c`), so each peer's `netif_napi_del` waits an unexpedited grace period (`peer.c`): a device holding 30 peers took 274ms to delete on an idle c6i.xlarge against 57ms bare. A detach now releases before teardown, so convergence no longer waits on it (SPEC.md "Peer removal"). Needs: a decision on flushing peers under RTNL before the delete, which would trade each unexpedited wait for an expedited one that interrupts every busy CPU. |
 | Incomplete | Work | 9G: A relay's table is recomputed whole on every change | `cp.RelayState` lists every edge of the relay for each poll it answers, so a relay serving many edges learns of a new one later than the agents do. Acknowledgments make the race cost a wait instead of a 5-second retry, but the wait grows with the relay's table. Needs: table deltas, measured against edges per relay on EC2. |
 | Incomplete | Work | 9H: Per-edge relay subsets from a larger pool | Today every edge holds two ports on every relay in its network's set, so ports, sockets and each relay's table grow with the set. With a pool of N and k relays per edge, chosen by the hash that 3I chooses the active one with, each relay carries about k/N of the edges, and a dead relay's edges fall back to their own next relays. The API already carries relay paths per peer, so agents need no change; the control plane allocates ports per edge subset, builds each relay's table from its edges, and moves an edge when the pool changes (allocate, push, repoint, free after convergence), which the hash keeps to about k/N of the edges. Needs: 3I first, and a network that outgrows a handful of relays or runs short of ports. |
+| Incomplete | Work | 9I: Peering on demand | Every policy edge installs a peer on both devices, two ports on every relay of the set and a registration per direction every 25s at attach, whether or not it carries traffic, so a dense allow costs its full edge count. On demand needs a sender-side trigger that holds the first packet, the receiver's reverse peer installed before the initiation arrives (an initiation from an unknown key is dropped, and WireGuard waits 5s), ports and registrations allocated on first use, and release after idle; the first connection to a new pair pays a control-plane round trip. Needs: a design in SPEC.md, then a measurement of first-connection latency against the eager path. |
 | Incomplete | Risk | Roaming leaves some edges off their heaviest relay | After a failover, crossed packets or a restarted agent's adoption can leave an edge split across two relays or agreed on one other than its heaviest, and the agent leaves it, since roaming owns the endpoint: 22 of 10,574 relay edges over 2,000 simulator seeds. It costs balance, never reachability. Needs: EC2 figures for the drift a real failover leaves, then a decision on re-asserting an edge's relay at resync. |
 | Incomplete | Risk | A control-plane attach stalled 4.8 seconds once | One e2e run on Postgres committed an attach 4.8s after the agent asked, with nothing else in its log; six reruns and two full suites did not repeat it. Needs: the store's transaction and lock timings when it recurs. |
 | Incomplete | Gate | Every lever measured against the path it replaces | The EC2 fleet and plans exist (Phase 8). Needs: the levers. |
@@ -540,3 +542,51 @@ Status ledger:
 | Incomplete | Risk | Softirq CPU attribution on a loaded host | Needs: a loaded multi-tenant measurement. |
 | Incomplete | Risk | RTNL contention at higher attach rates | Device creates ran 1.9–3.2× slower under saturation on c6i.xlarge and 1.0× on the desktop. Needs `perf lock contention -ab` looking for `rtnl_mutex`. |
 | Incomplete | Risk | Registration counters under clock irregularities | Missing: the simulator property and a decision. |
+
+## Phase 11: Wildcard and deny rules
+
+Goal:
+A rule can name every service with `*` and can deny as well as allow, so a service opens itself to the rest of its network in one rule and exceptions carve flows back out, with the data plane enforcing exactly the flows the rules leave.
+
+Scope:
+- Rules carry an action, `allow` or `deny`, and either side may be `*`. `internet` stays a destination only.
+- `*` never matches the service on the rule's other side. Traffic within a service needs a rule naming that service on both sides, because a service connected to itself costs a peer between every two of its members and opens lateral movement between them.
+- A deny removes the flows it names from every allow, whatever the rules' order. Resolution is exact over TCP ports, UDP ports and every other IP protocol: `allow a -> b any` with `deny a -> b tcp/22` leaves TCP but port 22, all UDP, and every other protocol.
+- The control plane resolves rules into concrete grants for each directed pair of services, and for each service's egress, when it compiles a network. A wildcard applies to services created after it. Peers, edges, slot maps, source sets, translations and egress all follow from the grants, so agents take the same compiled input, with one new protocol class, every protocol but TCP and UDP, which nftables matches as `meta l4proto != { tcp, udp }`.
+- A pair whose grants are empty in both directions gets no peer and no edge. A pair allowed in one direction keeps its peers, and the denied direction loses only the receiver's accept.
+- `GET /v1/networks/{net}/policy` and `wirenetctl policy NET` list the resolved grants.
+- The API, CLI, memory and Postgres stores carry the action; Postgres takes a migration.
+- A lab plan measures how long a deny takes to close every client under a wildcard, and how long removing it takes to reopen them, locally and on EC2.
+
+Out of scope:
+- Labels and selectors over services. A selector would follow the same self rule as `*`.
+- An edge budget that refuses a rule whose resolved pairs exceed what the network's relays hold.
+- An explain command naming the rules behind each grant.
+
+Completion gate:
+Wildcard and deny rules resolve exactly as SPEC.md states, the simulator's oracle evaluates them independently of the compiler and a 10,000-seed sweep passes, every planted bug is caught, the end-to-end suite asserts in each family that a denied flow and a wildcard's own service fail to connect, the policy plan runs on EC2 with its figures in SPEC.md, a high-effort code review's findings are fixed or recorded, and CI passes on the pull request.
+
+Testing plan:
+- Unit: resolution of wildcards on either side and both, self exclusion and explicit self, deny overriding allow in full and in part, `any` less a TCP or UDP range, egress allows and denies, order independence, and agreement with a brute-force evaluator over random rule sets.
+- nftables: the model and the Linux writer agree on the other-protocols class; a root test passes ICMP and refuses TCP through it in each family.
+- Control plane and stores: validation, deduplication by action, the migration, and edges reconciled for a wildcard rule's scope.
+- Simulator: the orchestrator draws wildcard and deny rules, and the oracle derives peers, slot maps, source sets, egress and the flows it probes from its own evaluator, probing denied ports as well as allowed ones.
+- End to end: `* -> db` with `deny sandbox -> db`, a partial deny, and `sandbox -> *` leaving two sandboxes unable to reach each other, each asserted in IPv6 and IPv4.
+- Lab: `wirenet-lab --plan policy` locally and on EC2.
+
+Status ledger:
+
+| Status | Type | Item | Evidence / Gap |
+| --- | --- | --- | --- |
+| Incomplete | Work | 11A: Rule action and wildcards in the API, CLI and stores | Missing: implementation, store tests on memory and Postgres, the migration. |
+| Incomplete | Work | 11B: Resolution into per-pair grants | Missing: implementation and the brute-force agreement test. |
+| Incomplete | Work | 11C: The other-protocols class in the nftables model, the Linux writer and egress | Missing: implementation and the root test in each family. |
+| Incomplete | Work | 11D: Edges and adjacency from grants, scoped for wildcard rules | Missing: implementation and tests. |
+| Incomplete | Work | 11E: The resolved-policy endpoint and `wirenetctl policy` | Missing: implementation and a test. |
+| Incomplete | Test | 11F: Simulator draws wildcard and deny rules, with an independent oracle | Missing: orchestrator, oracle and a 10,000-seed sweep. |
+| Incomplete | Test | 11G: End-to-end cannot-reach assertions for denies and self exclusion, in each family | Missing: the tests. |
+| Incomplete | Test | 11H: Policy-change convergence, locally and on EC2 | Missing: the plan and both runs. |
+| Incomplete | Test | Planted bugs for resolution, self exclusion, deny order and the protocol class | Missing: mutants and a full run. |
+| Incomplete | Doc | SPEC.md and README.md describe wildcard and deny rules | Missing: the text. |
+| Incomplete | Gate | High-effort code review, findings fixed or recorded | Missing: the review. |
+| Incomplete | Gate | CI passes on the pull request | Missing: the pull request. |

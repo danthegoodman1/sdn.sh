@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/vishvananda/netns"
+	"golang.org/x/net/dns/dnsmessage"
 
 	"sdn.sh/internal/agent/localapi"
 	"sdn.sh/internal/api"
@@ -68,7 +69,12 @@ type Lab struct {
 	nextIP byte
 	mu     sync.Mutex
 	procs  []*Proc
+	units  []unitLog
+	lock   *os.File
 }
+
+// lockPath is the lock every lab holds while it exists.
+const lockPath = "/run/lock/sdn-lab.lock"
 
 // Underlay addressing.
 var (
@@ -125,7 +131,17 @@ func New(opts Options) (*Lab, error) {
 	if opts.Store == "" {
 		opts.Store = "memory"
 	}
-	l := &Lab{opts: opts, net: opts.Name + "net", nextIP: 10, Token: adminToken}
+	// Every lab uses the same underlay addresses, so labs on one machine
+	// take turns.
+	lock, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		lock.Close()
+		return nil, fmt.Errorf("lab lock: %w", err)
+	}
+	l := &Lab{opts: opts, net: opts.Name + "net", nextIP: 10, Token: adminToken, lock: lock}
 	l.Purge()
 	if err := l.underlay(); err != nil {
 		l.Close()
@@ -306,7 +322,7 @@ func waitHTTP(url string, d time.Duration, p *Proc) error {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return fmt.Errorf("%s did not answer %s", p.Name, url)
+	return fmt.Errorf("nothing answered %s", url)
 }
 
 // node is a namespace on the underlay.
@@ -407,7 +423,9 @@ type Host struct {
 	Prefix    string
 	Telemetry string
 	Agent     *Proc
-	Local     *localapi.Client
+	// Unit names the agent's systemd unit when systemd runs it.
+	Unit  string
+	Local *localapi.Client
 	// NATNS and Public are the NAT in front of a host behind one, and the
 	// address it translates to.
 	NATNS   string
@@ -452,6 +470,9 @@ func (h *Host) Start() error {
 	args := append([]string{h.lab.bin("sdn-agent"), "--cp", h.lab.CPURL, "--credentials", h.creds,
 		"--journal", h.journal, "--socket", h.Socket, "--telemetry", netip.AddrPortFrom(h.Addr, 9091).String(),
 		"--prefix", h.Prefix, "--log-format", "json", "--log-level", "debug"}, h.args...)
+	if h.Unit != "" {
+		return h.startUnit(args)
+	}
 	p, err := h.lab.spawn(h.Name, h.NS, args...)
 	if err != nil {
 		return err
@@ -527,9 +548,50 @@ func (h *Host) FlushNAT() error {
 
 // Restart kills the agent, as a crash does, and starts it again.
 func (h *Host) Restart() error {
+	if h.Unit != "" {
+		// systemd restarts the unit, handing it the descriptors it stored.
+		if err := sh("systemctl", "kill", "--signal=KILL", "--kill-whom=main", h.Unit); err != nil {
+			return err
+		}
+		time.Sleep(100 * time.Millisecond)
+		return waitHTTP(h.Telemetry+"/readyz", 15*time.Second, nil)
+	}
 	h.Agent.Kill()
 	return h.Start()
 }
+
+// AddSystemdHost registers a host whose agent runs as a transient systemd
+// service with a descriptor store and Restart=always, as in production.
+func (l *Lab) AddSystemdHost(ctx context.Context, name string, args ...string) (*Host, error) {
+	n, err := l.addNode(name)
+	if err != nil {
+		return nil, err
+	}
+	h := &Host{node: n, Name: name, Prefix: l.opts.Name + name + "w", lab: l, args: args, Unit: l.opts.Name + "-" + name + "-agent"}
+	return h, l.register(ctx, h)
+}
+
+func (h *Host) startUnit(args []string) error {
+	logPath := filepath.Join(h.lab.opts.Dir, h.Name+".log")
+	// nsenter rather than NetworkNamespacePath=, which would give the
+	// agent a mount namespace of its own and hide the namespaces it
+	// bind-mounts; nsenter execs, so the agent stays the main process.
+	run := []string{"systemd-run", "--unit=" + h.Unit, "--collect",
+		"-p", "Restart=always", "-p", "RestartSec=300ms",
+		"-p", "NotifyAccess=main", "-p", "FileDescriptorStoreMax=4096", "-p", "FileDescriptorStorePreserve=yes",
+		"-p", "StandardOutput=append:" + logPath, "-p", "StandardError=append:" + logPath,
+		"--", "nsenter", "--net=/run/netns/" + h.NS, "--"}
+	if err := sh(append(run, args...)...); err != nil {
+		return err
+	}
+	h.lab.mu.Lock()
+	h.lab.units = append(h.lab.units, unitLog{unit: h.Unit, log: logPath})
+	h.lab.mu.Unlock()
+	h.lab.logf("started unit %s", h.Unit)
+	return waitHTTP(h.Telemetry+"/readyz", 15*time.Second, nil)
+}
+
+type unitLog struct{ unit, log string }
 
 // Detach asks the host's agent to tear an interface down.
 func (h *Host) Detach(ctx context.Context, id model.InterfaceID) (api.LocalInterface, error) {
@@ -589,11 +651,19 @@ func (l *Lab) Close() {
 		procs[i].Stop()
 	}
 	l.Purge()
+	l.lock.Close()
 }
 
 // Purge removes every namespace and link named for the lab, including
 // those a crashed run left behind, and kills processes still inside them.
 func (l *Lab) Purge() {
+	units, _ := exec.Command("systemctl", "list-units", "--all", "--plain", "--no-legend", l.opts.Name+"-*").Output()
+	for _, line := range strings.Split(string(units), "\n") {
+		if f := strings.Fields(line); len(f) > 0 {
+			exec.Command("systemctl", "stop", f[0]).Run()
+			exec.Command("systemctl", "reset-failed", f[0]).Run()
+		}
+	}
 	names, _ := filepath.Glob("/run/netns/" + l.opts.Name + "*")
 	for _, path := range names {
 		ns := filepath.Base(path)
@@ -715,5 +785,59 @@ func (l *Lab) Logs(n int) string {
 	for _, p := range l.procs {
 		fmt.Fprintf(&b, "==== %s\n%s\n", p.Name, p.Tail(n))
 	}
+	for _, u := range l.units {
+		p := Proc{Name: u.unit, Log: u.log}
+		fmt.Fprintf(&b, "==== %s\n%s\n", u.unit, p.Tail(n))
+	}
 	return b.String()
+}
+
+// Lookup asks a namespace's stub resolver one question and returns the
+// answer's addresses and response code.
+func Lookup(ns, name string, typ dnsmessage.Type) ([]netip.Addr, dnsmessage.RCode, error) {
+	return LookupWithin(ns, name, typ, 2*time.Second)
+}
+
+// LookupWithin is Lookup, waiting up to d for the answer.
+func LookupWithin(ns, name string, typ dnsmessage.Type, d time.Duration) ([]netip.Addr, dnsmessage.RCode, error) {
+	q := dnsmessage.Message{
+		Header:    dnsmessage.Header{ID: 1, RecursionDesired: true},
+		Questions: []dnsmessage.Question{{Name: dnsmessage.MustNewName(name), Type: typ, Class: dnsmessage.ClassINET}},
+	}
+	b, err := q.Pack()
+	if err != nil {
+		return nil, 0, err
+	}
+	var c *net.UDPConn
+	if err := InNS(ns, func() error {
+		var err error
+		c, err = net.DialUDP("udp4", nil, net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.53:53")))
+		return err
+	}); err != nil {
+		return nil, 0, err
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(d))
+	if _, err := c.Write(b); err != nil {
+		return nil, 0, err
+	}
+	buf := make([]byte, 1500)
+	n, err := c.Read(buf)
+	if err != nil {
+		return nil, 0, err
+	}
+	var m dnsmessage.Message
+	if err := m.Unpack(buf[:n]); err != nil {
+		return nil, 0, err
+	}
+	var out []netip.Addr
+	for _, a := range m.Answers {
+		switch r := a.Body.(type) {
+		case *dnsmessage.AResource:
+			out = append(out, netip.AddrFrom4(r.A))
+		case *dnsmessage.AAAAResource:
+			out = append(out, netip.AddrFrom16(r.AAAA))
+		}
+	}
+	return out, m.RCode, nil
 }

@@ -456,7 +456,7 @@ func (c *cpNode) handleRelayPoll(relay model.RelayID, since uint64, reply func(a
 	}) != nil {
 		return
 	}
-	if rev > since || since == 0 {
+	if rev > since {
 		reply(st)
 		return
 	}

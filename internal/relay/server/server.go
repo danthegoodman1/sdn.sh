@@ -149,6 +149,7 @@ func (s *Server) poll(ctx context.Context) {
 		s.mu.Lock()
 		since := s.table.Generation()
 		s.mu.Unlock()
+		asked := time.Now()
 		st, err := s.cp.RelayState(ctx, since, s.cfg.PollWait)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -164,7 +165,15 @@ func (s *Server) poll(ctx context.Context) {
 			continue
 		}
 		backoff = time.Second
-		if st.Generation == since && since != 0 {
+		if st.Generation <= since {
+			// Nothing newer. A control plane answering that at once,
+			// rather than at its poll timeout, gets a pause, not a spin.
+			if time.Since(asked) < time.Second {
+				select {
+				case <-ctx.Done():
+				case <-time.After(time.Second):
+				}
+			}
 			continue
 		}
 		s.mu.Lock()

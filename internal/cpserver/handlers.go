@@ -372,7 +372,7 @@ func (s *Server) relayPoll(r *http.Request, p principal) (any, error) {
 			if err != nil {
 				return err
 			}
-			fresh = rl.Revision > since || since == 0
+			fresh = rl.Revision > since
 			st, err = cp.RelayState(tx, p.relay)
 			return err
 		})

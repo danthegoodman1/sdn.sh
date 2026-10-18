@@ -487,9 +487,15 @@ func (p *Plane) CreateRelay(tx store.Tx, now time.Time, req api.CreateRelay) (st
 	if err != nil {
 		return store.Relay{}, "", err
 	}
+	// A revision from birth, so a relay's first poll, from generation zero,
+	// always finds its table newer and every later one parks.
+	rev, err := tx.Bump()
+	if err != nil {
+		return store.Relay{}, "", err
+	}
 	r := store.Relay{
 		ID: model.RelayID(id), Name: req.Name, TokenHash: hash, Addresses: req.Addresses,
-		PortLo: req.PortLo, PortHi: req.PortHi, ProbePort: req.ProbePort, Created: now,
+		PortLo: req.PortLo, PortHi: req.PortHi, ProbePort: req.ProbePort, Revision: rev, Created: now,
 	}
 	if err := tx.PutRelay(r); err != nil {
 		return store.Relay{}, "", conflict(err, "relay "+req.Name)

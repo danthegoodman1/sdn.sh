@@ -53,6 +53,8 @@ func run() error {
 	flag.StringVar(&cfg.Core.Prefix, "prefix", cfg.Core.Prefix, "prefix of every namespace the agent creates")
 	flag.DurationVar(&cfg.Core.DrainGrace, "drain-grace", cfg.Core.DrainGrace, "how long a released peer stays installed")
 	flag.DurationVar(&cfg.RenewEvery, "renew-every", cfg.RenewEvery, "lease renewal period")
+	flag.DurationVar(&cfg.Core.RegisterEvery, "register-every", cfg.Core.RegisterEvery, "registration period, which must undercut the shortest NAT idle timeout on the path")
+	flag.DurationVar(&cfg.Core.Keepalive, "keepalive", cfg.Core.Keepalive, "persistent-keepalive interval on paths that carry one")
 	flag.IntVar(&cfg.Workers, "workers", cfg.Workers, "namespaces configured at once")
 	flag.Parse()
 	cfg.Core.PortLo, cfg.Core.PortHi = uint16(*portLo), uint16(*portHi)

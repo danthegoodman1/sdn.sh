@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -381,6 +382,9 @@ func (l *Lab) AddRelay(ctx context.Context, name string) (*Relay, error) {
 	return r, r.Start()
 }
 
+// Kill kills the relay, as a crash does.
+func (r *Relay) Kill() { r.Proc.Kill() }
+
 // Start starts the relay's process.
 func (r *Relay) Start() error {
 	r.Telemetry = "http://" + netip.AddrPortFrom(r.Addr, 9092).String()
@@ -404,10 +408,14 @@ type Host struct {
 	Telemetry string
 	Agent     *Proc
 	Local     *localapi.Client
-	creds     string
-	journal   string
-	lab       *Lab
-	args      []string
+	// NATNS and Public are the NAT in front of a host behind one, and the
+	// address it translates to.
+	NATNS   string
+	Public  netip.Addr
+	creds   string
+	journal string
+	lab     *Lab
+	args    []string
 }
 
 // AddHost registers a host and starts its agent. args are extra sdn-agent
@@ -418,20 +426,24 @@ func (l *Lab) AddHost(ctx context.Context, name string, args ...string) (*Host, 
 		return nil, err
 	}
 	h := &Host{node: n, Name: name, Prefix: l.opts.Name + name + "w", lab: l, args: args}
-	creds, err := l.Admin.CreateHost(ctx, api.CreateHost{Name: name})
+	return h, l.register(ctx, h)
+}
+
+func (l *Lab) register(ctx context.Context, h *Host) error {
+	creds, err := l.Admin.CreateHost(ctx, api.CreateHost{Name: h.Name})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	h.ID = model.HostID(creds.ID)
-	h.creds = filepath.Join(l.opts.Dir, name+".json")
-	h.journal = filepath.Join(l.opts.Dir, name+"-journal")
-	h.Socket = filepath.Join(l.opts.Dir, name+".sock")
+	h.creds = filepath.Join(l.opts.Dir, h.Name+".json")
+	h.journal = filepath.Join(l.opts.Dir, h.Name+"-journal")
+	h.Socket = filepath.Join(l.opts.Dir, h.Name+".sock")
 	if err := writeJSON(h.creds, creds); err != nil {
-		return nil, err
+		return err
 	}
 	h.Local = localapi.NewClient(h.Socket)
 	l.hosts = append(l.hosts, h)
-	return h, h.Start()
+	return h.Start()
 }
 
 // Start starts the host's agent.
@@ -446,6 +458,113 @@ func (h *Host) Start() error {
 	}
 	h.Agent = p
 	return waitHTTP(h.Telemetry+"/readyz", 15*time.Second, p)
+}
+
+// NAT shapes the address translation in front of a host.
+type NAT struct {
+	// UDPTimeout is how long a UDP mapping outlives its last packet, in
+	// both conntrack states.
+	UDPTimeout time.Duration
+	// Random gives every new mapping a random public port, as a NAT that
+	// reassigns ports does.
+	Random bool
+}
+
+// AddHostBehindNAT registers a host whose underlay traffic leaves through
+// a NAT namespace, and starts its agent.
+func (l *Lab) AddHostBehindNAT(ctx context.Context, name string, nat NAT, args ...string) (*Host, error) {
+	gw, err := l.addNode(name + "n")
+	if err != nil {
+		return nil, err
+	}
+	l.mu.Lock()
+	l.nextIP++
+	k := l.nextIP
+	l.mu.Unlock()
+	inner := netip.PrefixFrom(netip.AddrFrom4([4]byte{192, 168, k, 0}), 24)
+	gwIn := netip.AddrFrom4([4]byte{192, 168, k, 1})
+	host := netip.AddrFrom4([4]byte{192, 168, k, 2})
+	ns := l.opts.Name + name
+	masq := "masquerade"
+	if nat.Random {
+		masq = "masquerade random"
+	}
+	timeout := strconv.Itoa(max(int(nat.UDPTimeout/time.Second), 1))
+	steps := [][]string{
+		{"ip", "netns", "add", ns},
+		{"ip", "-n", ns, "link", "set", "lo", "up"},
+		{"ip", "-n", gw.NS, "link", "add", "in0", "type", "veth", "peer", "name", "eth0", "netns", ns},
+		{"ip", "-n", gw.NS, "addr", "add", gwIn.String() + "/24", "dev", "in0"},
+		{"ip", "-n", gw.NS, "link", "set", "in0", "up"},
+		{"ip", "-n", ns, "addr", "add", host.String() + "/24", "dev", "eth0"},
+		{"ip", "-n", ns, "link", "set", "eth0", "up"},
+		{"ip", "-n", ns, "route", "add", "default", "via", gwIn.String()},
+		{"ip", "netns", "exec", gw.NS, "sysctl", "-qw", "net.ipv4.ip_forward=1"},
+		{"ip", "netns", "exec", gw.NS, "nft", "add table ip nat; add chain ip nat post { type nat hook postrouting priority srcnat; }; " +
+			"add rule ip nat post ip saddr " + inner.String() + " oif eth0 " + masq},
+		// Conntrack's UDP clocks are per namespace once a rule loads it.
+		{"ip", "netns", "exec", gw.NS, "sysctl", "-qw", "net.netfilter.nf_conntrack_udp_timeout=" + timeout},
+		{"ip", "netns", "exec", gw.NS, "sysctl", "-qw", "net.netfilter.nf_conntrack_udp_timeout_stream=" + timeout},
+		// The caller reaches the agent's telemetry through the underlay;
+		// connections it opens are never translated.
+		{"ip", "-n", l.net, "route", "add", inner.String(), "via", gw.Addr.String()},
+		{"ip", "route", "add", inner.String(), "via", cpUnderlay.String(), "dev", l.opts.Name + "cp"},
+	}
+	for _, st := range steps {
+		if err := sh(st...); err != nil {
+			return nil, err
+		}
+	}
+	h := &Host{node: node{NS: ns, Addr: host}, Name: name, Prefix: l.opts.Name + name + "w", lab: l, args: args, NATNS: gw.NS, Public: gw.Addr}
+	return h, l.register(ctx, h)
+}
+
+// FlushNAT drops every mapping the host's NAT holds, as a NAT that reboots
+// or rebinds does.
+func (h *Host) FlushNAT() error {
+	return nsh(h.NATNS, "conntrack", "-F")
+}
+
+// Restart kills the agent, as a crash does, and starts it again.
+func (h *Host) Restart() error {
+	h.Agent.Kill()
+	return h.Start()
+}
+
+// Detach asks the host's agent to tear an interface down.
+func (h *Host) Detach(ctx context.Context, id model.InterfaceID) (api.LocalInterface, error) {
+	return h.Local.Detach(ctx, id)
+}
+
+// Namespaces lists the workload namespaces the host's agent has named.
+func (h *Host) Namespaces() []string {
+	names, _ := filepath.Glob("/run/netns/" + h.Prefix + "*")
+	for i, n := range names {
+		names[i] = filepath.Base(n)
+	}
+	return names
+}
+
+// DevicePorts lists the UDP ports kernel sockets hold in the host's
+// namespace: every WireGuard device's, and nothing a process opened.
+func (h *Host) DevicePorts() ([]uint16, error) {
+	out, err := exec.Command("ip", "netns", "exec", h.NS, "ss", "-Hulnp").Output()
+	if err != nil {
+		return nil, err
+	}
+	var ports []uint16
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 4 || strings.Contains(line, "users:") {
+			continue
+		}
+		if i := strings.LastIndex(f[3], ":"); i >= 0 {
+			if p, err := strconv.ParseUint(f[3][i+1:], 10, 16); err == nil {
+				ports = append(ports, uint16(p))
+			}
+		}
+	}
+	return ports, nil
 }
 
 // Attach asks the host's agent for an interface.

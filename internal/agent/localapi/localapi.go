@@ -15,6 +15,7 @@ import (
 	"os"
 	"time"
 
+	agentcore "sdn.sh/internal/agent/core"
 	"sdn.sh/internal/agent/daemon"
 	"sdn.sh/internal/api"
 	"sdn.sh/internal/model"
@@ -72,7 +73,12 @@ func respond(w http.ResponseWriter, out any, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		var ae *api.Error
-		if !errors.As(err, &ae) {
+		switch {
+		case errors.As(err, &ae):
+		case errors.Is(err, agentcore.ErrNoInterface):
+			// A caller retrying a detach takes this as done.
+			ae = &api.Error{Code: api.CodeNotFound, Message: err.Error()}
+		default:
 			ae = &api.Error{Code: "failed", Message: err.Error()}
 		}
 		w.WriteHeader(http.StatusBadRequest)

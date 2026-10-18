@@ -378,28 +378,58 @@ func (d *Daemon) pollLoop(ctx context.Context) {
 	}
 }
 
-// renewLoop renews live leases.
+// renewLoop renews live leases at a third of the soonest lease's remaining
+// term, and at least every RenewEvery, so a control plane with short leases
+// needs no agent setting to match.
 func (d *Daemon) renewLoop(ctx context.Context) {
-	t := time.NewTicker(d.cfg.RenewEvery)
-	defer t.Stop()
+	wait := time.Duration(0)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-time.After(wait):
 		}
-		ids, err := query(d, ctx, func() []model.InterfaceID { return d.core.Live() })
-		if err != nil || len(ids) == 0 {
+		wait = d.cfg.RenewEvery
+		type live struct {
+			ids      []model.InterfaceID
+			earliest time.Time
+		}
+		l, err := query(d, ctx, func() live {
+			var out live
+			out.ids = d.core.Live()
+			for _, id := range out.ids {
+				if _, i, ok := d.core.Desired().Interface(id); ok && !i.Expires.IsZero() &&
+					(out.earliest.IsZero() || i.Expires.Before(out.earliest)) {
+					out.earliest = i.Expires
+				}
+			}
+			return out
+		})
+		if err != nil {
+			return
+		}
+		if len(l.ids) == 0 {
+			wait = min(wait, time.Second)
 			continue
 		}
-		resp, err := d.cp.Renew(ctx, ids)
+		resp, err := d.cp.Renew(ctx, l.ids)
 		d.m.cpCalls.WithLabelValues("renew", callResult(err)).Inc()
 		if err != nil {
-			d.log.Warn().Err(err).Int("interfaces", len(ids)).Msg("lease renewal failed")
+			d.log.Warn().Err(err).Int("interfaces", len(l.ids)).Msg("lease renewal failed")
+			wait = time.Second
 			continue
 		}
-		if lost := len(ids) - len(resp.Expires); lost > 0 {
+		if lost := len(l.ids) - len(resp.Expires); lost > 0 {
 			d.log.Warn().Int("interfaces", lost).Msg("leases no longer live at the control plane")
+		}
+		earliest := l.earliest
+		for _, exp := range resp.Expires {
+			if earliest.IsZero() || exp.Before(earliest) {
+				earliest = exp
+			}
+		}
+		if !earliest.IsZero() {
+			wait = min(wait, max(time.Until(earliest)/3, 100*time.Millisecond))
 		}
 	}
 }

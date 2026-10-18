@@ -6,9 +6,11 @@ const (
 	agentLife   = "internal/agent/core/lifecycle.go"
 	agentPlan   = "internal/agent/core/plan.go"
 	agentTarget = "internal/agent/core/target.go"
+	agentRelays = "internal/agent/core/relays.go"
 	agentDaemon = "internal/agent/daemon/daemon.go"
 	agentResolv = "internal/agent/resolver/resolver.go"
 	agentMain   = "cmd/sdn-agent/main.go"
+	agentUnder  = "internal/agent/underlay/underlay.go"
 	linuxEgress = "internal/kernel/linux/egress.go"
 	linuxNetns  = "internal/kernel/linux/netns.go"
 	nftTx       = "internal/nft/tx.go"
@@ -517,5 +519,53 @@ var Mutants = []Mutant{
 		Breaks: "the agent's interface, namespace and peer gauges follow the core's census",
 		Edits:  []Edit{{agentDaemon, "\t\td.m.census(c)\n", "\t\t_ = c\n"}},
 		Catch:  []string{"agent-daemon"},
+	},
+	{
+		ID:     "relay-sends-no-ack",
+		Breaks: "a relay acknowledges each registration it commits, from the direction's port, so an agent knows the port is bound",
+		Edits:  []Edit{{relayServer, "\t\t\ts.ack(acked)\n", ""}},
+		Catch:  []string{"relay-server"},
+	},
+	{
+		ID:     "new-relay-peer-slotted-before-ack",
+		Breaks: "no slot names a relay peer new to a namespace until the active relay acknowledges it, or AckWait passes",
+		Edits:  []Edit{{agentTarget, "tp.awaiting = c.awaitsAck(now, st, port, p, tp)", "tp.awaiting = false && c.awaitsAck(now, st, port, p, tp)"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "handover-ignores-waiting-slots",
+		Breaks: "a namespace is handed over only once the slots it holds back are in, or AckWait passes",
+		Edits:  []Edit{{agentPlan, "if len(st.awaiting) > 0 && now.Before(i.handoverBy) {", "if false {"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "ack-releases-nothing",
+		Breaks: "a relay's acknowledgment releases the wait of the peer it names",
+		Edits:  []Edit{{agentRelays, "\t\t\tw.acked = true\n", ""}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "failover-holds-slots-back",
+		Breaks: "a peer installed before never waits for an acknowledgment, so a failover holds back no slot",
+		Edits:  []Edit{{agentTarget, "\t\tif _, installed := st.peers[p.PublicKey]; installed {\n\t\t\treturn false\n\t\t}\n", ""}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "ack-filter-reads-the-wrong-word",
+		Breaks: "the agent's raw IPv4 socket passes relay acknowledgments, judged past the IP header's own length",
+		Edits:  []Edit{{agentUnder, "{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_IND, K: 8},", "{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_IND, K: 12},"}},
+		Catch:  []string{"underlay"},
+	},
+	{
+		ID:     "registration-never-resent",
+		Breaks: "a fresh direction's registration is sent again on a tripling schedule, since one that beats the relay's bind is lost",
+		Edits:  []Edit{{agentRelays, "r.left, r.gap = c.cfg.RegisterRetries, c.cfg.RegisterRetry", "r.left, r.gap = 0, c.cfg.RegisterRetry"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "relay-drops-what-races-the-peer",
+		Breaks: "a packet that reaches a bound port before the peer direction registers waits for that registration instead of dropping",
+		Edits:  []Edit{{relayCore, "if ok && t.wait(now, d, src, len(b)) {", "if false && t.wait(now, d, src, len(b)) {"}},
+		Catch:  []string{"relay-core"},
 	},
 }

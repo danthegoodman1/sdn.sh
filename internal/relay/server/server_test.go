@@ -101,8 +101,19 @@ func send(t *testing.T, c *net.UDPConn, to netip.AddrPort, b []byte) {
 	}
 }
 
-// recv returns what arrives within d, or nil.
+// recv returns what arrives within d, or nil, passing over the
+// acknowledgments committed registrations earn.
 func recv(c *net.UDPConn, d time.Duration) ([]byte, netip.AddrPort) {
+	for {
+		b, from := recvAny(c, d)
+		if _, ack := regproto.AckCounter(b); !ack {
+			return b, from
+		}
+	}
+}
+
+// recvAny returns the next datagram within d, or nil.
+func recvAny(c *net.UDPConn, d time.Duration) ([]byte, netip.AddrPort) {
 	c.SetReadDeadline(time.Now().Add(d))
 	b := make([]byte, 65536)
 	n, from, err := c.ReadFromUDPAddrPort(b)
@@ -511,5 +522,29 @@ func TestATornLogTailIsCutBeforeTheNextAppend(t *testing.T) {
 	}
 	if !slices.Equal(counters, []uint64{1, 2, 3}) {
 		t.Fatalf("read counters %v, want [1 2 3]", counters)
+	}
+}
+
+// TestACommittedRegistrationIsAcknowledgedFromItsPort registers a direction
+// and checks the relay acknowledges it from the direction's own port, and
+// acknowledges neither a replay nor a registration that fails its MAC.
+func TestACommittedRegistrationIsAcknowledgedFromItsPort(t *testing.T) {
+	e := newEdge(t)
+	srv, cancel, done := start(t, t.TempDir(), &fakeCP{st: e.st})
+	defer func() { cancel(); <-done }()
+	waitBound(t, srv, e.ab, e.ba)
+	a := udp(t)
+	reg := regproto.Encode(e.keyA, e.ab, 100)
+	send(t, a, e.ab, reg[:])
+	b, from := recvAny(a, 2*time.Second)
+	if n, ok := regproto.AckCounter(b); !ok || n != 100 || from != e.ab {
+		t.Fatalf("after registering: %x from %v, want an ack of 100 from %v", b, from, e.ab)
+	}
+	wrong := regproto.Encode(e.keyB, e.ab, 300)
+	for _, r := range [][]byte{reg[:], wrong[:]} {
+		send(t, a, e.ab, r)
+		if b, from := recvAny(a, 300*time.Millisecond); b != nil {
+			t.Fatalf("a replay or a forgery earned %x from %v", b, from)
+		}
 	}
 }

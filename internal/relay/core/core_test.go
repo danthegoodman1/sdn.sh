@@ -336,6 +336,23 @@ func TestAFirstPacketWaitsForTheRegistrationsItRaces(t *testing.T) {
 	}
 }
 
+// TestAPacketThatRacesThePeerDirectionWaitsForIt: a direction already
+// registered sends before the other side's agent has installed the edge,
+// so its packet waits for the peer direction's registration.
+func TestAPacketThatRacesThePeerDirectionWaitsForIt(t *testing.T) {
+	tb := waitTable()
+	register(t, tb, portAB, keyAB, advAB, senderA, 10)
+	first := tb.Packet(t0, portAB, senderA, wg)
+	if first.Verdict != Wait || first.Reason != PeerAbsent {
+		t.Fatalf("a packet before the peer registers: %+v", first)
+	}
+	register(t, tb, portBA, keyBA, advBA, senderB, 10)
+	rel := tb.Release(t0)
+	if len(rel) != 1 || rel[0].Token != first.Token || rel[0].Drop || rel[0].From != portBA || rel[0].To != senderB {
+		t.Fatalf("after the peer registered: %+v", rel)
+	}
+}
+
 // TestAWaitingPacketFromAnotherSourceNeverGoes: an attacker's packet waits
 // like any other, but the registration that commits names someone else, so
 // it expires instead of going on.

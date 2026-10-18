@@ -157,6 +157,9 @@ func (r *relayNode) persist(reg relaycore.Registration, raw *[regproto.Size]byte
 		r.disk.log = append(r.disk.log, reg)
 		committed := r.table.Commit(reg)
 		defer r.release()
+		if committed {
+			r.w.underlay(netip.AddrPortFrom(r.advertised, reg.Local.Port()), reg.Endpoint, packet{ack: true})
+		}
 		if r.w.attacker != nil && reg.Endpoint.Addr() == r.w.attacker.addr {
 			r.w.fail("%s registered the attacker at %v for %v", r.name, reg.Endpoint, reg.Local)
 		}

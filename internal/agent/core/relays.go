@@ -4,7 +4,9 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"maps"
+	"net/netip"
 	"slices"
 	"time"
 
@@ -243,13 +245,19 @@ func (c *Core) UnderlayChanged(now time.Time) {
 func (c *Core) Tick(now time.Time) {
 	for _, id := range slices.Sorted(maps.Keys(c.ifaces)) {
 		i := c.ifaces[id]
-		if (i.phase == creating || i.phase == registering) && !now.Before(i.deadline) {
+		switch {
+		case (i.phase == creating || i.phase == registering) && !now.Before(i.deadline):
 			c.abort(i, errAttachTimeout)
+		case i.phase == configuring && c.handoverWaits(i) && !now.Before(i.handoverBy):
+			c.ns[i.ns].dirty = true
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.ns)) {
 		st := c.ns[name]
 		if !st.nextDrain.IsZero() && !now.Before(st.nextDrain) {
+			st.dirty = true
+		}
+		if !st.ackBy.IsZero() && !now.Before(st.ackBy) {
 			st.dirty = true
 		}
 	}
@@ -293,17 +301,23 @@ func (c *Core) NextWake(now time.Time) time.Time {
 		soonest(c.resends[name].at)
 	}
 	for _, id := range slices.Sorted(maps.Keys(c.ifaces)) {
-		if i := c.ifaces[id]; i.phase == creating || i.phase == registering {
+		i := c.ifaces[id]
+		switch {
+		case i.phase == creating || i.phase == registering:
 			soonest(i.deadline)
+		case i.phase == configuring && c.handoverWaits(i) && !c.ns[i.ns].dirty:
+			soonest(i.handoverBy)
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.ns)) {
 		st := c.ns[name]
 		// A dirty namespace replans as soon as it can, and Actions plans
 		// every one it can at once, so only a retry still ahead of now is a
-		// reason to wake; a drain matters until a plan has seen it end.
+		// reason to wake; a drain or an acknowledgment's deadline matters
+		// until a plan has seen it pass.
 		if !st.dirty {
 			soonest(st.nextDrain)
+			soonest(st.ackBy)
 		}
 		if st.dirty && !st.busy && !st.observe && st.retryAt.After(now) {
 			soonest(st.retryAt)
@@ -316,3 +330,36 @@ func (c *Core) NextWake(now time.Time) time.Time {
 }
 
 var errAttachTimeout = errors.New("the control plane did not answer in time")
+
+// RegistrationAcked takes a relay's acknowledgment, from the relay port
+// from, of a registration sent from a device's listen port. Only a
+// direction a new peer waits on has any effect.
+func (c *Core) RegistrationAcked(now time.Time, port uint16, from netip.AddrPort) {
+	key := ackKey{port, from}
+	name, ok := c.awaitingAck[key]
+	if c.Debug != nil {
+		c.Debug(fmt.Sprintf("ack from %v for port %d awaited by %q", from, port, name))
+	}
+	if !ok {
+		return
+	}
+	delete(c.awaitingAck, key)
+	st, ok := c.ns[name]
+	if !ok {
+		return
+	}
+	for _, k := range slices.SortedFunc(maps.Keys(st.acks), compareKey) {
+		if w := st.acks[k]; w.path == from && !w.acked {
+			w.acked = true
+			st.dirty = true
+			c.Stats.Acked++
+		}
+	}
+}
+
+// handoverWaits reports whether a configuring interface's namespace holds
+// a slot back, which delays its handover until handoverBy.
+func (c *Core) handoverWaits(i *iface) bool {
+	st, ok := c.ns[i.ns]
+	return ok && len(st.awaiting) > 0
+}

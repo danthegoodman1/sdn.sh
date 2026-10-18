@@ -64,6 +64,11 @@ type Config struct {
 	// ResyncEvery is how often every namespace is observed again, to catch
 	// changes made behind the agent's back.
 	ResyncEvery time.Duration
+	// AckWait bounds how long a relay peer new to a namespace waits for
+	// the active relay to acknowledge the namespace's registration before
+	// a slot names it, and how long an attach waits on that, or on a
+	// co-located device, before its namespace is handed over.
+	AckWait time.Duration
 }
 
 // DefaultConfig returns the production settings for a host.
@@ -81,10 +86,11 @@ func DefaultConfig(host model.HostID) Config {
 		RetryMax:        5 * time.Second,
 		RegisterEvery:   25 * time.Second,
 		RegisterRetries: 5,
-		RegisterRetry:   50 * time.Millisecond,
+		RegisterRetry:   10 * time.Millisecond,
 		ProbeEvery:      200 * time.Millisecond,
 		ProbeMisses:     3,
 		ResyncEvery:     5 * time.Minute,
+		AckWait:         time.Second,
 	}
 }
 
@@ -220,8 +226,11 @@ type iface struct {
 	kind    api.Kind
 	network model.NetworkID
 	service model.ServiceID
-	// deadline is when an attach gives up waiting on the control plane.
-	deadline time.Time
+	// deadline is when an attach gives up waiting on the control plane;
+	// handoverBy, when a configured namespace is handed over whatever its
+	// slots still wait for.
+	deadline   time.Time
+	handoverBy time.Time
 	// waiting holds attach calls answered once the interface is ready, or
 	// with an error if it aborts; detachers, detach calls answered once it
 	// is torn down.
@@ -262,13 +271,20 @@ type nsState struct {
 	// accounts for, after a restart lost track.
 	unflushed []netip.Addr
 	sweep     bool
-	// awaiting names co-located interfaces whose devices have yet to hold
-	// this namespace's interface as a peer; keepalive and slots toward
-	// them wait.
+	// awaiting names the interfaces slots wait for: co-located ones whose
+	// devices have yet to hold this namespace's interface as a peer, and
+	// relay peers new to the namespace whose active relay has yet to
+	// acknowledge its registration. Keepalive toward a co-located one
+	// waits too.
 	awaiting []model.InterfaceID
-	busy     bool
-	dirty    bool
-	observe  bool
+	// acks holds each relay peer new to the namespace until the active
+	// relay acknowledges it or AckWait passes; ackBy is the earliest
+	// deadline among those still waiting.
+	acks    map[model.Key]*ackWait
+	ackBy   time.Time
+	busy    bool
+	dirty   bool
+	observe bool
 	// revision is the network revision last reconciled against.
 	revision uint64
 	// nextDrain is when the earliest draining peer's grace ends.
@@ -285,7 +301,23 @@ func newNS(name string, id model.InterfaceID) *nsState {
 		chosen: map[model.Key]netip.AddrPort{},
 		drain:  map[model.Key]time.Time{},
 		fresh:  map[model.Key]bool{},
+		acks:   map[model.Key]*ackWait{},
 	}
+}
+
+// ackWait is a relay peer waiting for the active relay to acknowledge the
+// namespace's registration on path, the relay port the peer is sent to.
+type ackWait struct {
+	path  netip.AddrPort
+	until time.Time
+	acked bool
+}
+
+// ackKey names a registration's direction from the host's side: the
+// device's listen port and the relay port it registers at.
+type ackKey struct {
+	port uint16
+	path netip.AddrPort
 }
 
 // relayHealth tracks one relay's probes.
@@ -319,9 +351,13 @@ type Core struct {
 	lastRegister time.Time
 	// resends holds each namespace's fresh directions awaiting another
 	// registration.
-	resends    map[string]*resend
-	lastProbe  time.Time
-	lastResync time.Time
+	resends map[string]*resend
+	// awaitingAck finds the namespace a relay's acknowledgment is for,
+	// holding only directions a peer waits on, so acknowledgments nobody
+	// awaits cost nothing to ignore.
+	awaitingAck map[ackKey]string
+	lastProbe   time.Time
+	lastResync  time.Time
 	// scanning records a Scan awaiting its answer, and rescan one wanted
 	// meanwhile.
 	scanning, rescan bool
@@ -334,6 +370,9 @@ type Core struct {
 // Stats counts the core's decisions.
 type Stats struct {
 	Batches, Failures, Conflicts, Preempted, Registrations, Failovers uint64
+	// Acked counts acknowledgments that released a new peer's wait, and
+	// AckTimeouts waits that ended at AckWait instead.
+	Acked, AckTimeouts uint64
 }
 
 // Census counts what the core manages, for the agent's gauges.
@@ -380,6 +419,8 @@ func New(cfg Config, rand io.Reader) *Core {
 		active:  map[model.NetworkID]model.RelayID{},
 		badPort: map[uint16]bool{},
 		resends: map[string]*resend{},
+
+		awaitingAck: map[ackKey]string{},
 	}
 }
 

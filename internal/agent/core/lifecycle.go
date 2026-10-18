@@ -292,7 +292,7 @@ func (c *Core) AttachDone(now time.Time, id model.InterfaceID, resp *api.AttachR
 	i.network, i.service = n.Network, x.Service
 	i.addr6, i.addr4 = x.Addr6, x.Addr4
 	c.desired.Merge(n)
-	i.phase = configuring
+	i.phase, i.handoverBy = configuring, now.Add(c.cfg.AckWait)
 	c.ns[i.ns].dirty = true
 	// The answer carries the network at a newer revision, which other
 	// namespaces on the host reconcile too, such as a co-located backend

@@ -209,3 +209,184 @@ func TestAPeerWaitsForTheHolderOfItsAddress(t *testing.T) {
 		t.Fatalf("after the holder left the claimant holds %v, want %v", got, addrs)
 	}
 }
+
+// db is a service whose backends sit behind relay peers; a client reaches
+// it on tcp/5432.
+var (
+	dbService = model.ServiceID("svc-db")
+	relayAt   = ap("192.0.2.1:7000")
+	relayRef  = api.RelayRef{Relay: "r1", Probe: ap("192.0.2.1:9")}
+)
+
+func backend(id model.InterfaceID, key model.Key, addr string) api.Peer {
+	return api.Peer{Interface: id, Service: dbService, PublicKey: key,
+		Allowed: []netip.Prefix{pfx(addr + "/128")}, Relays: []api.RelayPath{{Relay: "r1", Send: relayAt}}}
+}
+
+// client is a network where interface id, keyed pub, reaches db through
+// the backends given.
+func client(rev uint64, id model.InterfaceID, pub model.Key, backends ...api.Peer) api.NetworkState {
+	svc := api.Service{ID: dbService, Name: "db", Addr6: netip.MustParseAddr("fd00::100")}
+	for _, b := range backends {
+		svc.Backends = append(svc.Backends, api.Backend{Interface: b.Interface, Addr6: b.Allowed[0].Addr()})
+	}
+	return api.NetworkState{Network: "net-1", Name: "n", Revision: rev, Prefix6: pfx("fd00::/64"), MTU: 1380,
+		Relays: []api.RelayRef{relayRef}, Services: []api.Service{svc},
+		Interfaces: []api.Interface{{ID: id, Service: "svc-1", Kind: api.Workload, PublicKey: pub, Addr6: netip.MustParseAddr("fd00::5"),
+			ListenPort: 40000, State: api.Live, Peers: backends,
+			Reach: []api.Reach{{Service: dbService, Proto: model.TCP, Ports: model.PortRange{Lo: 5432, Hi: 5432}}}}}}
+}
+
+// slotted reports whether a namespace's rules give db any backend.
+func slotted(c *Core, ns string) bool {
+	st := c.ns[ns]
+	return st.rules != nil && len(st.rules.Maps) > 0
+}
+
+// attaching runs an attach to the point its namespace is configured, and
+// returns the interface and a driver that reports the replies it carries.
+func attaching(t *testing.T, c *Core, now time.Time, backends ...api.Peer) (*iface, func(time.Time) []Reply) {
+	t.Helper()
+	run := func(now time.Time) []Reply {
+		var replies []Reply
+		for range 8 {
+			acts := c.Actions(now)
+			if len(acts) == 0 {
+				break
+			}
+			for _, a := range acts {
+				switch a := a.(type) {
+				case RunBatch:
+					c.BatchDone(now, a.Namespace, a.ID, len(a.Ops), nil)
+				case CallAttach:
+					n := client(3, a.Request.Interface, a.Request.PublicKey, backends...)
+					c.AttachDone(now, a.Request.Interface, &api.AttachResponse{Interface: a.Request.Interface, State: n}, nil)
+				case Reply:
+					replies = append(replies, a)
+				}
+			}
+		}
+		return replies
+	}
+	c.Attach(now, 1, api.LocalAttach{Name: "web", Network: "n", Service: "web"})
+	if r := run(now); len(r) > 0 {
+		t.Fatalf("answered %+v before the relay acknowledged", r)
+	}
+	for _, i := range c.ifaces {
+		return i, run
+	}
+	t.Fatal("no interface")
+	return nil, nil
+}
+
+func TestAnAttachIsHandedOverOnceItsRelayAcknowledges(t *testing.T) {
+	c, now := New(DefaultConfig("h1"), prng.New(1)), time.Unix(1000, 0)
+	c.Start(now, nil, kernel.Snapshot{})
+	i, run := attaching(t, c, now, backend("if-b", peer, "fd00::6"))
+	if i.phase != configuring || slotted(c, i.ns) {
+		t.Fatalf("before the ack: phase %s, slotted %v; want configuring with no slot", i.phase, slotted(c, i.ns))
+	}
+	if _, installed := c.ns[i.ns].peers[peer]; !installed {
+		t.Fatal("the peer waits to be installed; only its slots should")
+	}
+	now = now.Add(10 * time.Millisecond)
+	c.RegistrationAcked(now, i.port, relayAt)
+	replies := run(now)
+	if len(replies) != 1 || replies[0].Err != nil || !slotted(c, i.ns) {
+		t.Fatalf("after the ack: replies %+v, slotted %v; want one answer and a slot", replies, slotted(c, i.ns))
+	}
+}
+
+func TestAnAttachIsHandedOverWhenNoAckComesInTime(t *testing.T) {
+	c, now := New(DefaultConfig("h1"), prng.New(1)), time.Unix(1000, 0)
+	c.Start(now, nil, kernel.Snapshot{})
+	i, run := attaching(t, c, now, backend("if-b", peer, "fd00::6"))
+	by := c.NextWake(now)
+	if want := now.Add(c.cfg.AckWait); by.After(want) {
+		t.Fatalf("next wake %v, after the handover deadline %v", by, want)
+	}
+	now = now.Add(c.cfg.AckWait)
+	c.Tick(now)
+	if replies := run(now); len(replies) != 1 || !slotted(c, i.ns) {
+		t.Fatalf("after the wait: replies %+v, slotted %v; want one answer and a slot", replies, slotted(c, i.ns))
+	}
+}
+
+func TestANewRelayBackendJoinsAClientsMapOnceAcknowledged(t *testing.T) {
+	c, now := adopted(t)
+	if err := c.State(now, api.StateUpdate{Host: "h1", Generation: 3, Networks: []api.NetworkState{client(3, "if-a", self)},
+		Present: []api.NetworkRef{{Network: "net-1", Revision: 3}}}); err != nil {
+		t.Fatal(err)
+	}
+	drive(c, now, succeed)
+	b := backend("if-b", peer, "fd00::6")
+	if err := c.State(now, api.StateUpdate{Host: "h1", Generation: 4, Networks: []api.NetworkState{client(4, "if-a", self, b)},
+		Present: []api.NetworkRef{{Network: "net-1", Revision: 4}}}); err != nil {
+		t.Fatal(err)
+	}
+	drive(c, now, succeed)
+	if slotted(c, "sdn-a") {
+		t.Fatal("a backend new to the client joined its map before the relay acknowledged")
+	}
+	c.RegistrationAcked(now, 40000, relayAt)
+	drive(c, now, succeed)
+	if !slotted(c, "sdn-a") {
+		t.Fatal("the acknowledged backend never joined the map")
+	}
+	// A failover moves an established backend's path, and holds back no
+	// slot while it does.
+	other := b
+	other.Relays = []api.RelayPath{{Relay: "r2", Send: ap("192.0.2.2:7000")}}
+	n := client(5, "if-a", self, other)
+	n.Relays = []api.RelayRef{{Relay: "r2", Probe: ap("192.0.2.2:9")}}
+	if err := c.State(now, api.StateUpdate{Host: "h1", Generation: 5, Networks: []api.NetworkState{n},
+		Present: []api.NetworkRef{{Network: "net-1", Revision: 5}}}); err != nil {
+		t.Fatal(err)
+	}
+	drive(c, now, succeed)
+	if !slotted(c, "sdn-a") || len(c.ns["sdn-a"].awaiting) > 0 {
+		t.Fatalf("after moving relays the map lost its backend: awaiting %v", c.ns["sdn-a"].awaiting)
+	}
+}
+
+func TestAFreshDirectionIsRegisteredAgainOnASchedule(t *testing.T) {
+	c, now := adopted(t)
+	c.cfg.RegisterEvery = time.Hour
+	if err := c.State(now, api.StateUpdate{Host: "h1", Generation: 3, Networks: []api.NetworkState{client(3, "if-a", self, backend("if-b", peer, "fd00::6"))},
+		Present: []api.NetworkRef{{Network: "net-1", Revision: 3}}}); err != nil {
+		t.Fatal(err)
+	}
+	// sent carries out the core's actions until none remain, counting the
+	// registrations sent toward the relay.
+	sent := func(now time.Time) int {
+		n := 0
+		for acts := c.Actions(now); len(acts) > 0; acts = c.Actions(now) {
+			for _, a := range acts {
+				switch a := a.(type) {
+				case RunBatch:
+					c.BatchDone(now, a.Namespace, a.ID, len(a.Ops), nil)
+				case SendRegistration:
+					if a.To == relayAt {
+						n++
+					}
+				}
+			}
+		}
+		return n
+	}
+	var times []time.Duration
+	for at := now; at.Before(now.Add(2 * time.Second)); at = at.Add(5 * time.Millisecond) {
+		c.Tick(at)
+		if sent(at) > 0 {
+			times = append(times, at.Sub(now))
+		}
+	}
+	// Once as the batch installs the peer, then RegisterRetries more, the
+	// gaps tripling from RegisterRetry.
+	if len(times) != 1+c.cfg.RegisterRetries {
+		t.Fatalf("registered at %v, want %d sends", times, 1+c.cfg.RegisterRetries)
+	}
+	if gap := times[1] - times[0]; gap < c.cfg.RegisterRetry || gap > c.cfg.RegisterRetry+10*time.Millisecond {
+		t.Fatalf("the first resend came %v after the first send, want about %v", gap, c.cfg.RegisterRetry)
+	}
+}

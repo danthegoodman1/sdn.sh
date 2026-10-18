@@ -45,14 +45,14 @@ type Summary struct {
 	Reboots, Rebinds, Strays, Unnamed     int
 	FlowsOK, FlowsDenied                  int
 	Batches, Conflicts, Failovers         uint64
-	Registrations                         uint64
+	Registrations, Acked, AckTimeouts     uint64
 	AttackerSent                          int
 }
 
 func (s Summary) String() string {
-	return fmt.Sprintf("seed %d: %d events; %d attaches, %d detaches, %d revokes, %d rule changes, %d egress grants; crashes agent %d relay %d cp %d, reboots %d, rebinds %d, strays %d, unnamed %d; flows ok %d denied %d; batches %d, conflicts %d, failovers %d, registrations %d, attacker sent %d",
+	return fmt.Sprintf("seed %d: %d events; %d attaches, %d detaches, %d revokes, %d rule changes, %d egress grants; crashes agent %d relay %d cp %d, reboots %d, rebinds %d, strays %d, unnamed %d; flows ok %d denied %d; batches %d, conflicts %d, failovers %d, registrations %d, acked %d, ack timeouts %d, attacker sent %d",
 		s.Seed, s.Events, s.Attaches, s.Detaches, s.Revokes, s.Rules, s.EgressGrants, s.AgentCrashes, s.RelayCrashes, s.CPCrashes,
-		s.Reboots, s.Rebinds, s.Strays, s.Unnamed, s.FlowsOK, s.FlowsDenied, s.Batches, s.Conflicts, s.Failovers, s.Registrations, s.AttackerSent)
+		s.Reboots, s.Rebinds, s.Strays, s.Unnamed, s.FlowsOK, s.FlowsDenied, s.Batches, s.Conflicts, s.Failovers, s.Registrations, s.Acked, s.AckTimeouts, s.AttackerSent)
 }
 
 // World is one simulated deployment.
@@ -182,6 +182,8 @@ func (w *World) Run() (Summary, error) {
 			w.summary.Conflicts += h.core.Stats.Conflicts
 			w.summary.Failovers += h.core.Stats.Failovers
 			w.summary.Registrations += h.core.Stats.Registrations
+			w.summary.Acked += h.core.Stats.Acked
+			w.summary.AckTimeouts += h.core.Stats.AckTimeouts
 		}
 	}
 	return w.summary, nil

@@ -11,8 +11,8 @@
 #                                 Postgres database SDN_TEST_POSTGRES names
 #   scripts/ci sim [SEED [N]]     N simulator seeds (default 500) from SEED
 #                                 (default the commit hash: GITHUB_SHA, or HEAD)
-#   scripts/ci kernel             kernel tests, as root, in a fresh network
-#                                 namespace
+#   scripts/ci kernel             kernel and raw-socket tests, as root, in a
+#                                 fresh network namespace
 #   scripts/ci e2e [FLAGS...]     end-to-end tests in a namespace lab, as root
 #   scripts/ci terraform          fmt and validate deploy/aws, when it exists
 #   scripts/ci all                every step above; postgres only when
@@ -69,9 +69,11 @@ step_kernel() {
 	local work
 	work=$(mktemp -d)
 	go test -c -o "$work/linux.test" ./internal/kernel/linux
+	go test -c -o "$work/underlay.test" ./internal/agent/underlay
 	# The tests find their package's files relative to the working
 	# directory, and need a network namespace holding only loopback.
 	(cd internal/kernel/linux && as_root unshare --net "$work/linux.test" -test.v -test.timeout 10m)
+	(cd internal/agent/underlay && as_root unshare --net "$work/underlay.test" -test.v -test.timeout 2m)
 	rm -rf "$work"
 }
 

@@ -1,7 +1,8 @@
 //sdn:deterministic
 
 // Package regproto is the registration datagram an agent sends a relay to
-// claim a direction's endpoint, and the probe it uses to tell whether a relay
+// claim a direction's endpoint, the acknowledgment the relay sends back once
+// it commits one, and the probe an agent uses to tell whether a relay
 // answers.
 //
 // A registration is 32 bytes:
@@ -31,9 +32,10 @@ import (
 	"sdn.sh/internal/model"
 )
 
-// Sizes of the two datagrams.
+// Sizes of the datagrams.
 const (
 	Size      = 32
+	AckSize   = 16
 	ProbeSize = 16
 	version   = 1
 	macLen    = 16
@@ -103,6 +105,29 @@ func Probe(nonce uint64) [ProbeSize]byte {
 // ProbeNonce returns a probe's nonce, if b is one.
 func ProbeNonce(b []byte) (uint64, bool) {
 	if len(b) != ProbeSize || b[0] != 0xff || b[1] != 'S' || b[2] != 'D' || b[3] != 'P' || b[4] != version {
+		return 0, false
+	}
+	return binary.BigEndian.Uint64(b[8:16]), true
+}
+
+// Ack builds the acknowledgment a relay sends from a direction's port to the
+// endpoint a registration named, once the relay has committed it: magic
+// 0xff 'S' 'D' 'A', version 1, three zero bytes and the registration's
+// counter. It tells the agent the port is bound and holds its direction.
+// It carries no MAC: one forged by an off-path sender can only make an
+// agent stop waiting early, which costs a handshake retry and nothing else,
+// and it is smaller than the registration that earns it.
+func Ack(counter uint64) [AckSize]byte {
+	var b [AckSize]byte
+	b[0], b[1], b[2], b[3] = 0xff, 'S', 'D', 'A'
+	b[4] = version
+	binary.BigEndian.PutUint64(b[8:16], counter)
+	return b
+}
+
+// AckCounter returns an acknowledgment's counter, if b is one.
+func AckCounter(b []byte) (uint64, bool) {
+	if len(b) != AckSize || b[0] != 0xff || b[1] != 'S' || b[2] != 'D' || b[3] != 'A' || b[4] != version || b[5]|b[6]|b[7] != 0 {
 		return 0, false
 	}
 	return binary.BigEndian.Uint64(b[8:16]), true

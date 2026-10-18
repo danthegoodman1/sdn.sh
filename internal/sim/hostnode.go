@@ -495,6 +495,13 @@ func (h *hostNode) receiveOnPort(port uint16, src netip.AddrPort, p packet) {
 		}
 		return
 	}
+	if p.ack {
+		if h.up {
+			h.core.RegistrationAcked(h.w.now(), port, src)
+			h.drive()
+		}
+		return
+	}
 	if p.wg == nil {
 		return
 	}

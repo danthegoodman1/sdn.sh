@@ -68,3 +68,26 @@ func TestProbeRoundTrips(t *testing.T) {
 		t.Fatal("a registration's head read as a probe")
 	}
 }
+
+func TestAnAckRoundTripsAndIsNothingElse(t *testing.T) {
+	a := Ack(1792320666820)
+	if n, ok := AckCounter(a[:]); !ok || n != 1792320666820 {
+		t.Fatalf("counter %d, %v", n, ok)
+	}
+	if IsRegistration(a[:]) {
+		t.Fatal("an ack read as a registration")
+	}
+	if _, ok := ProbeNonce(a[:]); ok {
+		t.Fatal("an ack read as a probe")
+	}
+	p := Probe(7)
+	reg := Encode(model.Secret{}, here, 7)
+	for _, b := range [][]byte{p[:], reg[:AckSize], reg[:]} {
+		if _, ok := AckCounter(b); ok {
+			t.Fatalf("%x read as an ack", b)
+		}
+	}
+	if AckSize > Size {
+		t.Fatal("an ack outgrows the registration that earns it")
+	}
+}

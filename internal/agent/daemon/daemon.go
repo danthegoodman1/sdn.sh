@@ -41,9 +41,12 @@ type Journal interface {
 	Delete(model.InterfaceID) error
 }
 
-// Sender sends a UDP datagram from a device's listen port.
+// Sender sends a UDP datagram from a device's listen port, and passes on
+// the relays' acknowledgments that come back to those ports until it
+// closes.
 type Sender interface {
 	Send(fromPort uint16, to netip.AddrPort, payload []byte) error
+	Receive(fn func(from netip.AddrPort, port uint16, payload []byte)) error
 }
 
 // Prober sends relay probes and reports what comes back.
@@ -235,6 +238,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if d.prober != nil {
 		go d.prober.Receive(d.probeReply)
 		defer d.prober.Close()
+	}
+	if d.raw != nil {
+		go d.raw.Receive(d.ack)
 	}
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
@@ -737,6 +743,18 @@ func (d *Daemon) probeReply(from netip.AddrPort, b []byte) {
 	})
 }
 
+// ack takes a relay's acknowledgment of a registration sent from a
+// device's listen port.
+func (d *Daemon) ack(from netip.AddrPort, port uint16, payload []byte) {
+	if _, ok := regproto.AckCounter(payload); !ok {
+		return
+	}
+	d.post(func() {
+		d.m.registrations.WithLabelValues("acked").Inc()
+		d.core.RegistrationAcked(d.now(), port, from)
+	})
+}
+
 // UnderlayChanged re-registers every direction, as after the host's address
 // changes.
 func (d *Daemon) UnderlayChanged() {
@@ -779,6 +797,8 @@ func (d *Daemon) noteStats() {
 	d.m.coreStat("preempted", s.Preempted-d.stats.Preempted)
 	d.m.coreStat("failovers", s.Failovers-d.stats.Failovers)
 	d.m.coreStat("failures", s.Failures-d.stats.Failures)
+	d.m.coreStat("acked", s.Acked-d.stats.Acked)
+	d.m.coreStat("ack_timeouts", s.AckTimeouts-d.stats.AckTimeouts)
 	d.stats = s
 }
 

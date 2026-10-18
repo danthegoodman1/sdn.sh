@@ -3,6 +3,7 @@
 package core
 
 import (
+	"fmt"
 	"maps"
 	"net/netip"
 	"slices"
@@ -31,8 +32,9 @@ type tpeer struct {
 	endpoint  netip.AddrPort
 	accept    []netip.AddrPort
 	keepalive time.Duration
-	// awaiting marks a co-located peer whose device has yet to hold the
-	// reverse peer; no slot names it until then.
+	// awaiting marks a peer no slot names yet: a co-located one whose
+	// device has yet to hold the reverse peer, or a relay peer new to the
+	// namespace whose active relay has yet to acknowledge it.
 	awaiting bool
 }
 
@@ -71,6 +73,11 @@ func (c *Core) target(now time.Time, st *nsState, n *api.NetworkState, x *api.In
 		}
 	}
 	draining := map[model.Key]bool{}
+	acking := map[model.Key]bool{}
+	var port uint16
+	if i, ok := c.ifaces[st.iface]; ok {
+		port = i.port
+	}
 	if x.State == api.Live {
 		for _, p := range x.Peers {
 			if p.Draining {
@@ -97,8 +104,15 @@ func (c *Core) target(now time.Time, st *nsState, n *api.NetworkState, x *api.In
 				continue
 			}
 			tp := c.tpeer(n, p)
-			if p.Loopback != 0 && !p.Draining && !c.holdsReverse(st, p) {
-				tp.awaiting = true
+			switch {
+			case p.Draining:
+			case p.Loopback != 0:
+				tp.awaiting = !c.holdsReverse(st, p)
+			default:
+				tp.awaiting = c.awaitsAck(now, st, port, p, tp)
+				acking[p.PublicKey] = tp.awaiting
+			}
+			if tp.awaiting {
 				st.awaiting = append(st.awaiting, p.Interface)
 			}
 			// A draining peer carries nothing new, so it is never armed.
@@ -112,6 +126,24 @@ func (c *Core) target(now time.Time, st *nsState, n *api.NetworkState, x *api.In
 		if !draining[key] {
 			delete(st.drain, key)
 		}
+	}
+	st.ackBy = time.Time{}
+	for _, key := range slices.SortedFunc(maps.Keys(st.acks), compareKey) {
+		w := st.acks[key]
+		if acking[key] {
+			if st.ackBy.IsZero() || w.until.Before(st.ackBy) {
+				st.ackBy = w.until
+			}
+			continue
+		}
+		if !w.acked && !now.Before(w.until) {
+			c.Stats.AckTimeouts++
+			if c.Debug != nil {
+				c.Debug(fmt.Sprintf("%s: no ack from %v for port %d by %v", st.name, w.path, port, w.until))
+			}
+		}
+		delete(c.awaitingAck, ackKey{port, w.path})
+		delete(st.acks, key)
 	}
 	slices.SortFunc(t.peers, func(a, b tpeer) int { return compareKey(a.peer.PublicKey, b.peer.PublicKey) })
 	t.rules = c.rules(n, x, t.peers)
@@ -156,6 +188,37 @@ func (c *Core) holdsReverse(st *nsState, p api.Peer) bool {
 			}
 		}
 	}
+	return true
+}
+
+// awaitsAck reports whether a relay peer new to the namespace still waits
+// for the active relay to acknowledge the namespace's registration toward
+// it. A relay binds a new edge's port only once it loads the table naming
+// it, which can trail the agent installing the peer, and a handshake
+// initiation sent to a port no socket holds is dropped; WireGuard then
+// waits five seconds before trying again. A peer installed before, such
+// as one adopted at start or one whose path moves on failover, never
+// waits, and none waits past AckWait.
+func (c *Core) awaitsAck(now time.Time, st *nsState, port uint16, p api.Peer, tp tpeer) bool {
+	if len(p.Relays) == 0 || !tp.endpoint.IsValid() {
+		return false
+	}
+	w, ok := st.acks[p.PublicKey]
+	if !ok {
+		if _, installed := st.peers[p.PublicKey]; installed {
+			return false
+		}
+		w = &ackWait{until: now.Add(c.cfg.AckWait)}
+		st.acks[p.PublicKey] = w
+	}
+	if w.path != tp.endpoint {
+		delete(c.awaitingAck, ackKey{port, w.path})
+		w.path = tp.endpoint
+	}
+	if w.acked || !now.Before(w.until) {
+		return false
+	}
+	c.awaitingAck[ackKey{port, w.path}] = st.name
 	return true
 }
 

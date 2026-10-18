@@ -44,8 +44,12 @@ func (c *Core) Actions(now time.Time) []Action {
 
 // plan returns the operations that move a namespace toward its target.
 func (c *Core) plan(now time.Time, st *nsState, i *iface) []kernel.Op {
-	// Only reconciliation tracks drains; any other phase owes them nothing.
+	// Only reconciliation tracks drains and acknowledgments; any other
+	// phase owes them nothing.
 	st.nextDrain = time.Time{}
+	if i == nil || i.phase != configuring && i.phase != ready {
+		c.dropAcks(st)
+	}
 	if st.ref != "" {
 		if st.reaped {
 			return nil
@@ -88,6 +92,19 @@ func (c *Core) plan(now time.Time, st *nsState, i *iface) []kernel.Op {
 		ops = append(ops, kernel.Op{Kind: kernel.DeleteNamespace, Namespace: st.name})
 	}
 	return ops
+}
+
+// dropAcks forgets every acknowledgment a namespace's peers wait on.
+func (c *Core) dropAcks(st *nsState) {
+	port := uint16(0)
+	if i, ok := c.ifaces[st.iface]; ok {
+		port = i.port
+	}
+	for _, key := range slices.SortedFunc(maps.Keys(st.acks), compareKey) {
+		delete(c.awaitingAck, ackKey{port, st.acks[key].path})
+		delete(st.acks, key)
+	}
+	st.ackBy = time.Time{}
 }
 
 // planReconcile orders the operations that bring a built namespace to its
@@ -285,6 +302,11 @@ func (c *Core) settled(now time.Time, st *nsState, i *iface) {
 		i.phase, i.attachSent = registering, true
 		c.emit(CallAttach{Request: c.attachRequest(i)})
 	case configuring:
+		// A workload sends as soon as it holds its namespace, so the
+		// namespace waits, a bounded time, for the slots it holds back.
+		if len(st.awaiting) > 0 && now.Before(i.handoverBy) {
+			return
+		}
 		i.phase = ready
 		c.emit(WriteJournal{Entry: c.entry(i)})
 		for _, req := range i.waiting {

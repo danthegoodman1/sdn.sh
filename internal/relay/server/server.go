@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"sdn.sh/internal/api"
+	"sdn.sh/internal/regproto"
 	relaycore "sdn.sh/internal/relay/core"
 )
 
@@ -200,6 +201,27 @@ func (s *Server) poll(ctx context.Context) {
 		notify(s.snapshot)
 		s.m.generation.Set(float64(st.Generation))
 		s.log.Info().Uint64("generation", st.Generation).Int("ports", len(st.Ports)).Msg("port table loaded")
+	}
+}
+
+// ack tells each committed registration's endpoint, from the direction's
+// own port, that the relay holds it, so the agent knows the port is bound
+// before anything sends through it.
+func (s *Server) ack(regs []relaycore.Registration) {
+	if len(regs) == 0 {
+		return
+	}
+	s.smu.Lock()
+	defer s.smu.Unlock()
+	for _, r := range regs {
+		k, ok := s.socks[r.Local]
+		if !ok {
+			continue
+		}
+		a := regproto.Ack(r.Counter)
+		if _, err := k.conn.WriteToUDPAddrPort(a[:], r.Endpoint); err != nil {
+			s.m.writeFailed.Inc()
+		}
 	}
 }
 
@@ -512,9 +534,11 @@ func (s *Server) committer(ctx context.Context) error {
 				return fmt.Errorf("registration log: %w", err)
 			}
 			s.m.fsync.Observe(time.Since(start).Seconds())
+			var acked []relaycore.Registration
 			s.mu.Lock()
 			for _, r := range batch {
 				if s.table.Commit(r) {
+					acked = append(acked, r)
 					s.m.registrations.WithLabelValues("accepted").Inc()
 					s.log.Debug().Stringer("port", r.Local).Stringer("endpoint", r.Endpoint).Uint64("counter", r.Counter).Msg("registration")
 				} else {
@@ -523,6 +547,7 @@ func (s *Server) committer(ctx context.Context) error {
 			}
 			s.mu.Unlock()
 			s.release()
+			s.ack(acked)
 			dirty = true
 		case <-waits.C:
 			s.release()

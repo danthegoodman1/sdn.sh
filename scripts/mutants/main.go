@@ -226,6 +226,11 @@ func Layers(o options) map[string]Layer {
 			{Args: []string{"go", "test", "-c", "-o", ".mutants/linux.test", "./internal/kernel/linux"}},
 			{Dir: "internal/kernel/linux", Root: true, Args: []string{"unshare", "--net", "../../../.mutants/linux.test", "-test.timeout", o.timeout.String()}},
 		}},
+		{Name: "underlay", Root: true, Steps: []Step{
+			{Args: []string{"mkdir", "-p", ".mutants"}},
+			{Args: []string{"go", "test", "-c", "-o", ".mutants/underlay.test", "./internal/agent/underlay"}},
+			{Dir: "internal/agent/underlay", Root: true, Args: []string{"unshare", "--net", "../../../.mutants/underlay.test", "-test.timeout", o.timeout.String()}},
+		}},
 		{Name: "e2e", Root: true, Steps: []Step{{Args: []string{"scripts/e2e"}}}},
 		{Name: "pgstore", Env: "SDN_TEST_POSTGRES", Steps: goTest("", "./internal/store/pgstore").Steps},
 	}

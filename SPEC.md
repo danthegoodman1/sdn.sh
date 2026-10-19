@@ -614,6 +614,8 @@ Separate namespaces, separate relay ports, no translation and no tenant tag. Han
 | Attach to first connection to a remote peer, degree 20 | p50 21.4ms, p90 24.2ms, max 54ms |
 | Service change to settled, 30 clients on 3 hosts, under churn: cold replacement | p50 6.9–9.1ms, max 7.2–9.4ms |
 | The same, warm removal, half the slots rewritten in every client | p50 1.8–7.8ms, max 12.5–40.5ms |
+| A deny taking 30 sandboxes out of `* -> db`, from its commit until each sandbox's connections fail | p50 9.2–9.6ms, max 9.9–11.1ms |
+| The deny removed, until every sandbox reaches db again | p50 8.5–8.7ms, max 9.3–18.7ms |
 | An edge's relay killed: a new connection through the other relay | 0.46–0.54s |
 | An edge's relay killed: an established flow's stall | 0.82–0.83s |
 | Relay restart to forwarding again, no registration sent | 2–4ms |
@@ -622,7 +624,7 @@ Separate namespaces, separate relay ports, no translation and no tenant tag. Han
 | Interfaces on one host, degree 1, until attach p50 rose tenfold | 920, rising linearly from 4.2ms to 33.9ms |
 | Attach-and-detach pairs, 32 loops on each of 3 hosts, degree 20 | 38 a second on the memory store, attach p50 1.2–1.5s; 24 on Postgres |
 
-Attach figures come from 30 rounds, the service changes from two runs, failover from three rounds and the end-to-end suite. Four of these changed the design. Before registrations were resent, one attach in five at degree 20 waited 5–25 seconds for its first connection, because its first registration reached the relay before the relay bound the port. Before a co-located client's slots waited for the backend's device, a cold replacement settled at a p99 of 4.3 seconds. And before an attach waited for the relay's acknowledgment, the attach call returned at a p50 of 7.6ms but a workload that dialed at once could still lose its first initiation to an unbound port: the first connection's p90 was 46ms, and one end-to-end run in three waited 5.27 seconds. Waiting raised the call to 18.6ms and brought the first connection's p90 to 24ms. Finally, before a detach released its interface ahead of deleting its device, the service changes settled at p50 145–189ms, most of it the departing device's deletion.
+Attach figures come from 30 rounds, the service and rule changes from two runs, failover from three rounds and the end-to-end suite. Four of these changed the design. Before registrations were resent, one attach in five at degree 20 waited 5–25 seconds for its first connection, because its first registration reached the relay before the relay bound the port. Before a co-located client's slots waited for the backend's device, a cold replacement settled at a p99 of 4.3 seconds. And before an attach waited for the relay's acknowledgment, the attach call returned at a p50 of 7.6ms but a workload that dialed at once could still lose its first initiation to an unbound port: the first connection's p90 was 46ms, and one end-to-end run in three waited 5.27 seconds. Waiting raised the call to 18.6ms and brought the first connection's p90 to 24ms. Finally, before a detach released its interface ahead of deleting its device, the service changes settled at p50 145–189ms, most of it the departing device's deletion.
 
 On this substrate the relay path carried 3.65 Gbit/s on one stream and 3.77 Gbit/s on eight, against 6.1 and 6.15 Gbit/s through a WireGuard gateway on the same middle box. One directed port is one socket read by one goroutine, so a single edge gets one core's worth of relay. Idle round trips through the relay were 0.25ms against 0.007ms for plain TCP; loaded, 7.5ms against 1.8ms through the gateway. Every host shares the machine's CPUs here, so the CPU-per-byte comparison that decides the thesis needs separate machines.
 
@@ -657,12 +659,14 @@ Each edge streams one TCP connection from one of two sending hosts to one of two
 | Attach to first connection to a remote peer, degree 20 | p50 44.0ms, p90 51.7ms, max 54.2ms |
 | Service change to settled, 30 clients, under churn: cold replacement | p50 33.8–40.6ms, max 44.8–52.5ms |
 | The same, warm removal, half the slots rewritten in every client | p50 111–144ms, max 152–175ms |
+| A deny taking 30 sandboxes out of `* -> db`, from its commit until each sandbox's connections fail | p50 13.0–14.5ms, max 15.6–20.8ms |
+| The deny removed, until every sandbox reaches db again | p50 23.9–26.0ms, max 29.9–31.0ms |
 | An edge's relay killed: an established flow's stall | 0.82–0.83s |
 | An edge's relay killed: a new connection through another relay, from the kill command's return | 0.22–0.26s |
 | Attach-and-detach pairs, 4 workers on each of 4 hosts, degree 4 | 47 a second in each of two runs, no failures; attach p50 157–208ms, p99 0.93–1.53s; detach p50 60–66ms |
 | Interfaces on one host, degree 1, to a cap of 1000 | 1000 held at 841 KiB each; attach p50 rose from 24ms to 134ms |
 
-Attach and failover figures come from 30 and 3 rounds, the service changes and churn from two runs. Chrony held every clock within a few microseconds of Amazon's time service, which the convergence figures need, since they run from the backend's detach on one machine to each client's settling on another. **Releasing before teardown took a cold replacement from a second to 34–41ms.** When a detach told the control plane only after it had deleted the device, the same plan read p50 1,037ms cold and 1,372ms warm, max 1,921ms: the departing backend's device held 30 peers, and clients kept routing to it until it was gone.
+Attach and failover figures come from 30 and 3 rounds, the service changes, rule changes and churn from two runs. A deny settles faster than a removal of the deny: the deny takes the sandboxes' slots for db away at once, while its removal installs their peers again, and a client holds a returning relay peer's slots until the relay acknowledges it. Chrony held every clock within a few microseconds of Amazon's time service, which the convergence figures need, since they run from the backend's detach on one machine to each client's settling on another. **Releasing before teardown took a cold replacement from a second to 34–41ms.** When a detach told the control plane only after it had deleted the device, the same plan read p50 1,037ms cold and 1,372ms warm, max 1,921ms: the departing backend's device held 30 peers, and clients kept routing to it until it was gone.
 
 The attach figures match Postgres on the bare-metal desktop rather than its memory store. Churn reached the same 47 pairs a second before the release moved ahead of teardown.
 
@@ -675,6 +679,7 @@ The EC2 column is the fleet in [The fleet on EC2](#the-fleet-on-ec2). The lab co
 | Relay forwarding, XDP or TC | 1M+ pps per core, 100k+ edges | 2.1 Gbit per busy relay core | — | Required for the stated edge capacity, not merely faster. Batched userspace Go carried ~118k pps on a hot edge; `sk_lookup` alone fixes only the receive side. |
 | A network's throughput across its relays | — | 14.5 Gbit/s over three relays, bounded by the receivers' CPU | — | One edge gets one relay core, so a network's throughput is its edges spread over its relays. |
 | Service change to converged, p99 in one region | < 250 ms | 45–175ms | 7–41ms | The cost of a change, and the number the product is judged on. |
+| Rule change to enforced, 30 sandboxes under one wildcard | — | max 16–31ms | max 10–19ms | Rules reach agents as compiled grants, through the same snapshot as a service change. |
 | Attach to first packet, peer already converged, degree ≤ 20 | < 100 ms | max 54ms | max 54ms | Device work is ~5ms and the interface's own peer table is ~3ms at degree 20. The figure is a latency, which the 64-way throughput numbers do not measure. |
 | Relay failover | < 1 s | 0.22–0.83s | 0.46–0.83s | A 200 ms probe interval plus an endpoint rewrite on both sides. |
 | Round-trip time added by a relay, p50 and p99, idle and under load | — | p50 0.22ms idle, 4.8ms loaded | p50 0.25ms idle, 7.5ms loaded | Idle, the detour through the relay sets it. Under load, a relay that falls behind queues in its socket buffers before it drops. |

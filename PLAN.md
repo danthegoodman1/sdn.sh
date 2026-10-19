@@ -578,15 +578,15 @@ Status ledger:
 
 | Status | Type | Item | Evidence / Gap |
 | --- | --- | --- | --- |
-| Incomplete | Work | 11A: Rule action and wildcards in the API, CLI and stores | Missing: implementation, store tests on memory and Postgres, the migration. |
-| Incomplete | Work | 11B: Resolution into per-pair grants | Missing: implementation and the brute-force agreement test. |
-| Incomplete | Work | 11C: The other-protocols class in the nftables model, the Linux writer and egress | Missing: implementation and the root test in each family. |
-| Incomplete | Work | 11D: Edges and adjacency from grants, scoped for wildcard rules | Missing: implementation and tests. |
-| Incomplete | Work | 11E: The resolved-policy endpoint and `wirenetctl policy` | Missing: implementation and a test. |
-| Incomplete | Test | 11F: Simulator draws wildcard and deny rules, with an independent oracle | Missing: orchestrator, oracle and a 10,000-seed sweep. |
-| Incomplete | Test | 11G: End-to-end cannot-reach assertions for denies and self exclusion, in each family | Missing: the tests. |
-| Incomplete | Test | 11H: Policy-change convergence, locally and on EC2 | Missing: the plan and both runs. |
+| Complete | Work | 11A: Rule action and wildcards in the API, CLI and stores | `api.CreateRule.Action` and `api.Wildcard` in `internal/api/messages.go`; `CreateRule` validation and per-action deduplication in `internal/cp/plane.go`; `wirenetctl rule create --deny`; `internal/store/pgstore/schema/0003_rule_deny.sql`. `TestARuleIsCheckedAndStoredOnceForEachAction` and the storetest `testRules` deny rule pass on memory and Postgres 18 (`WIRENET_TEST_POSTGRES`). |
+| Complete | Work | 11B: Resolution into per-pair grants | `compile.Resolve` in `internal/compile/policy.go`. `TestRulesResolveToTheFlowsTheyLeaveOpen` covers 15 cases; `TestResolutionAgreesWithEveryRuleReadDirectly` checks 2,000 random rule sets against a brute-force evaluator at every port boundary, and again with the rules shuffled. |
+| Complete | Work | 11C: The other-protocols class in the nftables model, the Linux writer and egress | `model.OtherProto` and `Proto.Matches` in `internal/model/model.go`; `protoMatch` in `internal/kernel/linux/nftables.go`. `TestAGrantMatchesItsProtocolsAndPorts`; root tests `TestOtherProtocolsPassWhereTCPAndUDPStop` (ICMP passes and TCP and UDP stop, IPv6 and IPv4) and `TestAnEgressGrantSurvivesItsAlias`. |
+| Complete | Work | 11D: Edges and adjacency from grants, scoped for wildcard rules | `compile.NewAdjacency(grants)`; `ruleScope` and `serviceScope` in `internal/cp/edges.go`. `TestAWildcardPeersEveryOtherServiceAndADenyCutsOneOut` checks peers, edges and db's exact inbound list on both stores. |
+| Complete | Work | 11E: The resolved-policy endpoint and `wirenetctl policy` | `GET /v1/networks/{net}/policy` in `internal/cpserver`, `cpclient.Policy`, `wirenetctl policy NET`. `TestThePolicyRouteListsTheFlowsTheRulesLeave`; the end-to-end test reads the route too. |
+| Complete | Test | 11F: Simulator draws wildcard and deny rules, with an independent oracle | `changePolicy` on PRNG stream `policy` in `internal/sim/orchestrator.go`; the oracle's own evaluator in `internal/sim/policy.go` drives peers, slot maps, source sets, egress and probes, which include a closed flow for each reachable service. `wirenet-sim --seeds 10000 1` at d5f362c: 0 of 10,000 failed. A planted ignored deny and a wildcard matching its own service each failed seeds. |
+| Complete | Test | 11G: End-to-end cannot-reach assertions for denies and self exclusion, in each family | `TestAWildcardOpensAServiceAndADenyClosesItAgain` in `e2e/e2e_test.go`: in IPv6 and IPv4, a denied sandbox cannot reach db, two sandboxes under `box -> *` cannot reach each other or their own service, web cannot reach TCP 22 a deny took out of `any`, ICMP still passes, and removing the deny opens db. |
+| Complete | Test | 11H: Policy-change convergence, locally and on EC2 | `wirenet-lab --plan policy` in `cmd/wirenet-lab/plan_policy.go`. EC2, two runs (`reports/aws/20261018-214950-policy-aws.md`, `20261018-215217`): deny p50 13.0–14.5ms, max 15.6–20.8ms; removal p50 23.9–26.0ms, max 29.9–31.0ms. Local, two runs at load 1.0: deny p50 9.2–9.6ms, removal 8.5–8.7ms. SPEC.md "The fleet on EC2", "The whole system on one machine" and Targets. |
 | Incomplete | Test | Planted bugs for resolution, self exclusion, deny order and the protocol class | Missing: mutants and a full run. |
-| Incomplete | Doc | SPEC.md and README.md describe wildcard and deny rules | Missing: the text. |
+| Complete | Doc | SPEC.md and README.md describe wildcard and deny rules | SPEC.md Policy and Trust; README.md Policy, Known limits and Performance; `deploy/README.md` lists the `policy` plan. |
 | Incomplete | Gate | High-effort code review, findings fixed or recorded | Missing: the review. |
 | Incomplete | Gate | CI passes on the pull request | Missing: the pull request. |

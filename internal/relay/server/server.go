@@ -204,9 +204,10 @@ func (s *Server) poll(ctx context.Context) {
 	}
 }
 
-// ack tells each committed registration's endpoint, from the direction's
-// own port, that the relay holds it, so the agent knows the port is bound
-// before anything sends through it.
+// ack tells each committed registration's sender, from the direction's own
+// port, that the relay holds what it said: for a claim, that the port is
+// bound and forwards to it, before anything sends through it; for a
+// withdrawal, that the agent may stop resending it.
 func (s *Server) ack(regs []relaycore.Registration) {
 	if len(regs) == 0 {
 		return
@@ -404,6 +405,9 @@ func (s *Server) serve(k *sock) {
 				})
 			case relaycore.Register:
 				s.enqueue(d.Registration)
+			case relaycore.Acknowledge:
+				s.m.registrations.WithLabelValues(string(d.Reason)).Inc()
+				s.ack([]relaycore.Registration{d.Registration})
 			case relaycore.Wait:
 				s.m.waits.WithLabelValues("waiting").Inc()
 			default:

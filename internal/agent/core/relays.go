@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/danthegoodman1/wirenet/internal/api"
-	"github.com/danthegoodman1/wirenet/internal/kernel"
 	"github.com/danthegoodman1/wirenet/internal/model"
 	"github.com/danthegoodman1/wirenet/internal/regproto"
 )
@@ -163,71 +162,96 @@ func (c *Core) registerFresh(now time.Time, st *nsState) {
 	}
 }
 
-// relayed is what withdrawing a relay peer's direction takes: its secret
-// and the relay ports it registers at.
+// relayed is what claiming and withdrawing a relay peer's direction take:
+// its secret and the relay ports it registers at, and whether the
+// namespace's desired state names the peer.
 type relayed struct {
 	secret model.Secret
 	relays []api.RelayPath
+	named  bool
 }
 
-// track records what withdrawing each relay peer's direction takes, for as
-// long as the namespace's desired state names the peer or its device holds
-// it.
-func (c *Core) track(st *nsState, x *api.Interface) {
+// track records what each relay peer's registrations take, and withdraws
+// the directions of peers gone from both the desired state and the device.
+// An installed peer whose secret or relay ports change claims at once,
+// rather than at the periodic claim: its edge was made anew on the ports
+// it had while the agent was cut off, or its network gained a relay.
+func (c *Core) track(now time.Time, st *nsState, x *api.Interface) {
 	seen := map[model.Key]bool{}
 	for _, p := range x.Peers {
-		if len(p.Relays) > 0 {
-			seen[p.PublicKey] = true
-			st.relayed[p.PublicKey] = relayed{p.Registration, slices.Clone(p.Relays)}
+		if len(p.Relays) == 0 {
+			continue
+		}
+		seen[p.PublicKey] = true
+		old, known := st.relayed[p.PublicKey]
+		same := known && old.secret == p.Registration && slices.Equal(old.relays, p.Relays)
+		if same && old.named {
+			continue
+		}
+		if same {
+			old.named = true
+			st.relayed[p.PublicKey] = old
+			continue
+		}
+		st.relayed[p.PublicKey] = relayed{p.Registration, slices.Clone(p.Relays), true}
+		if _, installed := st.peers[p.PublicKey]; known && installed {
+			st.fresh[p.PublicKey] = true
 		}
 	}
-	maps.DeleteFunc(st.relayed, func(key model.Key, _ relayed) bool {
-		_, installed := st.peers[key]
-		return !seen[key] && !installed
-	})
+	for _, key := range slices.SortedFunc(maps.Keys(st.relayed), compareKey) {
+		if r := st.relayed[key]; r.named && !seen[key] {
+			r.named = false
+			st.relayed[key] = r
+		}
+	}
+	c.withdrawGone(now, st)
+	c.registerFresh(now, st)
 }
 
-// withdraw tells each relay of every relay peer a batch removed that the
-// namespace's direction toward it has no endpoint. A periodic claim sent
-// just before the agent learned the peer was going can reach a relay after
-// the removal; the withdrawal's higher counter outranks it, whichever
-// arrives first, so the relay holds the peer's next initiation until this
-// namespace claims again rather than deliver it to a device without the
-// peer's key, which costs WireGuard's 5-second retry. Each withdrawal is
-// resent unchanged until acknowledged, the first after RegisterRetry and
-// each gap three times the last; at its own counter it never outranks a
-// claim sent after it.
-func (c *Core) withdraw(now time.Time, st *nsState, ops []kernel.Op) {
+// withdrawGone tells each relay of every relay peer the desired state no
+// longer names, once the device no longer holds it either, that the
+// namespace's direction toward it has no endpoint. It judges by state, so
+// a peer that went in a batch that failed partway, which the look after
+// the failure finds gone, is withdrawn as surely as one a batch removed;
+// every batch and every look marks the namespace for a replan, which
+// tracks. A periodic
+// claim sent just before the agent learned the peer was going can reach a
+// relay after the removal; the withdrawal's higher counter outranks it,
+// whichever arrives first, so the relay holds the peer's next initiation
+// until this namespace claims again rather than deliver it to a device
+// without the peer's key, which costs WireGuard's 5-second retry. Each
+// withdrawal is resent unchanged until acknowledged, the first after
+// RegisterRetry and each gap three times the last; at its own counter it
+// never outranks a claim sent after it.
+func (c *Core) withdrawGone(now time.Time, st *nsState) {
 	i, ok := c.ifaces[st.iface]
 	if !ok {
 		return
 	}
 	var counter uint64
-	for _, op := range ops {
-		if op.Kind != kernel.SetPeers {
+	for _, key := range slices.SortedFunc(maps.Keys(st.relayed), compareKey) {
+		r := st.relayed[key]
+		if _, installed := st.peers[key]; r.named || installed {
 			continue
 		}
-		for _, u := range op.Peers {
-			r, ok := st.relayed[u.PublicKey]
-			if !u.Remove || !ok {
-				continue
+		delete(st.relayed, key)
+		if counter == 0 {
+			counter = c.nextCounter(now)
+		}
+		for _, rp := range r.relays {
+			key := ackKey{i.port, rp.Send}
+			w := &withdrawal{
+				payload: regproto.EncodeWithdrawal(regproto.RelayKey(r.secret, rp.Relay), rp.Send, counter),
+				counter: counter, left: c.cfg.RegisterRetries, gap: c.cfg.RegisterRetry,
 			}
-			delete(st.relayed, u.PublicKey)
-			if counter == 0 {
-				counter = c.nextCounter(now)
-			}
-			for _, rp := range r.relays {
-				key := ackKey{i.port, rp.Send}
-				w := &withdrawal{
-					payload: regproto.EncodeWithdrawal(regproto.RelayKey(r.secret, rp.Relay), rp.Send, counter),
-					counter: counter, left: c.cfg.RegisterRetries, gap: c.cfg.RegisterRetry,
-				}
-				w.at = now.Add(w.gap)
-				c.emit(SendRegistration{From: key.port, To: key.path, Payload: w.payload})
-				c.Stats.Withdrawals++
-				delete(c.withdrawals, key)
-				if w.left > 0 {
-					c.withdrawals[key] = w
+			w.at = now.Add(w.gap)
+			c.emit(SendRegistration{From: key.port, To: key.path, Payload: w.payload})
+			c.Stats.Withdrawals++
+			delete(c.withdrawals, key)
+			if w.left > 0 {
+				c.withdrawals[key] = w
+				if c.nextWithdrawal.IsZero() || w.at.Before(c.nextWithdrawal) {
+					c.nextWithdrawal = w.at
 				}
 			}
 		}
@@ -244,20 +268,28 @@ type withdrawal struct {
 	left    int
 }
 
-// resendWithdrawals sends again each withdrawal whose retry is due.
+// resendWithdrawals sends again each withdrawal whose retry is due, once
+// the earliest is.
 func (c *Core) resendWithdrawals(now time.Time) {
+	if c.nextWithdrawal.IsZero() || now.Before(c.nextWithdrawal) {
+		return
+	}
+	c.nextWithdrawal = time.Time{}
 	for _, key := range slices.SortedFunc(maps.Keys(c.withdrawals), compareAckKey) {
 		w := c.withdrawals[key]
-		if now.Before(w.at) {
-			continue
+		if !now.Before(w.at) {
+			c.emit(SendRegistration{From: key.port, To: key.path, Payload: w.payload})
+			c.Stats.Withdrawals++
+			w.left--
+			w.gap *= 3
+			w.at = now.Add(w.gap)
+			if w.left <= 0 {
+				delete(c.withdrawals, key)
+				continue
+			}
 		}
-		c.emit(SendRegistration{From: key.port, To: key.path, Payload: w.payload})
-		c.Stats.Withdrawals++
-		w.left--
-		w.gap *= 3
-		w.at = now.Add(w.gap)
-		if w.left <= 0 {
-			delete(c.withdrawals, key)
+		if c.nextWithdrawal.IsZero() || w.at.Before(c.nextWithdrawal) {
+			c.nextWithdrawal = w.at
 		}
 	}
 }
@@ -473,9 +505,7 @@ func (c *Core) NextWake(now time.Time) time.Time {
 			soonest(sched[key].at)
 		}
 	}
-	for _, key := range slices.SortedFunc(maps.Keys(c.withdrawals), compareAckKey) {
-		soonest(c.withdrawals[key].at)
-	}
+	soonest(c.nextWithdrawal)
 	for _, id := range slices.Sorted(maps.Keys(c.ifaces)) {
 		i := c.ifaces[id]
 		switch {
@@ -509,7 +539,8 @@ var errAttachTimeout = errors.New("the control plane did not answer in time")
 
 // RegistrationAcked takes a relay's acknowledgment, from the relay port
 // from, of the registration at counter sent from a device's listen port.
-// A withdrawal's acknowledgment ends its resends. A claim's ends that
+// A withdrawal's acknowledgment ends its resends, a change no plan reads.
+// A claim's ends that
 // direction's resends to the relay and releases a new peer waiting on it,
 // once its counter passes the one the schedule or wait began after: the
 // agent's counters rise, so one at or below answers something sent
@@ -521,7 +552,8 @@ func (c *Core) RegistrationAcked(now time.Time, port uint16, from netip.AddrPort
 	key := ackKey{port, from}
 	changed := false
 	if w, ok := c.withdrawals[key]; ok && w.counter == counter {
-		changed = true
+		// Nothing plans from a withdrawal's resends, so ending them
+		// changes nothing a pass would see.
 		delete(c.withdrawals, key)
 	}
 	if ref, ok := c.resendAck[key]; ok {

@@ -287,7 +287,8 @@ type nsState struct {
 	chosen      map[model.Key]netip.AddrPort
 	drain       map[model.Key]time.Time
 	fresh       map[model.Key]bool
-	// relayed holds what withdrawing each relay peer's direction takes.
+	// relayed holds what each relay peer's registrations take, while the
+	// desired state names the peer or the device holds it.
 	relayed map[model.Key]relayed
 	// unflushed holds addresses of removed peers whose flows have yet to
 	// be flushed; sweep asks for a sweep of every flow no installed peer
@@ -394,8 +395,11 @@ type Core struct {
 	// registration, and resendAck finds the one an acknowledgment ends.
 	resends   map[string]map[model.Key]*resend
 	resendAck map[ackKey]resendRef
-	// withdrawals holds the withdrawals awaiting acknowledgment.
-	withdrawals map[ackKey]*withdrawal
+	// withdrawals holds the withdrawals awaiting acknowledgment, and
+	// nextWithdrawal is when the earliest goes again, or later: an
+	// acknowledgment leaves it be.
+	withdrawals    map[ackKey]*withdrawal
+	nextWithdrawal time.Time
 	// awaitingAck finds the namespace a relay's acknowledgment is for,
 	// holding only directions a peer waits on, so acknowledgments nobody
 	// awaits cost nothing to ignore.

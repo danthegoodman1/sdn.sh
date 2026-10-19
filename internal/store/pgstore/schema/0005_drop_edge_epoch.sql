@@ -1,3 +1,3 @@
--- Agents withdraw a dormant edge's endpoints at its relays, so no epoch
--- tells the relays to forget them.
+-- Drop edges.epoch: each agent withdraws a removed peer's direction at its
+-- relays.
 ALTER TABLE edges DROP COLUMN epoch;

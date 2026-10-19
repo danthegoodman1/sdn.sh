@@ -86,6 +86,10 @@ const (
 	// registration lets it through or its wait ends. The shell keeps the
 	// bytes; Release says what to send.
 	Wait
+	// Acknowledge is a resent copy of the withdrawal a direction holds:
+	// the shell acknowledges Registration to its sender again, writing
+	// nothing, since its counter decides nothing new.
+	Acknowledge
 )
 
 // Reason says why a packet dropped, for metrics.
@@ -95,6 +99,7 @@ const (
 	Unknown      Reason = "unknown_port"
 	BadMAC       Reason = "bad_mac"
 	Replay       Reason = "replay"
+	Duplicate    Reason = "duplicate"
 	Unregistered Reason = "unregistered_sender"
 	PeerAbsent   Reason = "peer_unregistered"
 	Limited      Reason = "rate_limited"
@@ -289,12 +294,16 @@ func (t *Table) register(now time.Time, d *Dir, src netip.AddrPort, b []byte) De
 		return Decision{Reason: Limited}
 	}
 	r, reason := t.verify(d, src, b)
-	if reason != "" {
-		t.rejects.spend()
-		return Decision{Reason: reason}
+	switch reason {
+	case "":
+		d.regs.spend()
+		return Decision{Verdict: Register, Registration: r}
+	case Duplicate:
+		d.regs.spend()
+		return Decision{Verdict: Acknowledge, Reason: Duplicate, Registration: r}
 	}
-	d.regs.spend()
-	return Decision{Verdict: Register, Registration: r}
+	t.rejects.spend()
+	return Decision{Reason: reason}
 }
 
 // wait keeps a data packet, if its port and the relay have room.
@@ -403,11 +412,18 @@ func (t *Table) verify(d *Dir, src netip.AddrPort, b []byte) (Registration, Reas
 		d.Stats.BadMAC++
 		return Registration{}, BadMAC
 	}
+	r := Registration{Local: d.Local, Endpoint: src, Counter: counter, Key: d.Key, Withdraw: withdraw}
+	if withdraw && counter == d.Counter && !d.Endpoint.IsValid() {
+		// An agent resends a withdrawal unchanged until it hears back, so
+		// one whose acknowledgment was lost or crossed a resend arrives
+		// again: answer it, as the commit would have.
+		return r, Duplicate
+	}
 	if counter <= d.Counter {
 		d.Stats.Replayed++
 		return Registration{}, Replay
 	}
-	return Registration{Local: d.Local, Endpoint: src, Counter: counter, Key: d.Key, Withdraw: withdraw}, ""
+	return r, ""
 }
 
 // Commit applies a durable registration, unless a later one won meanwhile.

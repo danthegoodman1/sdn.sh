@@ -216,6 +216,8 @@ func (r *relayNode) receive(src, dst netip.AddrPort, p packet) {
 			raw = p.reg
 		}
 		r.persist(d.Registration, raw)
+	case relaycore.Acknowledge:
+		r.w.underlay(netip.AddrPortFrom(r.advertised, local.Port()), src, packet{ack: true, counter: d.Registration.Counter})
 	}
 }
 

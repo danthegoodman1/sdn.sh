@@ -209,9 +209,9 @@ func TestAWithdrawalOutranksTheClaimSentBeforeIt(t *testing.T) {
 }
 
 // TestTheHighestCounterDecidesTheEndpoint delivers every subset of a run
-// of claims and withdrawals, in every order, and finds the endpoint the
-// highest counter delivered names: a claim's sender or, for a withdrawal,
-// none. However the underlay loses and reorders an agent's registrations,
+// of claims and withdrawals, one withdrawal resent, in every order, and
+// finds the endpoint the highest counter delivered names: a claim's sender
+// or, for a withdrawal, none. However the underlay loses and reorders an agent's registrations,
 // the relay ends where the agent's latest one says once that one lands,
 // so no interleaving leaves a direction stuck. A restart from the durable
 // state agrees.
@@ -222,7 +222,7 @@ func TestTheHighestCounterDecidesTheEndpoint(t *testing.T) {
 		withdraw bool
 		from     netip.AddrPort
 	}
-	run := []reg{{11, false, senderB}, {12, true, senderB}, {13, false, other}, {14, true, other}, {15, false, senderB}}
+	run := []reg{{11, false, senderB}, {12, true, senderB}, {12, true, senderB}, {13, false, other}, {14, true, other}, {15, false, senderB}}
 	sequences := 0
 	var walk func(sent, rest []reg)
 	walk = func(sent, rest []reg) {
@@ -255,8 +255,36 @@ func TestTheHighestCounterDecidesTheEndpoint(t *testing.T) {
 		}
 	}
 	walk(nil, run)
-	if sequences != 326 {
-		t.Fatalf("checked %d sequences, want every ordered subset of 5", sequences)
+	if sequences != 1957 {
+		t.Fatalf("checked %d sequences, want every ordered subset of 6", sequences)
+	}
+}
+
+// TestAResentWithdrawalIsAcknowledgedAgain resends a withdrawal the relay
+// holds, as an agent does whose acknowledgment was lost: the relay answers
+// it again, writes nothing and spends no reject budget, and once a later
+// claim commits, the same bytes are a replay.
+func TestAResentWithdrawalIsAcknowledgedAgain(t *testing.T) {
+	tb := tableWith(Config{RejectRate: 1})
+	register(t, tb, portBA, keyBA, advBA, senderB, 10)
+	w := regproto.EncodeWithdrawal(keyBA, advBA, 11)
+	if d := tb.Packet(t0, portBA, senderB, w[:]); d.Verdict != Register || !tb.Commit(d.Registration) {
+		t.Fatalf("the withdrawal: %+v", d)
+	}
+	for range 3 {
+		d := tb.Packet(t0, portBA, senderB, w[:])
+		if d.Verdict != Acknowledge || d.Registration.Counter != 11 || d.Registration.Endpoint != senderB {
+			t.Fatalf("a resent withdrawal: %+v, want an acknowledgment at 11 to %v", d, senderB)
+		}
+	}
+	if dir, _ := tb.Dir(portBA); dir.Endpoint.IsValid() || dir.Counter != 11 || dir.Stats.Replayed != 0 {
+		t.Fatalf("after the resends: endpoint %v, counter %d, replays %d", dir.Endpoint, dir.Counter, dir.Stats.Replayed)
+	}
+	if !register(t, tb, portBA, keyBA, advBA, senderB, 12) {
+		t.Fatal("a claim after the resends failed, as if they spent the reject budget")
+	}
+	if d := tb.Packet(t0, portBA, senderB, w[:]); d.Verdict != Drop || d.Reason != Replay {
+		t.Fatalf("the withdrawal after a later claim: %+v, want a replay", d)
 	}
 }
 

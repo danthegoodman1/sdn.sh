@@ -152,7 +152,7 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 	}
 	var tgt target
 	if ok {
-		c.track(st, x)
+		c.track(now, st, x)
 		tgt = c.target(now, st, n, x)
 		if c.Debug != nil {
 			var ids []string
@@ -371,7 +371,6 @@ func (c *Core) BatchDone(now time.Time, namespace string, id uint64, done int, e
 	for _, op := range b.Ops[:done] {
 		c.believe(st, op)
 	}
-	c.withdraw(now, st, b.Ops[:done])
 	st.dirty = true
 	c.rearm(st)
 	if err == nil {

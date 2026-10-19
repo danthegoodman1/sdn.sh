@@ -152,6 +152,15 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 	}
 	grants := Resolve(s.Services, s.Rules)
 	links := NewLinks(NewAdjacency(grants), s.Interfaces)
+	// Each interface reads only the grants from and to its own service and
+	// the services it fronts.
+	from, to := map[model.ServiceID][]Grant{}, map[model.ServiceID][]Grant{}
+	for _, g := range grants {
+		from[g.From] = append(from[g.From], g)
+		if g.To != "" {
+			to[g.To] = append(to[g.To], g)
+		}
+	}
 	edges := map[[2]model.InterfaceID]store.Edge{}
 	for _, e := range s.Edges {
 		edges[[2]model.InterfaceID{e.A, e.B}] = e
@@ -229,24 +238,31 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 				fronted[d.Service] = true
 			}
 			slices.SortFunc(iface.Peers, func(a, b api.Peer) int { return strings.Compare(string(a.Interface), string(b.Interface)) })
+			reach := func(g Grant) {
+				if _, ok := services[g.To]; ok {
+					iface.Reach = append(iface.Reach, api.Reach{Service: g.To, Proto: g.Proto, Ports: g.Ports})
+					reached[x.Host][g.To] = true
+				}
+			}
 			for _, svc := range slices.Sorted(maps.Keys(fronted)) {
 				iface.Inbound = append(iface.Inbound,
 					api.Inbound{From: svc, Proto: model.UDP, Ports: model.PortRange{Lo: 53, Hi: 53}},
 					api.Inbound{From: svc, Proto: model.TCP, Ports: model.PortRange{Lo: 53, Hi: 53}})
-			}
-			for _, g := range grants {
-				switch {
-				case g.From == x.Service && g.To == "":
-					iface.Egress = append(iface.Egress, api.Egress{Proto: g.Proto, Ports: g.Ports})
-				case g.From == x.Service || fronted[g.From]:
-					if _, ok := services[g.To]; ok {
-						iface.Reach = append(iface.Reach, api.Reach{Service: g.To, Proto: g.Proto, Ports: g.Ports})
-						reached[x.Host][g.To] = true
+				if svc != x.Service {
+					for _, g := range from[svc] {
+						reach(g)
 					}
 				}
-				if g.To == x.Service {
-					iface.Inbound = append(iface.Inbound, api.Inbound{From: g.From, Proto: g.Proto, Ports: g.Ports})
+			}
+			for _, g := range from[x.Service] {
+				if g.To == "" {
+					iface.Egress = append(iface.Egress, api.Egress{Proto: g.Proto, Ports: g.Ports})
+				} else {
+					reach(g)
 				}
+			}
+			for _, g := range to[x.Service] {
+				iface.Inbound = append(iface.Inbound, api.Inbound{From: g.From, Proto: g.Proto, Ports: g.Ports})
 			}
 			slices.SortFunc(iface.Reach, compareReach)
 			iface.Reach = slices.Compact(iface.Reach)

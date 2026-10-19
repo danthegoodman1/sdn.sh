@@ -266,6 +266,8 @@ type nsState struct {
 	chosen      map[model.Key]netip.AddrPort
 	drain       map[model.Key]time.Time
 	fresh       map[model.Key]bool
+	// secrets holds the registration secret each relay peer last had.
+	secrets map[model.Key]model.Secret
 	// unflushed holds addresses of removed peers whose flows have yet to
 	// be flushed; sweep asks for a sweep of every flow no installed peer
 	// accounts for, after a restart lost track.
@@ -299,11 +301,12 @@ type nsState struct {
 func newNS(name string, id model.InterfaceID) *nsState {
 	return &nsState{
 		name: name, iface: id, dirty: true, egressClear: true,
-		peers:  map[model.Key]kernel.Peer{},
-		chosen: map[model.Key]netip.AddrPort{},
-		drain:  map[model.Key]time.Time{},
-		fresh:  map[model.Key]bool{},
-		acks:   map[model.Key]*ackWait{},
+		peers:   map[model.Key]kernel.Peer{},
+		chosen:  map[model.Key]netip.AddrPort{},
+		drain:   map[model.Key]time.Time{},
+		fresh:   map[model.Key]bool{},
+		secrets: map[model.Key]model.Secret{},
+		acks:    map[model.Key]*ackWait{},
 	}
 }
 

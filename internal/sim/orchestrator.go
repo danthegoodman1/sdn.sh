@@ -250,6 +250,11 @@ func (o *orchestrator) changePolicy() {
 		return string(n.services[o.policy.Index(len(n.services))].id)
 	}
 	req := api.CreateRule{From: side(), To: side()}
+	if o.policy.Percent(15) {
+		req.To = api.Internet
+	}
+	// An allow names every service on some side, so each rule drawn here
+	// is a wildcard or a deny.
 	if o.policy.Percent(55) {
 		req.Action = api.Deny
 	} else if req.From != api.Wildcard && req.To != api.Wildcard {
@@ -268,11 +273,8 @@ func (o *orchestrator) changePolicy() {
 		p := uint16(80 + o.policy.Below(3)*1000)
 		req.Proto, req.Ports = model.TCP, model.PortRange{Lo: p, Hi: p}
 	}
-	if o.policy.Percent(15) {
-		req.To = api.Internet
-		if req.Proto == model.TCP {
-			req.Ports = model.PortRange{Lo: 443, Hi: 443}
-		}
+	if req.To == api.Internet && req.Proto == model.TCP {
+		req.Ports = model.PortRange{Lo: 443, Hi: 443}
 	}
 	var r store.Rule
 	if o.admin(func(tx store.Tx) error {

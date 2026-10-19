@@ -97,8 +97,16 @@ func (s scope) pairs(connected []store.Interface) [][2]store.Interface {
 	}
 	if s.service != "" {
 		for i, x := range connected {
-			for _, y := range connected[i+1:] {
-				if s.covers(x, y) {
+			if x.Service != s.service {
+				continue
+			}
+			for j, y := range connected {
+				switch {
+				case j == i || j < i && y.Service == s.service:
+					// A pair within the service comes once, from its first.
+				case j < i:
+					out = append(out, [2]store.Interface{y, x})
+				default:
 					out = append(out, [2]store.Interface{x, y})
 				}
 			}
@@ -184,12 +192,23 @@ func (p *Plane) reconcileEdges(tx store.Tx, now time.Time, n *store.Network, sc 
 			}
 		case attached:
 			// Policy no longer connects a pair that is still attached: keep
-			// the edge, dormant, in case it reconnects.
+			// the edge's ports, dormant, in case it reconnects. Fresh
+			// secrets reset the endpoints each relay holds for it, so a
+			// relay holds a returning sender's first initiation until the
+			// receiver has its peer back and registers, rather than deliver
+			// it to a device that drops it.
 			if e.Dormant.IsZero() {
 				e.Dormant = now
+				if e.SecretAB, err = model.NewSecret(p.Rand); err != nil {
+					return err
+				}
+				if e.SecretBA, err = model.NewSecret(p.Rand); err != nil {
+					return err
+				}
 				if err := tx.PutEdge(e); err != nil {
 					return err
 				}
+				touched = append(touched, relayIDs(e)...)
 			}
 		default:
 			if err := releasePorts(tx, e, now); err != nil {

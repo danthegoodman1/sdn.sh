@@ -239,10 +239,19 @@ func (w *World) expect(net model.NetworkID, rev uint64, id model.InterfaceID) (e
 		return e, true
 	}
 	e.live = true
-	adjacent := func(a, b model.ServiceID) bool { return reaches(rules, a, b) || reaches(rules, b, a) }
+	pts := points(rules)
+	adj := map[model.ServiceID]bool{}
+	adjacent := func(s model.ServiceID) bool {
+		v, ok := adj[s]
+		if !ok {
+			v = reaches(rules, pts, x.Service, s) || reaches(rules, pts, s, x.Service)
+			adj[s] = v
+		}
+		return v
+	}
 	for _, y := range snap {
 		connected := y.State == api.Live || y.State == api.Released && !y.Drained
-		if y.ID == x.ID || y.Kind == api.Device || !connected || !adjacent(x.Service, y.Service) {
+		if y.ID == x.ID || y.Kind == api.Device || !connected || !adjacent(y.Service) {
 			continue
 		}
 		allowed := []netip.Prefix{netip.PrefixFrom(y.Addr6, 128)}
@@ -263,7 +272,7 @@ func (w *World) expect(net model.NetworkID, rev uint64, id model.InterfaceID) (e
 		families = append(families, nft.IPv4)
 	}
 	for _, to := range n.services {
-		if !reaches(rules, x.Service, to.id) {
+		if !reaches(rules, pts, x.Service, to.id) {
 			continue
 		}
 		var backends []store.Interface
@@ -298,7 +307,7 @@ func (w *World) expect(net model.NetworkID, rev uint64, id model.InterfaceID) (e
 		}
 	}
 	for _, from := range n.services {
-		if !reaches(rules, from.id, x.Service) {
+		if !reaches(rules, pts, from.id, x.Service) {
 			continue
 		}
 		for _, f := range families {
@@ -637,12 +646,13 @@ func (w *World) probeAll() {
 			continue
 		}
 		rules := n.rulesAt(rev)
+		pts := points(rules)
 		// To each service x reaches: a flow in each protocol the rules
 		// open toward it, and one flow they close.
 		for _, s := range n.services {
 			var open, shut []point
 			seen := map[model.Proto]bool{}
-			for _, p := range points(rules) {
+			for _, p := range pts {
 				switch {
 				case permits(rules, x.service, s.id, p.proto, p.port):
 					if !seen[p.proto] {

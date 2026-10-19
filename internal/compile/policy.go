@@ -44,8 +44,10 @@ func Resolve(services []store.Service, rules []store.Rule) []Grant {
 	}
 	type pair struct{ from, to model.ServiceID }
 	open := map[pair]*flows{}
+	var denies []store.Rule
 	for _, r := range rules {
 		if r.Deny {
+			denies = append(denies, r)
 			continue
 		}
 		for _, p := range expand(r, ids, has) {
@@ -63,8 +65,8 @@ func Resolve(services []store.Service, rules []store.Rule) []Grant {
 		return cmp.Or(cmp.Compare(a.from, b.from), cmp.Compare(a.to, b.to))
 	}) {
 		f := open[p]
-		for _, r := range rules {
-			if r.Deny && names(r, p.from, p.to) {
+		for _, r := range denies {
+			if names(r, p.from, p.to) {
 				f.remove(r.Proto, r.Ports)
 			}
 		}

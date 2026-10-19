@@ -12,6 +12,7 @@ import (
 	"github.com/danthegoodman1/wirenet/internal/kernel"
 	"github.com/danthegoodman1/wirenet/internal/model"
 	"github.com/danthegoodman1/wirenet/internal/prng"
+	"github.com/danthegoodman1/wirenet/internal/regproto"
 )
 
 var (
@@ -562,6 +563,54 @@ func TestAnAcknowledgedDirectionIsNotResentAndANewPeerResendsAlone(t *testing.T)
 	}
 	if got := total[other.Relays[0].Send]; got != 1+c.cfg.RegisterRetries {
 		t.Fatalf("the new direction was registered %d times, want %d", got, 1+c.cfg.RegisterRetries)
+	}
+}
+
+// TestARelayPeerWhoseSecretChangesRegistersAtOnce keeps a relay peer
+// installed while its edge's secret changes, as for an agent that held the
+// peer while its edge went dormant: the direction registers under the new
+// key at once, rather than at the periodic registration.
+func TestARelayPeerWhoseSecretChangesRegistersAtOnce(t *testing.T) {
+	c, now := adopted(t)
+	c.cfg.RegisterEvery = time.Hour
+	update := func(rev uint64, peers ...api.Peer) {
+		t.Helper()
+		if err := c.State(now, api.StateUpdate{Host: "h1", Generation: rev, Networks: []api.NetworkState{client(rev, "if-a", self, peers...)},
+			Present: []api.NetworkRef{{Network: "net-1", Revision: rev}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sends := func() [][regproto.Size]byte {
+		var out [][regproto.Size]byte
+		for acts := c.Actions(now); len(acts) > 0; acts = c.Actions(now) {
+			for _, a := range acts {
+				switch a := a.(type) {
+				case RunBatch:
+					c.BatchDone(now, a.Namespace, a.ID, len(a.Ops), nil)
+				case SendRegistration:
+					if a.To == relayAt {
+						out = append(out, a.Payload)
+					}
+				}
+			}
+		}
+		return out
+	}
+	b := backend("if-b", peer, "fd00::6")
+	b.Registration = model.Secret{1}
+	update(3, b)
+	if n := len(sends()); n != 1 {
+		t.Fatalf("registered %d times on install, want once", n)
+	}
+	c.RegistrationAcked(now, 40000, relayAt)
+	b.Registration = model.Secret{2}
+	update(4, b)
+	got := sends()
+	if len(got) != 1 {
+		t.Fatalf("registered %d times after the secret changed, want once", len(got))
+	}
+	if _, ok := regproto.Verify(regproto.RelayKey(b.Registration, "r1"), relayAt, got[0][:]); !ok {
+		t.Fatal("the registration was not made under the new secret")
 	}
 }
 

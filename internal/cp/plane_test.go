@@ -537,8 +537,9 @@ func TestFullyConnectedPolicyPeersEveryPair(t *testing.T) {
 
 // TestADisconnectedPairKeepsItsEdgeForTheQuarantine covers a rule that goes
 // away and comes back: the pair gets its edge back with the same ports, so
-// endpoints peers roamed to stay valid, and only once the quarantine passes
-// does the edge go and its ports free up.
+// endpoints peers roamed to stay valid, under secrets minted as it went
+// dormant, which its relay is told of; only once the quarantine passes does
+// the edge go and its ports free up.
 func TestADisconnectedPairKeepsItsEdgeForTheQuarantine(t *testing.T) {
 	eachStore(t, func(t *testing.T, f *fixture) {
 		f.p.Config.LeaseTTL = time.Hour
@@ -559,9 +560,23 @@ func TestADisconnectedPairKeepsItsEdgeForTheQuarantine(t *testing.T) {
 			return out
 		}
 		before := edges()
+		relayRev := func() uint64 {
+			var rev uint64
+			f.s.View(context.Background(), func(tx store.ReadTx) error {
+				rec, err := tx.Relay(relay)
+				rev = rec.Revision
+				return err
+			})
+			return rev
+		}
+		revBefore := relayRev()
 		f.update(func(tx store.Tx) error { return f.p.DeleteRule(tx, f.now, "n", r.ID) })
-		if e := edges(); len(e) != 1 || e[0].Dormant.IsZero() {
-			t.Fatalf("edges after the rule went: %+v", e)
+		dormant := edges()
+		if len(dormant) != 1 || dormant[0].Dormant.IsZero() {
+			t.Fatalf("edges after the rule went: %+v", dormant)
+		}
+		if dormant[0].SecretAB == before[0].SecretAB || dormant[0].SecretBA == before[0].SecretBA || relayRev() == revBefore {
+			t.Fatal("a dormant edge kept its secrets, or its relay was not told")
 		}
 		if peers := peerIDs(f.state("h1"), before[0].A); len(peers) != 0 {
 			peers = peerIDs(f.state("h1"), before[0].B)
@@ -571,7 +586,7 @@ func TestADisconnectedPairKeepsItsEdgeForTheQuarantine(t *testing.T) {
 		}
 		f.rule("n", "a", "b", model.TCP, 1)
 		after := edges()
-		if len(after) != 1 || !after[0].Dormant.IsZero() || after[0].Ports[0] != before[0].Ports[0] || after[0].SecretAB != before[0].SecretAB {
+		if len(after) != 1 || !after[0].Dormant.IsZero() || after[0].Ports[0] != before[0].Ports[0] || after[0].SecretAB != dormant[0].SecretAB {
 			t.Fatalf("the restored edge differs: %+v vs %+v", after, before)
 		}
 		r2 := after[0]

@@ -160,6 +160,32 @@ func (c *Core) registerFresh(now time.Time, st *nsState) {
 	}
 }
 
+// rekey registers at once each installed relay peer whose registration
+// secret changed. The control plane gives an edge fresh secrets as it goes
+// dormant, which resets every relay's endpoints for it, and an agent that
+// kept the peer through that would otherwise wait out the periodic
+// registration.
+func (c *Core) rekey(now time.Time, st *nsState, x *api.Interface) {
+	seen := map[model.Key]bool{}
+	for _, p := range x.Peers {
+		if len(p.Relays) == 0 {
+			continue
+		}
+		seen[p.PublicKey] = true
+		old, known := st.secrets[p.PublicKey]
+		st.secrets[p.PublicKey] = p.Registration
+		if _, installed := st.peers[p.PublicKey]; known && installed && old != p.Registration {
+			st.fresh[p.PublicKey] = true
+		}
+	}
+	for _, key := range slices.SortedFunc(maps.Keys(st.secrets), compareKey) {
+		if !seen[key] {
+			delete(st.secrets, key)
+		}
+	}
+	c.registerFresh(now, st)
+}
+
 // resend is one direction's schedule of further registrations, to the
 // relay ports that have yet to acknowledge it, each with the listen port it
 // was sent from.

@@ -8,6 +8,10 @@ import (
 	"github.com/danthegoodman1/wirenet/internal/bench"
 )
 
+// policyDial is how often each sandbox launches a connection while a rule
+// change settles, which bounds each figure's resolution.
+const policyDial = 2 * time.Millisecond
+
 // policyChange is one measured rule change.
 type policyChange struct {
 	Name    string        `json:"name"`
@@ -69,24 +73,32 @@ func planPolicy(r *run) error {
 
 // measureRule makes a rule change a second into every client's dial loop,
 // then times each client from the change's commit to the first of 20
-// connections in a row that reach want, or with refused that fail.
+// connections in a row that reach want, or with refused that fail. The
+// network's revision must advance by exactly one across the change, so its
+// commit time is the change's own.
 func (r *run) measureRule(s convergeSetup, name, want string, refused bool, apply func() error) (policyChange, error) {
 	c := policyChange{Name: name, Dials: make([]bench.Dials, len(s.hosts))}
 	var extra []string
 	if refused {
 		extra = []string{"--refused"}
 	}
-	fns := r.dialAll(s, want, 20, 10*time.Millisecond, c.Dials, extra...)
+	fns := r.dialAll(s, want, 20, policyDial, c.Dials, extra...)
 	fns = append(fns, func() error {
 		r.sleep(time.Second)
+		var before, after api.Network
+		if err := r.ctl(r.env.CP(), &before, "network", "get", "policy"); err != nil {
+			return err
+		}
 		if err := apply(); err != nil {
 			return err
 		}
-		var n api.Network
-		if err := r.ctl(r.env.CP(), &n, "network", "get", "policy"); err != nil {
+		if err := r.ctl(r.env.CP(), &after, "network", "get", "policy"); err != nil {
 			return err
 		}
-		c.Commit = n.Changed
+		if after.Revision != before.Revision+1 && !r.env.DryRun() {
+			return fmt.Errorf("%s: the network moved from revision %d to %d across one change", name, before.Revision, after.Revision)
+		}
+		c.Commit = after.Changed
 		return nil
 	})
 	r.logf("policy: %s", name)
@@ -99,7 +111,13 @@ func (r *run) measureRule(s convergeSetup, name, want string, refused bool, appl
 			if !r.check(res.Reached, "%s: sandbox %s never settled: %d attempts, %d failures, answers %v, %s", name, res.Namespace, res.Attempts, res.Failures, res.Answers, res.Error) {
 				continue
 			}
-			settled = append(settled, time.Duration(res.Converged-c.Commit.UnixNano()))
+			// An attempt dials once its thread enters the namespace, so
+			// one launched within an interval before the commit can meet
+			// the change; it counts as settling at the commit.
+			took := time.Duration(res.Converged - c.Commit.UnixNano())
+			if r.check(took > -policyDial, "%s: sandbox %s settled %v before the commit", name, res.Namespace, -took) {
+				settled = append(settled, max(took, 0))
+			}
 		}
 	}
 	r.check(len(settled) == r.o.Clients, "%s: %d of %d sandboxes settled", name, len(settled), r.o.Clients)
@@ -121,7 +139,7 @@ func (r *run) policyTable(s convergeSetup, changes []policyChange) {
 	}
 	t.Caption = fmt.Sprintf("db, on %s, takes TCP from every other service through `* -> db`, and the sandboxes are clients spread over every host. "+
 		"The deny is `box -> db` for any protocol. Times run from the control plane's commit of each change; each sandbox launches a connection "+
-		"every 10ms and settles at the first of 20 in a row that fail after the deny, or reach db once it is gone, so each figure is good to 10ms.", s.db.Name)
+		"every %v and settles at the first of 20 in a row that fail after the deny, or reach db once it is gone, so each figure is good to %v.", s.db.Name, policyDial, policyDial)
 	if r.env.Name() != "local" {
 		t.Caption += " Sandbox and control-plane times come from different machines' clocks, so the figures carry their synchronization error."
 	}

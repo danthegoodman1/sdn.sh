@@ -220,6 +220,33 @@ func dial(t *testing.T, ns string, addr netip.AddrPort, timeout time.Duration) (
 	return c, err
 }
 
+// udpArrives sends datagrams from one namespace to a socket bound in
+// another, and reports whether any arrived within a second.
+func udpArrives(t *testing.T, from, to string, addr netip.AddrPort) bool {
+	t.Helper()
+	var pc net.PacketConn
+	inNamespace(t, to, func() {
+		var err error
+		if pc, err = net.ListenPacket("udp", addr.String()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	defer pc.Close()
+	inNamespace(t, from, func() {
+		c, err := net.Dial("udp", addr.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		for range 3 {
+			c.Write([]byte("probe"))
+		}
+	})
+	pc.SetReadDeadline(time.Now().Add(time.Second))
+	_, _, err := pc.ReadFrom(make([]byte, 16))
+	return err == nil
+}
+
 func readReply(t *testing.T, c net.Conn) string {
 	t.Helper()
 	c.SetReadDeadline(time.Now().Add(3 * time.Second))
@@ -438,7 +465,7 @@ func TestServicesTranslateInBothFamilies(t *testing.T) {
 // TestOtherProtocolsPassWhereTCPAndUDPStop admits a peer for every protocol
 // but TCP and UDP, the grant a deny leaves when it takes TCP out of an
 // allow for any protocol: ICMP reaches the receiver in each family, and TCP
-// does not.
+// and UDP do not.
 func TestOtherProtocolsPassWhereTCPAndUDPStop(t *testing.T) {
 	k := newKernel(t)
 	a, b := pair(t, k, prng.New(9))
@@ -460,6 +487,9 @@ func TestOtherProtocolsPassWhereTCPAndUDPStop(t *testing.T) {
 		if c, err := dial(t, a.ns, netip.AddrPortFrom(addr, 9999), time.Second); err == nil {
 			c.Close()
 			t.Fatalf("reached %v over TCP through a grant for other protocols", addr)
+		}
+		if udpArrives(t, a.ns, b.ns, netip.AddrPortFrom(addr, 9998)) {
+			t.Fatalf("reached %v over UDP through a grant for other protocols", addr)
 		}
 	}
 }
@@ -818,6 +848,30 @@ func TestTheModelAgreesWithLinuxOnEgress(t *testing.T) {
 		if !lns.Egress.Equal(mns.Egress) {
 			t.Fatalf("round %d after %+v: linux %+v, model %+v", round, cfg, lns.Egress, mns.Egress)
 		}
+	}
+}
+
+// TestAGrantSplitByManyDeniesReadsBack installs a grant of 44 flows, the
+// shape forty single-port denies leave of an allow for any protocol, and
+// observes all of it back.
+func TestAGrantSplitByManyDeniesReadsBack(t *testing.T) {
+	k := newKernel(t)
+	if err := k.EnsureEgress(nil); err != nil {
+		t.Fatal(err)
+	}
+	name := namespace(t, k, prefix(t)+"x")
+	cfg := &kernel.EgressConfig{Index: 41000}
+	lo := uint16(1)
+	for p := uint16(25); p < 4025; p += 100 {
+		cfg.Rules = append(cfg.Rules, kernel.EgressRule{Proto: model.TCP, Ports: model.PortRange{Lo: lo, Hi: p - 1}})
+		lo = p + 1
+	}
+	cfg.Rules = append(cfg.Rules, kernel.EgressRule{Proto: model.TCP, Ports: model.PortRange{Lo: lo, Hi: 65535}},
+		kernel.EgressRule{Proto: model.UDP}, kernel.EgressRule{Proto: model.OtherProto})
+	run(t, k, kernel.Op{Kind: kernel.SetEgress, Namespace: name, Egress: cfg})
+	ns, err := k.Namespace(name, "")
+	if err != nil || !ns.Egress.Equal(cfg) {
+		t.Fatalf("observed %+v (%v), want %d flows", ns.Egress, err, len(cfg.Rules))
 	}
 }
 

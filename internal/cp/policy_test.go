@@ -4,11 +4,14 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 
 	"github.com/danthegoodman1/wirenet/internal/api"
+	"github.com/danthegoodman1/wirenet/internal/compile"
 	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/prng"
 	"github.com/danthegoodman1/wirenet/internal/store"
 )
 
@@ -42,10 +45,8 @@ func (f *fixture) edgePairs(net string) [][2]model.InterfaceID {
 }
 
 func pairOf(a, b model.InterfaceID) [2]model.InterfaceID {
-	if b < a {
-		a, b = b, a
-	}
-	return [2]model.InterfaceID{a, b}
+	x, y := compile.Pair(a, b)
+	return [2]model.InterfaceID{x, y}
 }
 
 // TestAWildcardPeersEveryOtherServiceAndADenyCutsOneOut opens db to every
@@ -161,4 +162,35 @@ func TestARuleIsCheckedAndStoredOnceForEachAction(t *testing.T) {
 			t.Fatalf("an unknown action: %v, want an invalid-request error", err)
 		}
 	})
+}
+
+// TestEachScopeListsThePairsItCovers checks every kind of scope against a
+// walk of every pair: each covered pair once, ordered as an edge stores it.
+func TestEachScopeListsThePairsItCovers(t *testing.T) {
+	rng := prng.New(3)
+	svcs := []model.ServiceID{"a", "b", "c"}
+	for round := range 200 {
+		var connected []store.Interface
+		for i := range rng.Index(12) {
+			connected = append(connected, store.Interface{ID: model.InterfaceID(fmt.Sprintf("if-%02d", i)), Service: svcs[rng.Index(len(svcs))]})
+		}
+		for _, sc := range []scope{networkScope(), interfaceScope("if-03"), serviceScope("a"), servicesScope("a", "b"), servicesScope("c", "c")} {
+			var want [][2]model.InterfaceID
+			for i, x := range connected {
+				for _, y := range connected[i+1:] {
+					if sc.covers(x, y) {
+						want = append(want, [2]model.InterfaceID{x.ID, y.ID})
+					}
+				}
+			}
+			var got [][2]model.InterfaceID
+			for _, p := range sc.pairs(connected) {
+				got = append(got, [2]model.InterfaceID{p[0].ID, p[1].ID})
+			}
+			slices.SortFunc(got, cmpPair)
+			if !slices.Equal(got, want) {
+				t.Fatalf("round %d, scope %+v: pairs %v, want %v", round, sc, got, want)
+			}
+		}
+	}
 }

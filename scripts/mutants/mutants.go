@@ -714,7 +714,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "deny-ignored",
 		Breaks: "a deny takes the flows it names out of every allow",
-		Edits:  []Edit{{policyGo, "\t\t\tif r.Deny && names(r, p.from, p.to) {", "\t\t\tif false && names(r, p.from, p.to) {"}},
+		Edits:  []Edit{{policyGo, "\t\t\tif names(r, p.from, p.to) {", "\t\t\tif false && names(r, p.from, p.to) {"}},
 		Catch:  []string{"compile", "cp", "cpserver", "sim", "e2e"},
 	},
 	{
@@ -776,5 +776,36 @@ var Mutants = []Mutant{
 		Breaks: "Postgres keeps whether a rule denies",
 		Edits:  []Edit{{pgTx, "Created: r.Created,\n\t\tDeny: r.Deny,\n\t}))", "Created: r.Created,\n\t}))"}},
 		Catch:  []string{"pgstore"},
+	},
+	{
+		ID:     "dormant-edge-keeps-secrets",
+		Breaks: "an edge going dormant gets fresh secrets, so its relays forget both endpoints",
+		Edits: []Edit{{cpEdges, "\t\t\t\te.Dormant = now\n\t\t\t\tif e.SecretAB, err = model.NewSecret(p.Rand); err != nil {\n\t\t\t\t\treturn err\n\t\t\t\t}\n\t\t\t\tif e.SecretBA, err = model.NewSecret(p.Rand); err != nil {\n\t\t\t\t\treturn err\n\t\t\t\t}\n",
+			"\t\t\t\te.Dormant = now\n"}},
+		Catch: []string{"cp"},
+	},
+	{
+		ID:     "dormant-edge-relays-untold",
+		Breaks: "the relays of an edge going dormant load its fresh keys",
+		Edits:  []Edit{{cpEdges, "\t\t\t\ttouched = append(touched, relayIDs(e)...)\n", ""}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "rekey-skipped",
+		Breaks: "a relay peer whose secret changes registers under the new key at once",
+		Edits:  []Edit{{agentPlan, "\t\tc.rekey(now, st, x)\n", ""}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "egress-grant-unrecorded",
+		Breaks: "an egress grant reads back whole from its chain, however many flows it holds",
+		Edits:  []Edit{{linuxEgress, ",\n\t\t\tUserData: []byte(grantTag + formatRule(r))})", "})"}},
+		Catch:  []string{"kernel"},
+	},
+	{
+		ID:     "service-scope-pairs-twice",
+		Breaks: "a wildcard rule's scope lists each pair within its service once",
+		Edits:  []Edit{{cpEdges, "case j == i || j < i && y.Service == s.service:", "case j == i:"}},
+		Catch:  []string{"cp"},
 	},
 }

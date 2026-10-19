@@ -328,8 +328,11 @@ func (k *Kernel) createEgressLink(h *nsHandles, idx uint16) error {
 	return nil
 }
 
-// grantEgress writes the link's grant chain and its map entry, and records
-// the grant in the host side's alias, where observation reads it.
+// grantTag marks a rule of a link's grant; the flow it admits follows in
+// the rule's user data, so the chain records its own grant.
+const grantTag = "grant "
+
+// grantEgress writes the link's grant chain and its map entry.
 func (k *Kernel) grantEgress(cfg *kernel.EgressConfig) error {
 	c, err := nftables.New(nftables.WithNetNSFd(int(k.root)))
 	if err != nil {
@@ -340,7 +343,8 @@ func (k *Kernel) grantEgress(cfg *kernel.EgressConfig) error {
 	ch := c.AddChain(&nftables.Chain{Name: egressLink(cfg.Index), Table: t})
 	c.FlushChain(ch)
 	for _, r := range cfg.Rules {
-		c.AddRule(&nftables.Rule{Table: t, Chain: ch, Exprs: append(protoMatch(r.Proto, r.Ports), accept())})
+		c.AddRule(&nftables.Rule{Table: t, Chain: ch, Exprs: append(protoMatch(r.Proto, r.Ports), accept()),
+			UserData: []byte(grantTag + formatRule(r))})
 	}
 	if err := c.SetAddElements(egressMap(t), []nftables.SetElement{{
 		Key: padIfname(egressLink(cfg.Index)), VerdictData: &expr.Verdict{Kind: expr.VerdictJump, Chain: ch.Name},
@@ -350,11 +354,32 @@ func (k *Kernel) grantEgress(cfg *kernel.EgressConfig) error {
 	if err := c.Flush(); err != nil {
 		return fmt.Errorf("egress grant %d: %w", cfg.Index, err)
 	}
-	l, err := k.rootNL.LinkByName(egressLink(cfg.Index))
+	return nil
+}
+
+// egressGrant reads a link's grant back from its chain. A chain that is
+// missing holds no rules, so it reads as an empty grant.
+func (k *Kernel) egressGrant(idx uint16) ([]kernel.EgressRule, error) {
+	c, err := nftables.New(nftables.WithNetNSFd(int(k.root)))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return k.rootNL.LinkSetAlias(l, egressAlias+formatRules(cfg.Rules))
+	defer c.CloseLasting()
+	t := &nftables.Table{Name: egressTable, Family: nftables.TableFamilyINet}
+	rules, err := c.GetRules(t, &nftables.Chain{Name: egressLink(idx), Table: t})
+	if err != nil {
+		return nil, fmt.Errorf("egress grant %d: %w", idx, err)
+	}
+	var out []kernel.EgressRule
+	for _, r := range rules {
+		tag, ok := strings.CutPrefix(string(r.UserData), grantTag)
+		g, err := parseRule(tag)
+		if !ok || err != nil {
+			return nil, fmt.Errorf("egress grant %d: rule %d records %q", idx, r.Handle, r.UserData)
+		}
+		out = append(out, g)
+	}
+	return out, nil
 }
 
 // removeEgressIndex removes the host's filter and link for an index, when
@@ -418,7 +443,7 @@ func (k *Kernel) observeEgress(h *nsHandles) (*kernel.EgressConfig, error) {
 		return nil, nil
 	}
 	cfg := &kernel.EgressConfig{Index: uint16(idx)}
-	host, err := k.rootNL.LinkByName(egressLink(cfg.Index))
+	_, err = k.rootNL.LinkByName(egressLink(cfg.Index))
 	switch {
 	case notFound(err):
 		// The host side is gone, so the pair is: nothing to report.
@@ -426,40 +451,27 @@ func (k *Kernel) observeEgress(h *nsHandles) (*kernel.EgressConfig, error) {
 	case err != nil:
 		return nil, err
 	}
-	rules, err := parseRules(strings.TrimPrefix(host.Attrs().Alias, egressAlias))
-	if err != nil {
-		return nil, fmt.Errorf("egress %d: %w", idx, err)
+	if cfg.Rules, err = k.egressGrant(cfg.Index); err != nil {
+		return nil, err
 	}
-	cfg.Rules = rules
 	return cfg, nil
 }
 
-// formatRules writes a grant as "tcp/443-443,udp/53-53"; parseRules reads
-// it back. An empty grant writes nothing.
-func formatRules(rules []kernel.EgressRule) string {
-	var parts []string
-	for _, r := range rules {
-		parts = append(parts, fmt.Sprintf("%s/%d-%d", r.Proto, r.Ports.Lo, r.Ports.Hi))
-	}
-	return strings.Join(parts, ",")
+// formatRule writes one flow of a grant as "tcp/443-443"; parseRule reads
+// it back.
+func formatRule(r kernel.EgressRule) string {
+	return fmt.Sprintf("%s/%d-%d", r.Proto, r.Ports.Lo, r.Ports.Hi)
 }
 
-func parseRules(s string) ([]kernel.EgressRule, error) {
-	if s == "" {
-		return nil, nil
+func parseRule(s string) (kernel.EgressRule, error) {
+	proto, ports, ok := strings.Cut(s, "/")
+	lo, hi, ok2 := strings.Cut(ports, "-")
+	l, err1 := strconv.ParseUint(lo, 10, 16)
+	h, err2 := strconv.ParseUint(hi, 10, 16)
+	if !ok || !ok2 || err1 != nil || err2 != nil {
+		return kernel.EgressRule{}, fmt.Errorf("grant %q", s)
 	}
-	var out []kernel.EgressRule
-	for _, part := range strings.Split(s, ",") {
-		proto, ports, ok := strings.Cut(part, "/")
-		lo, hi, ok2 := strings.Cut(ports, "-")
-		l, err1 := strconv.ParseUint(lo, 10, 16)
-		h, err2 := strconv.ParseUint(hi, 10, 16)
-		if !ok || !ok2 || err1 != nil || err2 != nil {
-			return nil, fmt.Errorf("grant %q", part)
-		}
-		out = append(out, kernel.EgressRule{Proto: model.Proto(proto), Ports: model.PortRange{Lo: uint16(l), Hi: uint16(h)}})
-	}
-	return out, nil
+	return kernel.EgressRule{Proto: model.Proto(proto), Ports: model.PortRange{Lo: uint16(l), Hi: uint16(h)}}, nil
 }
 
 // EnableForwarding turns on IPv4 forwarding, which egress needs on every

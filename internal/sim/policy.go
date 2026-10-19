@@ -78,9 +78,9 @@ func points(rules []store.Rule) []point {
 }
 
 // reaches reports whether any flow at all may go from one service to
-// another.
-func reaches(rules []store.Rule, from, to model.ServiceID) bool {
-	for _, p := range points(rules) {
+// another, asking at the rules' points.
+func reaches(rules []store.Rule, pts []point, from, to model.ServiceID) bool {
+	for _, p := range pts {
 		if permits(rules, from, to, p.proto, p.port) {
 			return true
 		}

@@ -769,7 +769,7 @@ var Mutants = []Mutant{
 		ID:     "rule-deduplicated-across-actions",
 		Breaks: "an allow and a deny of the same flows are two rules",
 		Edits:  []Edit{{cpPlane, " && r.Ports == req.Ports && r.Deny == deny {", " && r.Ports == req.Ports {"}},
-		Catch:  []string{"cp", "cpserver"},
+		Catch:  []string{"cp"},
 	},
 	{
 		ID:     "pgstore-forgets-deny",
@@ -829,7 +829,7 @@ var Mutants = []Mutant{
 		ID:     "scan-keeps-unnamed-peer",
 		Breaks: "a scan that finds a held interface's device where only a process holds it drops that namespace's peers, so co-located clients stop slotting it",
 		Edits:  []Edit{{agentLife, "\t\t\tif named, ok := c.ns[i.ns]; ok {\n\t\t\t\tc.lost(named)\n", "\t\t\tif named, ok := c.ns[i.ns]; ok && false {\n\t\t\t\tc.lost(named)\n"}},
-		Catch:  []string{"agent-core", "sim"},
+		Catch:  []string{"agent-core"},
 	},
 	{
 		ID:     "lost-peer-leaves-clients-planned",

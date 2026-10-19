@@ -416,7 +416,7 @@ func TestAnAttachIsHandedOverOnceItsRelayAcknowledges(t *testing.T) {
 		t.Fatal("the peer waits to be installed; only its slots should")
 	}
 	now = now.Add(10 * time.Millisecond)
-	c.RegistrationAcked(now, i.port, relayAt)
+	c.RegistrationAcked(now, i.port, relayAt, c.counter)
 	replies := run(now)
 	if len(replies) != 1 || replies[0].Err != nil || !slotted(c, i.ns) {
 		t.Fatalf("after the ack: replies %+v, slotted %v; want one answer and a slot", replies, slotted(c, i.ns))
@@ -454,7 +454,7 @@ func TestANewRelayBackendJoinsAClientsMapOnceAcknowledged(t *testing.T) {
 	if slotted(c, "wirenet-a") {
 		t.Fatal("a backend new to the client joined its map before the relay acknowledged")
 	}
-	c.RegistrationAcked(now, 40000, relayAt)
+	c.RegistrationAcked(now, 40000, relayAt, c.counter)
 	drive(c, now, succeed)
 	if !slotted(c, "wirenet-a") {
 		t.Fatal("the acknowledged backend never joined the map")
@@ -549,7 +549,7 @@ func TestAnAcknowledgedDirectionIsNotResentAndANewPeerResendsAlone(t *testing.T)
 	if n := sends(now)[relayAt]; n != 1 {
 		t.Fatalf("registered %d times on install, want once", n)
 	}
-	c.RegistrationAcked(now, 40000, relayAt)
+	c.RegistrationAcked(now, 40000, relayAt, c.counter)
 	// A second peer arrives; only its direction is resent.
 	update(4, backend("if-b", peer, "fd00::6"), other)
 	total := map[netip.AddrPort]int{}
@@ -581,7 +581,7 @@ func TestEveryServiceTheNamespaceDoesNotTranslateIsRejected(t *testing.T) {
 			t.Fatal(err)
 		}
 		drive(c, now, succeed)
-		c.RegistrationAcked(now, 40000, relayAt)
+		c.RegistrationAcked(now, 40000, relayAt, c.counter)
 		drive(c, now, succeed)
 	}
 	rejects := func() []netip.Addr { return c.ns["wirenet-a"].rules.Rules.Reject }
@@ -782,13 +782,43 @@ func TestASessionCheckThatFailsEndsTheWait(t *testing.T) {
 	}
 }
 
-// TestARelayPeerWhoseEpochOrSecretChangesRegistersAtOnce keeps a relay
-// peer installed while its edge goes dormant and back, and then while its
-// secret changes: each time the direction registers at once, rather than
-// at the periodic registration.
-func TestARelayPeerWhoseEpochOrSecretChangesRegistersAtOnce(t *testing.T) {
+// sent carries out the core's actions until none remain, batches
+// succeeding, and returns the registrations they sent.
+func sent(c *Core, at time.Time) []SendRegistration {
+	var out []SendRegistration
+	for acts := c.Actions(at); len(acts) > 0; acts = c.Actions(at) {
+		for _, a := range acts {
+			switch a := a.(type) {
+			case RunBatch:
+				c.BatchDone(at, a.Namespace, a.ID, len(a.Ops), nil)
+			case SendRegistration:
+				out = append(out, a)
+			}
+		}
+	}
+	return out
+}
+
+// read verifies a registration under the relay's key for secret, and
+// returns its counter and whether it withdraws.
+func read(t *testing.T, secret model.Secret, relay model.RelayID, r SendRegistration) (uint64, bool) {
+	t.Helper()
+	counter, withdrawal, ok := regproto.Verify(regproto.RelayKey(secret, relay), r.To, r.Payload[:])
+	if !ok {
+		t.Fatalf("a registration to %v does not verify under %s's key", r.To, relay)
+	}
+	return counter, withdrawal
+}
+
+// withdrawable is db through two relays, and a driver that publishes
+// if-a's peers.
+func withdrawable(t *testing.T) (*Core, time.Time, api.Peer, func(rev uint64, peers ...api.Peer)) {
+	t.Helper()
 	c, now := adopted(t)
 	c.cfg.RegisterEvery = time.Hour
+	b := backend("if-b", peer, "fd00::6")
+	b.Registration = model.Secret{1}
+	b.Relays = append(b.Relays, api.RelayPath{Relay: "r2", Send: ap("192.0.2.2:7000")})
 	update := func(rev uint64, peers ...api.Peer) {
 		t.Helper()
 		if err := c.State(now, api.StateUpdate{Host: "h1", Generation: rev, Networks: []api.NetworkState{client(rev, "if-a", self, peers...)},
@@ -796,47 +826,195 @@ func TestARelayPeerWhoseEpochOrSecretChangesRegistersAtOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	sends := func() [][regproto.Size]byte {
-		var out [][regproto.Size]byte
-		for acts := c.Actions(now); len(acts) > 0; acts = c.Actions(now) {
-			for _, a := range acts {
-				switch a := a.(type) {
-				case RunBatch:
-					c.BatchDone(now, a.Namespace, a.ID, len(a.Ops), nil)
-				case SendRegistration:
-					if a.To == relayAt {
-						out = append(out, a.Payload)
-					}
+	return c, now, b, update
+}
+
+// TestARemovedRelayPeerIsWithdrawnUntilAcknowledged installs db through
+// two relays, then takes it away as a deny does. Once the batch removes
+// the peer, each relay's direction is withdrawn above every claim sent
+// before, and each withdrawal goes again unchanged until its relay
+// acknowledges that counter: an acknowledgment of the earlier claim, which
+// a relay sends after the withdrawal leaves if the claim arrives late,
+// ends nothing.
+func TestARemovedRelayPeerIsWithdrawnUntilAcknowledged(t *testing.T) {
+	c, now, b, update := withdrawable(t)
+	update(3, b)
+	if got := sent(c, now); len(got) != 2 {
+		t.Fatalf("installing db sent %+v, want a claim to each relay", got)
+	}
+	claimed := c.counter
+	for _, rp := range b.Relays {
+		c.RegistrationAcked(now, 40000, rp.Send, claimed)
+	}
+	update(4)
+	got := sent(c, now)
+	if len(got) != 2 {
+		t.Fatalf("removing db sent %+v, want a withdrawal to each relay", got)
+	}
+	payload := map[netip.AddrPort][regproto.Size]byte{}
+	var withdrawn uint64
+	for i, r := range got {
+		counter, withdrawal := read(t, b.Registration, b.Relays[i].Relay, r)
+		if !withdrawal || counter <= claimed || r.To != b.Relays[i].Send || r.From != 40000 {
+			t.Fatalf("removing db sent %+v at %d, withdrawal %v; want a withdrawal above %d from 40000", r, counter, withdrawal, claimed)
+		}
+		payload[r.To], withdrawn = r.Payload, counter
+	}
+	second := b.Relays[1].Send
+	if c.RegistrationAcked(now, 40000, relayAt, claimed) {
+		t.Fatal("the claim's late acknowledgment changed something")
+	}
+	if c.RegistrationAcked(now, 40000, second, withdrawn) {
+		t.Fatal("the withdrawal's acknowledgment asked for a pass over the namespaces")
+	}
+	resent := map[netip.AddrPort]int{}
+	for at := now; at.Before(now.Add(3 * time.Second)); at = at.Add(5 * time.Millisecond) {
+		c.Tick(at)
+		for _, r := range sent(c, at) {
+			if r.Payload != payload[r.To] {
+				t.Fatalf("a resend to %v changed: %x, want %x", r.To, r.Payload, payload[r.To])
+			}
+			resent[r.To]++
+		}
+	}
+	if resent[relayAt] != c.cfg.RegisterRetries || resent[second] != 0 {
+		t.Fatalf("resent %v, want %d to the relay that never acknowledged and none to the one that did", resent, c.cfg.RegisterRetries)
+	}
+}
+
+// TestAPeerBackSoonAfterItsWithdrawalWaitsForItsOwnAcknowledgment removes
+// db and installs it again before its relay acknowledges the withdrawal.
+// The new claim outranks the withdrawal, which goes no more, and the
+// withdrawal's late acknowledgment releases neither the slot nor the
+// claim's resends: the relay may hold the withdrawal alone, and only an
+// acknowledgment of the claim says otherwise.
+func TestAPeerBackSoonAfterItsWithdrawalWaitsForItsOwnAcknowledgment(t *testing.T) {
+	c, now, b, update := withdrawable(t)
+	b.Relays = b.Relays[:1]
+	update(3, b)
+	sent(c, now)
+	c.RegistrationAcked(now, 40000, relayAt, c.counter)
+	drive(c, now, succeed)
+	if !slotted(c, "wirenet-a") {
+		t.Fatal("db never took its slot")
+	}
+	update(4)
+	got := sent(c, now)
+	if len(got) != 1 {
+		t.Fatalf("removing db sent %+v, want one withdrawal", got)
+	}
+	withdrawn, _ := read(t, b.Registration, "r1", got[0])
+	update(5, b)
+	got = sent(c, now)
+	if len(got) != 1 {
+		t.Fatalf("restoring db sent %+v, want one claim", got)
+	}
+	if counter, withdrawal := read(t, b.Registration, "r1", got[0]); withdrawal || counter <= withdrawn {
+		t.Fatalf("restoring db sent a registration at %d, withdrawal %v; want a claim above %d", counter, withdrawal, withdrawn)
+	}
+	// Until the relay answers, the withdrawal would go again 10ms and
+	// 40ms after it left.
+	tick := func(from, to time.Duration) (claims int) {
+		for at := now.Add(from); at.Before(now.Add(to)); at = at.Add(5 * time.Millisecond) {
+			c.Tick(at)
+			for _, r := range sent(c, at) {
+				if _, withdrawal := read(t, b.Registration, "r1", r); withdrawal {
+					t.Fatalf("the withdrawal went again %v after the claim", at.Sub(now))
 				}
+				claims++
 			}
 		}
-		return out
+		return claims
 	}
-	b := backend("if-b", peer, "fd00::6")
-	b.Registration = model.Secret{1}
+	tick(0, 50*time.Millisecond)
+	c.RegistrationAcked(now, 40000, relayAt, withdrawn)
+	drive(c, now, succeed)
+	if slotted(c, "wirenet-a") {
+		t.Fatal("the withdrawal's acknowledgment gave db its slot back")
+	}
+	claims := tick(50*time.Millisecond, 500*time.Millisecond)
+	if claims == 0 {
+		t.Fatal("the withdrawal's acknowledgment ended the claim's resends")
+	}
+	c.RegistrationAcked(now, 40000, relayAt, c.counter)
+	drive(c, now, succeed)
+	if !slotted(c, "wirenet-a") {
+		t.Fatal("the claim's acknowledgment never gave db its slot")
+	}
+}
+
+// TestAPeerARemovalThatFailedPartwayTookIsWithdrawn fails the batch that
+// removes db at its peer removal, which the kernel nonetheless carried
+// out, as when one of wgctrl's chunks fails after another landed. The look
+// that follows finds db gone, and the replan after the retry's backoff
+// withdraws the direction.
+func TestAPeerARemovalThatFailedPartwayTookIsWithdrawn(t *testing.T) {
+	c, now, b, update := withdrawable(t)
 	update(3, b)
-	if n := len(sends()); n != 1 {
-		t.Fatalf("registered %d times on install, want once", n)
+	sent(c, now)
+	update(4)
+	var withdrawn []SendRegistration
+	for _, a := range c.Actions(now) {
+		rb, ok := a.(RunBatch)
+		if !ok {
+			continue
+		}
+		at := slices.IndexFunc(rb.Ops, func(op kernel.Op) bool { return op.Kind == kernel.SetPeers && op.Peers[0].Remove })
+		if at < 0 {
+			t.Fatalf("the batch %+v removes no peer", rb.Ops)
+		}
+		c.BatchDone(now, rb.Namespace, rb.ID, at, errors.New("netlink: chunk 2 of 2 failed"))
 	}
-	c.RegistrationAcked(now, 40000, relayAt)
-	b.Epoch = 1
+	for _, a := range c.Actions(now) {
+		switch a := a.(type) {
+		case SendRegistration:
+			t.Fatalf("withdrew %v before looking at what the failed removal left", a.To)
+		case Observe:
+			dev := kernel.Device{Name: c.cfg.Device, HasKey: true, PublicKey: self, ListenPort: 40000}
+			c.Observed(now, kernel.Namespace{Name: a.Namespace, Devices: []kernel.Device{dev}}, nil)
+		}
+	}
+	for _, r := range sent(c, now.Add(c.cfg.RetryMax)) {
+		if _, withdrawal := read(t, b.Registration, b.Relays[len(withdrawn)].Relay, r); withdrawal {
+			withdrawn = append(withdrawn, r)
+		}
+	}
+	if len(withdrawn) != 2 {
+		t.Fatalf("withdrew %+v after the look, want both relays", withdrawn)
+	}
+}
+
+// TestAnInstalledRelayPeerWhoseSecretOrRelaysChangeClaimsAtOnce keeps db
+// installed while its secret changes, as when the agent was cut off while
+// its edge was made anew on the same ports, and while its network gains a
+// relay: each time the direction claims at once, under the secret it now
+// has and at every relay, rather than at the periodic claim.
+func TestAnInstalledRelayPeerWhoseSecretOrRelaysChangeClaimsAtOnce(t *testing.T) {
+	c, now, b, update := withdrawable(t)
+	b.Relays = b.Relays[:1]
+	update(3, b)
+	if got := sent(c, now); len(got) != 1 {
+		t.Fatalf("installing db sent %+v, want one claim", got)
+	}
+	c.RegistrationAcked(now, 40000, relayAt, c.counter)
 	update(4, b)
-	if n := len(sends()); n != 1 {
-		t.Fatalf("registered %d times after the epoch moved, want once", n)
-	}
-	c.RegistrationAcked(now, 40000, relayAt)
-	update(5, b)
-	if n := len(sends()); n != 0 {
-		t.Fatalf("registered %d times with nothing changed, want none", n)
+	if got := sent(c, now); len(got) != 0 {
+		t.Fatalf("with nothing changed, sent %+v", got)
 	}
 	b.Registration = model.Secret{2}
-	update(6, b)
-	got := sends()
+	update(5, b)
+	got := sent(c, now)
 	if len(got) != 1 {
-		t.Fatalf("registered %d times after the secret changed, want once", len(got))
+		t.Fatalf("after the secret changed, sent %+v, want one claim", got)
 	}
-	if _, ok := regproto.Verify(regproto.RelayKey(b.Registration, "r1"), relayAt, got[0][:]); !ok {
-		t.Fatal("the registration was not made under the new secret")
+	if _, withdrawal := read(t, b.Registration, "r1", got[0]); withdrawal {
+		t.Fatal("the secret's change sent a withdrawal")
+	}
+	b.Relays = append(slices.Clone(b.Relays), api.RelayPath{Relay: "r2", Send: ap("192.0.2.2:7000")})
+	update(6, b)
+	got = sent(c, now)
+	if len(got) != 2 || got[1].To != b.Relays[1].Send {
+		t.Fatalf("after the network gained a relay, sent %+v, want a claim to each", got)
 	}
 }
 
@@ -886,7 +1064,7 @@ func TestABatchReplansOnlyTheNamespacesItCanRelease(t *testing.T) {
 		}
 	}
 	idle := c.Stats.Idle
-	c.RegistrationAcked(now, 40000, relayAt)
+	c.RegistrationAcked(now, 40000, relayAt, c.counter)
 	for range 4 {
 		drive(c, now, succeed)
 	}
@@ -933,7 +1111,7 @@ func TestABackendHandsOverOnceItsRelayHoldsItsEdges(t *testing.T) {
 		t.Fatalf("answered %+v before the relay acknowledged", replies)
 	}
 	now = now.Add(10 * time.Millisecond)
-	c.RegistrationAcked(now, port, relayAt)
+	c.RegistrationAcked(now, port, relayAt, c.counter)
 	if replies := run(now); len(replies) != 1 || replies[0].Err != nil {
 		t.Fatalf("after the ack: replies %+v, want one answer", replies)
 	}
@@ -949,13 +1127,13 @@ func TestOnlyAnAwaitedAcknowledgmentChangesAnything(t *testing.T) {
 		t.Fatal(err)
 	}
 	drive(c, now, succeed)
-	if c.RegistrationAcked(now, 40001, relayAt) {
+	if c.RegistrationAcked(now, 40001, relayAt, c.counter) {
 		t.Fatal("an acknowledgment for another port changed something")
 	}
-	if !c.RegistrationAcked(now, 40000, relayAt) {
+	if !c.RegistrationAcked(now, 40000, relayAt, c.counter) {
 		t.Fatal("the awaited acknowledgment changed nothing")
 	}
-	if c.RegistrationAcked(now, 40000, relayAt) {
+	if c.RegistrationAcked(now, 40000, relayAt, c.counter) {
 		t.Fatal("a repeated acknowledgment changed something")
 	}
 }

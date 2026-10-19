@@ -785,12 +785,13 @@ func (d *Daemon) probeReply(from netip.AddrPort, b []byte) {
 // ack takes a relay's acknowledgment of a registration sent from a
 // device's listen port.
 func (d *Daemon) ack(from netip.AddrPort, port uint16, payload []byte) {
-	if _, ok := regproto.AckCounter(payload); !ok {
+	counter, ok := regproto.AckCounter(payload)
+	if !ok {
 		return
 	}
 	d.post(func() {
 		d.m.registrations.WithLabelValues("acked").Inc()
-		if !d.core.RegistrationAcked(d.now(), port, from) {
+		if !d.core.RegistrationAcked(d.now(), port, from, counter) {
 			d.quiet = true
 		}
 	})

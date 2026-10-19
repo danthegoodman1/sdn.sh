@@ -355,7 +355,7 @@ func peer(x, y store.Interface, links Links, edges map[[2]model.InterfaceID]stor
 	if !ok || !e.Dormant.IsZero() {
 		return api.Peer{}, false
 	}
-	p.Registration, p.Epoch = e.SecretAB, e.Epoch
+	p.Registration = e.SecretAB
 	if x.ID == e.B {
 		p.Registration = e.SecretBA
 	}
@@ -415,14 +415,12 @@ func Relay(r store.Relay, edges []store.Edge, generation uint64) api.RelayState 
 					Peer:       ports.BA,
 					Advertised: netip.AddrPortFrom(adv, ports.AB),
 					Key:        regproto.RelayKey(e.SecretAB, r.ID),
-					Epoch:      e.Epoch,
 				},
 				api.RelayPort{
 					Local:      netip.AddrPortFrom(ports.Addr, ports.BA),
 					Peer:       ports.AB,
 					Advertised: netip.AddrPortFrom(adv, ports.BA),
 					Key:        regproto.RelayKey(e.SecretBA, r.ID),
-					Epoch:      e.Epoch,
 				})
 		}
 	}

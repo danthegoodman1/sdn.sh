@@ -287,9 +287,9 @@ type nsState struct {
 	chosen      map[model.Key]netip.AddrPort
 	drain       map[model.Key]time.Time
 	fresh       map[model.Key]bool
-	// registered holds what each relay peer's registrations last depended
-	// on.
-	registered map[model.Key]registration
+	// relayed holds what each relay peer's registrations take, while the
+	// desired state names the peer or the device holds it.
+	relayed map[model.Key]relayed
 	// unflushed holds addresses of removed peers whose flows have yet to
 	// be flushed; sweep asks for a sweep of every flow no installed peer
 	// accounts for, after a restart lost track.
@@ -327,21 +327,24 @@ type nsState struct {
 func newNS(name string, id model.InterfaceID) *nsState {
 	return &nsState{
 		name: name, iface: id, dirty: true, egressClear: true,
-		peers:      map[model.Key]kernel.Peer{},
-		chosen:     map[model.Key]netip.AddrPort{},
-		drain:      map[model.Key]time.Time{},
-		fresh:      map[model.Key]bool{},
-		registered: map[model.Key]registration{},
-		acks:       map[model.Key]*ackWait{},
-		sessions:   map[model.Key]*sessionWait{},
+		peers:    map[model.Key]kernel.Peer{},
+		chosen:   map[model.Key]netip.AddrPort{},
+		drain:    map[model.Key]time.Time{},
+		fresh:    map[model.Key]bool{},
+		relayed:  map[model.Key]relayed{},
+		acks:     map[model.Key]*ackWait{},
+		sessions: map[model.Key]*sessionWait{},
 	}
 }
 
 // ackWait is a relay peer waiting for its edge's relay to acknowledge the
 // namespace's registration on path, the relay port the peer is sent to.
+// Only an acknowledgment of a counter above after, the agent's counter as
+// the wait began, answers a claim made for it.
 type ackWait struct {
 	path  netip.AddrPort
 	until time.Time
+	after uint64
 	acked bool
 }
 
@@ -392,6 +395,11 @@ type Core struct {
 	// registration, and resendAck finds the one an acknowledgment ends.
 	resends   map[string]map[model.Key]*resend
 	resendAck map[ackKey]resendRef
+	// withdrawals holds the withdrawals awaiting acknowledgment, and
+	// nextWithdrawal is when the earliest goes again, or later: an
+	// acknowledgment leaves it be.
+	withdrawals    map[ackKey]*withdrawal
+	nextWithdrawal time.Time
 	// awaitingAck finds the namespace a relay's acknowledgment is for,
 	// holding only directions a peer waits on, so acknowledgments nobody
 	// awaits cost nothing to ignore.
@@ -413,6 +421,8 @@ type Core struct {
 // Stats counts the core's decisions.
 type Stats struct {
 	Batches, Failures, Conflicts, Preempted, Registrations uint64
+	// Withdrawals counts withdrawal datagrams sent, resends included.
+	Withdrawals uint64
 	// Failovers counts relays this agent found down, each moving the edges
 	// it carried to their next relays.
 	Failovers uint64
@@ -496,6 +506,7 @@ func New(cfg Config, rand io.Reader) *Core {
 
 		awaitingAck: map[ackKey]string{},
 		resendAck:   map[ackKey]resendRef{},
+		withdrawals: map[ackKey]*withdrawal{},
 		reverseWait: map[model.InterfaceID]map[string]bool{},
 	}
 }

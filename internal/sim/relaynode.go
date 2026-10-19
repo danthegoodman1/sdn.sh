@@ -158,7 +158,7 @@ func (r *relayNode) persist(reg relaycore.Registration, raw *[regproto.Size]byte
 		committed := r.table.Commit(reg)
 		defer r.release()
 		if committed {
-			r.w.underlay(netip.AddrPortFrom(r.advertised, reg.Local.Port()), reg.Endpoint, packet{ack: true})
+			r.w.underlay(netip.AddrPortFrom(r.advertised, reg.Local.Port()), reg.Endpoint, packet{ack: true, counter: reg.Counter})
 		}
 		if r.w.attacker != nil && reg.Endpoint.Addr() == r.w.attacker.addr {
 			r.w.fail("%s registered the attacker at %v for %v", r.name, reg.Endpoint, reg.Local)
@@ -216,6 +216,8 @@ func (r *relayNode) receive(src, dst netip.AddrPort, p packet) {
 			raw = p.reg
 		}
 		r.persist(d.Registration, raw)
+	case relaycore.Acknowledge:
+		r.w.underlay(netip.AddrPortFrom(r.advertised, local.Port()), src, packet{ack: true, counter: d.Registration.Counter})
 	}
 }
 

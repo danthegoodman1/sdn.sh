@@ -262,9 +262,6 @@ type RelayPort struct {
 	Advertised netip.AddrPort `json:"advertised"`
 	// Key is this relay's registration key for the direction.
 	Key model.Secret `json:"key"`
-	// Epoch moves when the edge goes dormant, and the relay forgets the
-	// direction's endpoint, though not its highest counter.
-	Epoch uint64 `json:"epoch,omitempty"`
 }
 
 // Agent local API, on the agent's unix socket.

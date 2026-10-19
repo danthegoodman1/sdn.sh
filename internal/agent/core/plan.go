@@ -152,7 +152,7 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 	}
 	var tgt target
 	if ok {
-		c.reregister(now, st, x)
+		c.track(now, st, x)
 		tgt = c.target(now, st, n, x)
 		if c.Debug != nil {
 			var ids []string

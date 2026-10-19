@@ -39,14 +39,14 @@ Nine c6i.xlarge instances (4 vCPU, up to 12.5 Gb/s) in one placement group in us
 
 | Event | Result |
 |---|---|
-| A new workload's first connection to a peer on another host, 20 peers | 48 ms p50, 58 ms max |
-| A backend replaced, until every client reaches the new one | 28–37 ms p50, 47–60 ms p99 |
-| One of two backends removed, rewriting half of each client's slots | 132–143 ms p50, 171–191 ms p99 |
-| A deny closing a wildcard to 30 sandboxes, from its commit | 8–9 ms p50, 14 ms max |
-| The deny lifted, until every sandbox reaches db again | 21–26 ms p50, 41 ms max |
+| A new workload's first connection to a peer on another host, 20 peers | 50 ms p50, 60 ms max |
+| A backend replaced, until every client reaches the new one | 25–45 ms p50, 36–55 ms p99 |
+| One of two backends removed, rewriting half of each client's slots | 99–123 ms p50, 137–161 ms p99 |
+| A deny closing a wildcard to 30 sandboxes, from its commit | 9–11 ms p50, 16 ms max |
+| The deny lifted, until every sandbox reaches db again | 20–25 ms p50, 64 ms max |
 | A relay killed: an open TCP connection stalls | 0.82 s, then carries on |
 | A relay killed: the next new connection | 0.22–0.26 s |
-| Attaches and detaches across four hosts, 4 workers each | 45 pairs a second, no failures |
+| Attaches and detaches across four hosts, 4 workers each | 46 pairs a second, no failures |
 | Interfaces on one host | 1,000, at 841 KiB each |
 
 Service changes ran under attach churn, with 30 clients over the four hosts. Ranges span two runs, and six for the rule changes.

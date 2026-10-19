@@ -40,6 +40,7 @@ func stream(args []string) error {
 	duration := fs.Duration("duration", 10*time.Second, "how long to send")
 	parallel := fs.Int("parallel", 1, "connections")
 	reverse := fs.Bool("reverse", false, "the server sends and the client receives")
+	at := fs.String("at", "", "start sending at this RFC 3339 time, once connected")
 	if err := parse(fs, args); err != nil {
 		return err
 	}
@@ -68,6 +69,9 @@ func stream(args []string) error {
 	}
 	res := bench.Stream{Target: *target, Reverse: *reverse, Parallel: *parallel, Conns: make([]bench.StreamConn, *parallel)}
 	errs := make([]error, *parallel)
+	if err := startAt(*at); err != nil {
+		return err
+	}
 	start := time.Now()
 	deadline := start.Add(*duration)
 	var wg sync.WaitGroup

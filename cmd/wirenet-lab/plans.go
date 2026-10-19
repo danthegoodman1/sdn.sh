@@ -30,6 +30,9 @@ type Options struct {
 	Concurrency int
 	MaxIfaces   int
 	Edges       int
+	// MTU is the overlay MTU of every network a plan creates, and of the
+	// paths plan's gateway.
+	MTU int
 }
 
 func (o Options) param(name string) string {
@@ -54,6 +57,8 @@ func (o Options) param(name string) string {
 		return itoa(o.MaxIfaces)
 	case "edges":
 		return itoa(o.Edges)
+	case "mtu":
+		return itoa(o.MTU)
 	}
 	return "?"
 }
@@ -72,7 +77,7 @@ var plans = []plan{
 	{"hostbench", "cmd/hostbench on each agent host: device placement, netdev and peer concurrency, peer costs",
 		false, nil, planHostbench},
 	{"paths", "the plain-TCP ceiling, then the relay and a WireGuard-terminating gateway on the same middle box: throughput, middle-box CPU, round trips idle and loaded",
-		true, []string{"duration", "streams", "rr-size"}, planPaths},
+		true, []string{"duration", "streams", "rr-size", "mtu"}, planPaths},
 	{"attach", "attach to first connection at a policy degree, timed from the attach request",
 		true, []string{"degree", "rounds"}, planAttach},
 	{"churn", "sustained attach-and-detach on every host at once, every pair counted",
@@ -84,7 +89,7 @@ var plans = []plan{
 	{"density", "interfaces on one host until an attach fails, attach latency degrades, or the cap",
 		true, []string{"max-interfaces"}, planDensity},
 	{"spread", "many edges streaming at once through one relay, then two, then three: aggregate throughput and relay CPU by relay count",
-		true, []string{"duration", "edges"}, planSpread},
+		true, []string{"duration", "edges", "mtu"}, planSpread},
 	{"policy", "open a service to every other with a wildcard, then time a deny closing it to one service's clients, and the deny's removal",
 		true, []string{"clients"}, planPolicy},
 }
@@ -280,7 +285,7 @@ func (r *run) network(name string, relays []Node, services []string, rules ...[2
 		names = append(names, n.Name)
 	}
 	cp := r.env.CP()
-	if err := r.ctl(cp, nil, "network", "create", name, "--relays", strings.Join(names, ",")); err != nil {
+	if err := r.ctl(cp, nil, "network", "create", name, "--relays", strings.Join(names, ","), "--mtu", itoa(r.o.MTU)); err != nil {
 		return nil, err
 	}
 	out := map[string]api.ServiceInfo{}
@@ -333,6 +338,14 @@ func (r *run) setCeiling(a, b Node, s bench.Stream) {
 		r.rep.Ceiling = &Ceiling{From: a.Name, To: b.Name, Streams: s.Parallel, BitsPerSecond: s.BitsPerSecond, Retransmits: s.Retransmits}
 	}
 }
+
+// windowLead is how far ahead a shared window starts, so every command
+// that measures it arrives and connects first.
+const windowLead = 3 * time.Second
+
+// startAt is the start of a window every stream and CPU sample in it
+// shares, for wirenet-bench's --at.
+func startAt() string { return time.Now().Add(windowLead).UTC().Format(time.RFC3339Nano) }
 
 // quickCeiling is the ceiling every plan records: a short run of the
 // configured stream count.

@@ -29,6 +29,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func main() {
@@ -65,6 +66,26 @@ func parse(fs *flag.FlagSet, args []string) error {
 	if fs.NArg() > 0 {
 		return fmt.Errorf("%s: unexpected arguments %q", fs.Name(), fs.Args())
 	}
+	return nil
+}
+
+// startAt waits until the wall-clock time at names, RFC 3339, so runs on
+// several machines share one window; an empty at starts now. A run that is
+// ready only after its start fails, since its window would no longer match
+// the others'.
+func startAt(at string) error {
+	if at == "" {
+		return nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, at)
+	if err != nil {
+		return fmt.Errorf("--at: %w", err)
+	}
+	wait := time.Until(t)
+	if wait < 0 {
+		return fmt.Errorf("ready %v after the start at %s", -wait, at)
+	}
+	time.Sleep(wait)
 	return nil
 }
 

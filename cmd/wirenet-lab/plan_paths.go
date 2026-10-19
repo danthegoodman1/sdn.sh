@@ -38,13 +38,15 @@ func (r *run) measurePath(name string, a Node, aNS string, b Node, bNS string, t
 		return res, err
 	}
 	mid, d := r.env.Middle(), r.o.Duration
-	stream := func(parallel int, d time.Duration, s *bench.Stream) error {
-		return r.bench(a, s, "stream", "--target", to.String(), "--netns="+aNS, "--duration", d.String(), "--parallel", itoa(parallel))
+	stream := func(parallel int, d time.Duration, s *bench.Stream, extra ...string) error {
+		return r.bench(a, s, append([]string{"stream", "--target", to.String(), "--netns=" + aNS, "--duration", d.String(), "--parallel", itoa(parallel)}, extra...)...)
 	}
+	// The stream and the middle box's CPU sample share one window.
 	withCPU := func(parallel int, s *bench.Stream, c *bench.CPU) error {
+		at := startAt()
 		return together(
-			func() error { return stream(parallel, d, s) },
-			func() error { return r.bench(mid, c, "cpu", "--duration", d.String()) },
+			func() error { return stream(parallel, d, s, "--at", at) },
+			func() error { return r.bench(mid, c, "cpu", "--duration", d.String(), "--at", at) },
 		)
 	}
 	rr := func(d time.Duration, out *bench.RR) error {
@@ -203,7 +205,6 @@ func connects(results []pathResult) string {
 const (
 	gwDev  = "wnbgw0"
 	gwPort = 62000
-	gwMTU  = "1380"
 )
 
 type gatewayPath struct {
@@ -237,7 +238,7 @@ func (r *run) gateway(a, b, mid Node) (gatewayPath, error) {
 			"peer", pub[a.Name], "allowed-ips", overlay[a.Name] + "/32", "endpoint", endpoint(a),
 			"peer", pub[b.Name], "allowed-ips", overlay[b.Name] + "/32", "endpoint", endpoint(b)}},
 		{mid, []string{"ip", "addr", "add", overlay[mid.Name] + "/24", "dev", gwDev}},
-		{mid, []string{"ip", "link", "set", gwDev, "mtu", gwMTU, "up"}},
+		{mid, []string{"ip", "link", "set", gwDev, "mtu", itoa(r.o.MTU), "up"}},
 		{mid, []string{"sysctl", "-qw", "net.ipv4.ip_forward=1"}},
 	}
 	for _, h := range []Node{a, b} {
@@ -251,7 +252,7 @@ func (r *run) gateway(a, b, mid Node) (gatewayPath, error) {
 			step{h, []string{"ip", "netns", "exec", ns, "wg", "set", gwDev, "listen-port", itoa(gwPort), "private-key", gwKey(h),
 				"peer", pub[mid.Name], "allowed-ips", "10.77.0.0/24", "endpoint", endpoint(mid)}},
 			step{h, []string{"ip", "-n", ns, "addr", "add", overlay[h.Name] + "/24", "dev", gwDev}},
-			step{h, []string{"ip", "-n", ns, "link", "set", gwDev, "mtu", gwMTU, "up"}},
+			step{h, []string{"ip", "-n", ns, "link", "set", gwDev, "mtu", itoa(r.o.MTU), "up"}},
 		)
 	}
 	for _, s := range steps {

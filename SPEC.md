@@ -433,11 +433,11 @@ During that window, clients disagree. For a single-instance service, some client
 
 Set it out of band; never depend on in-band discovery. A WireGuard header costs 32 bytes, over 8 for UDP and 20 or 40 for the outer IP header — 1440 on a 1500-byte IPv4 path, 1420 on IPv6. Relays add nothing.
 
-The default overlay MTU is 1380, which survives an IPv6 underlay inside a provider tunnel. The agent probes the underlay path for a host pair and raises the overlay MTU where it can, rather than relying on per-flow path MTU discovery. Because MTU is a property of the device and an interface has one device for all its peers, a per-path MTU needs a per-destination route; the device's own MTU is the minimum across its peers.
+The default overlay MTU is 1380, which survives an IPv6 underlay inside a provider tunnel. A network takes its MTU when it is created, up to 9000. The agent is to probe the underlay path for each host pair and raise the overlay MTU where it can, rather than rely on per-flow path MTU discovery (PLAN.md 9B). Because MTU is a property of the device and an interface has one device for all its peers, a per-path MTU needs a per-destination route; the device's own MTU is the minimum across its peers.
 
 Every namespace clamps TCP MSS, and ICMP and ICMPv6 `Packet Too Big` are permitted, so a path that shrinks degrades rather than blackholing. A connection that establishes and then stalls on a large transfer is the signature of getting this wrong.
 
-**The size of this lever depends on the path.** Raising the MTU from 1380 to 9000 measured 4.4× the throughput for 1.15× the CPU, but that was the loopback path, where no link constrains the frame. A relay or direct path across the internet stays near 1500 whatever the overlay asks for, so the lever is available within a datacenter that carries jumbo frames and between co-located interfaces, and not between regions.
+**The size of this lever depends on the path.** Raising the MTU from 1380 to 9000 measured 4.4× the throughput for 1.15× the CPU on the loopback path, where no link constrains the frame. On EC2, raising it from 1380 to 8941, the most a 9001-byte VPC path carries, took one relayed edge from 2,535 to 7,858 Mbit/s and what a relay forwards per CPU-second from 1.9 to 5.0 Gbit, and across two relays the overlay carried what plain TCP does between the same hosts ([The fleet on EC2](#the-fleet-on-ec2)). A relay or direct path across the internet stays near 1500 whatever the overlay asks for, so the lever is available within a datacenter that carries jumbo frames and between co-located interfaces, and not between regions.
 
 ## Trust
 
@@ -592,7 +592,7 @@ An earlier run of the same comparison, with a build whose forwarding path is ide
 
 At 1307 Mbit/s with 1380-byte payloads the relay forwarded about 118,000 packets per second in the data direction on 1.2 cores. It dropped 16 packets before the far side registered, which is the bootstrap cost of learning endpoints.
 
-On EC2, with `wirenet-relay` and an underlay five times as fast as either path, the relay carried 2.22× the gateway's traffic per CPU-second; see [The fleet on EC2](#the-fleet-on-ec2).
+On EC2, with `wirenet-relay` and a 12.4 Gbit/s underlay, the relay carried 2.08× the gateway's traffic per CPU-second at this MTU and 2.55–2.63× at 8,941 bytes; see [The fleet on EC2](#the-fleet-on-ec2).
 
 ### Encryption at the edge
 
@@ -649,24 +649,35 @@ A configured device takes 160–245ms to delete, against 39ms for a bare one in 
 
 Nine c6i.xlarge instances (4 vCPU, Xeon Platinum 8375C) in one cluster placement group in us-east-1, on Ubuntu 24.04 with kernel 7.0.0-1014-aws and `rmem_max` at 256 MiB: a control plane with Postgres 16 on its own machine, three relays, a middle box for the gateway comparison, and four hosts. Plain TCP between two hosts carried 9,530 Mbit/s on one stream and 12,410 Mbit/s on eight, with no retransmits. A c6i.xlarge's network bandwidth bursts to 12.5 Gbit/s above a lower baseline, so every throughput window is 10 seconds. `wirenet-lab --env aws` produced every figure here, with the plain-TCP ceiling measured at the start of each run.
 
-| Path, one edge | 1 stream | 8 streams | Middle-box CPU, 8 streams over 10s | Carried per CPU-second | Round trip p50, idle | Round trip p50, loaded |
-|---|--:|--:|--:|--:|--:|--:|
-| Plain TCP, no middle box | 9,530 Mbit/s | 12,410 Mbit/s | — | — | 0.071ms | 0.201ms |
-| **Ciphertext relay**, `wirenet-relay` | 2,407 Mbit/s | 2,394 Mbit/s | **11.5s** | **2.09 Gbit** | 0.224ms | 4.8ms |
-| WireGuard-terminating gateway | 2,810 Mbit/s | 2,805 Mbit/s | 29.9s | 0.94 Gbit | 0.255ms | 3.3ms |
+The throughput figures run at an 8,941-byte overlay MTU, the most a VPC's 9,001-byte path carries under WireGuard's 60 bytes over IPv4, and repeat at the 1,380-byte default, which a path across the internet needs. Every stream and CPU sample in a window starts at one wall-clock time: streams started over separate SSH sessions and summed over their own windows overstated an aggregate by up to a fifth.
 
-**The relay carried 2.22× the gateway's traffic per CPU-second**, in line with [the earlier substrate](#the-relay-against-a-terminating-hub). The gateway carried 17% more on one edge, by spreading its crypto over three cores, where the relay reads one edge's port with one goroutine. Neither came near the underlay. A network's throughput comes from spreading edges over relays:
+| Path, one edge | MTU | 1 stream | 8 streams | Middle-box CPU, 8 streams over 10s | Carried per CPU-second | Round trip p50, idle | Round trip p50, loaded |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| Plain TCP, no middle box | 9,001 | 9,530 Mbit/s | 12,409–12,410 Mbit/s | — | — | 0.070ms | 0.148–0.206ms |
+| **Ciphertext relay**, `wirenet-relay` | 8,941 | 7,838–7,853 Mbit/s | 7,858–7,861 Mbit/s | **15.8s** | **5.00 Gbit** | 0.224–0.231ms | 2.5–3.5ms |
+| WireGuard-terminating gateway | 8,941 | 5,772–6,559 Mbit/s | 6,678–7,308 Mbit/s | 35.2–37.3s | 1.90–1.96 Gbit | 0.251–0.256ms | 11.3ms |
+| Ciphertext relay | 1,380 | 2,569 Mbit/s | 2,535 Mbit/s | 13.5s | 1.88 Gbit | 0.224ms | 4.1ms |
+| WireGuard-terminating gateway | 1,380 | 1,977 Mbit/s | 1,957 Mbit/s | 21.7s | 0.90 Gbit | 0.251ms | 5.3ms |
 
-| Edges | Relays | Edges per relay | Aggregate | Relay CPU busy, of 40s each | Receiving hosts' CPU busy, of 40s each |
-|--:|--:|---|--:|---|---|
-| 12 | 1 | 12 | 5,740 Mbit/s | 37.7s | 24.9s, 25.4s |
-| 12 | 2 | 4, 8 | 11,766 Mbit/s | 32.5s, 37.2s | 38.2s, 37.4s |
-| 12 | 3 | 4, 4, 4 | 12,524 Mbit/s | 23.9s, 24.4s, 22.9s | 39.2s, 38.0s |
-| 24 | 1 | 24 | 6,208 Mbit/s | 37.7s | 26.7s, 23.2s |
-| 24 | 2 | 8, 16 | 14,084 Mbit/s | 34.4s, 37.4s | 37.2s, 37.5s |
-| 24 | 3 | 7, 9, 8 | 14,471 Mbit/s | 23.1s, 28.6s, 27.3s | 39.7s, 39.7s |
+The 8,941-byte rows come from two runs and the 1,380-byte rows from one. **The relay carried 2.55–2.63× the gateway's traffic per CPU-second at 8,941 bytes, and 2.08× at 1,380**, in line with [the earlier substrate](#the-relay-against-a-terminating-hub). The larger MTU tripled one edge's throughput through the relay and raised what the relay forwards per CPU-second 2.7×, since WireGuard's cost and the relay's are per packet. On one edge neither path reaches the underlay. A network's throughput comes from spreading edges over relays:
 
-Each edge streams one TCP connection from one of two sending hosts to one of two receiving hosts, every edge at once; aggregate is what the receivers took in, and each relay forwarded at least what its edges carried. **One relay runs out of CPU at about 6 Gbit/s; two double it; with three, the relays leave 28–43% of their CPU idle while every CPU on the receiving hosts is busy decrypting.** Past two relays the endpoints' encryption bounds the network, rather than the relays or the underlay, and at 24 edges the aggregate passed what plain TCP carries between one pair of hosts, since two receivers share it. A third run at 12 edges, with a split of 12, then 6 and 6, then 5, 2 and 5, read 5,743, 12,103 and 12,147 Mbit/s. Rendezvous hashing splits a dozen or two edges unevenly, as the 4-and-8 and 8-and-16 rounds show; over 3,000 edges each of three relays takes about a third (`TestEdgesSpreadOverRelaysInProportion`).
+| MTU | Edges | Relays | Edges per relay | Aggregate | Relay CPU busy, of 40s each | Receiving hosts' CPU busy, of 40s each |
+|--:|--:|--:|---|--:|---|---|
+| 9,001 | 24 | none, plain TCP | — | 24,829 Mbit/s | — | 21.2s, 21.7s |
+| 8,941 | 24 | 1 | 24 | 12,231 Mbit/s | 34.0s | 35.2s, 34.9s |
+| 8,941 | 24 | 2 | 8, 16 | 24,259 Mbit/s | 29.3s, 33.1s | 40.0s, 39.8s |
+| 8,941 | 24 | 3 | 9, 8, 7 | 23,856 Mbit/s | 22.9s, 20.9s, 20.4s | 40.0s, 39.9s |
+| 8,941 | 12 | 1 | 12 | 12,234 Mbit/s | 33.2s | 33.5s, 33.0s |
+| 8,941 | 12 | 2 | 8, 4 | 24,272 Mbit/s | 30.9s, 27.4s | 39.5s, 39.8s |
+| 8,941 | 12 | 3 | 4, 4, 4 | 24,296 Mbit/s | 22.7s, 20.4s, 24.7s | 39.8s, 39.9s |
+| 1,380 | 24 | 1 | 24 | 5,868 Mbit/s | 37.8s | 25.9s, 22.8s |
+| 1,380 | 24 | 2 | 13, 11 | 11,919 Mbit/s | 37.5s, 37.2s | 37.0s, 38.3s |
+| 1,380 | 24 | 3 | 7, 12, 5 | 13,035 Mbit/s | 23.5s, 36.2s, 21.7s | 38.4s, 39.8s |
+| 1,380 | 12 | 1 | 12 | 6,059 Mbit/s | 37.4s | 26.2s, 24.2s |
+| 1,380 | 12 | 2 | 4, 8 | 10,995 Mbit/s | 31.8s, 37.2s | 36.3s, 36.9s |
+| 1,380 | 12 | 3 | 2, 5, 5 | 12,748 Mbit/s | 11.6s, 32.1s, 32.6s | 38.1s, 38.7s |
+
+Each edge streams one TCP connection from one of two sending hosts to one of two receiving hosts, every edge at once; the plain-TCP row runs the same pairs between the hosts' own addresses. Aggregate is what the receivers took in, and each relay forwarded at least what its edges carried. CPU busy is summed over a machine's four vCPUs, so a machine with every core busy reads 40s. **At 8,941 bytes, two relays carry what plain TCP does between the same hosts, 23.9–24.3 Gbit/s, and the receiving hosts spend every core on it, where plain TCP took the same traffic on about half of theirs.** One relay runs out of CPU at about 12 Gbit/s, forwarding 3.6–4.2 Gbit per busy core. **At 1,380 bytes throughput falls by about half:** one relay carries about 6 Gbit/s, forwarding 1.7–1.8 Gbit per busy core, and three reach 12.7–13.0 Gbit/s, bounded by the receivers' CPU. Past one relay at 8,941 bytes the receivers' links and CPUs run out together; past two at 1,380, their CPU alone bounds the network. Two more 24-edge runs at 8,941 bytes read 24,824–24,825 Mbit/s for plain TCP, then 12,232–12,235, 23,870–24,130 and 24,144–24,196 Mbit/s for one, two and three relays, with the receivers' CPU at 18.4–22.3s for plain TCP and 39.8–40.0s past one relay. Rendezvous hashing splits a dozen or two edges unevenly, as the 4-and-8 and 8-and-16 rounds show; over 3,000 edges each of three relays takes about a third (`TestEdgesSpreadOverRelaysInProportion`). In one 24-edge run at 8,941 bytes, before the streams shared a start, one relay forwarded 1.2 GB less than its edges carried, so some moved to the other relay mid-window; the three runs since did not repeat it.
 
 | Quantity | Result |
 |---|--:|
@@ -691,13 +702,13 @@ The EC2 column is the fleet in [The fleet on EC2](#the-fleet-on-ec2). The lab co
 
 | Quantity | Target | EC2 | Lab | Why |
 |---|--:|--:|--:|---|
-| Relay forwarding, XDP or TC | 1M+ pps per core, 100k+ edges | 2.1 Gbit per busy relay core | — | Required for the stated edge capacity, not merely faster. Batched userspace Go carried ~118k pps on a hot edge; `sk_lookup` alone fixes only the receive side. |
-| A network's throughput across its relays | — | 14.5 Gbit/s over three relays, bounded by the receivers' CPU | — | One edge gets one relay core, so a network's throughput is its edges spread over its relays. |
+| Relay forwarding, XDP or TC | 1M+ pps per core, 100k+ edges | 5.0 Gbit per busy relay core at an 8,941-byte MTU, 1.9 at 1,380 | — | Required for the stated edge capacity, not merely faster. Batched userspace Go carried ~118k pps on a hot edge; `sk_lookup` alone fixes only the receive side. |
+| A network's throughput across its relays | — | 23.9–24.3 Gbit/s over two relays at an 8,941-byte MTU, what plain TCP carries between the hosts; 13.0 Gbit/s over three at 1,380, bounded by the receivers' CPU | — | One edge gets one relay core, so a network's throughput is its edges spread over its relays. |
 | Service change to converged, p99 in one region | < 250 ms | 36–161ms | 11–33ms | The cost of a change, and the number the product is judged on. |
 | Rule change to enforced, 30 sandboxes under one wildcard | — | a deny's max 11–16ms; its removal's 32–64ms | a deny's max 2–6ms; its removal's 9–14ms | Rules reach agents as compiled grants, through the same snapshot as a service change. |
 | Attach to first packet, peer already converged, degree ≤ 20 | < 100 ms | max 60ms | max 54ms | Device work is ~5ms and the interface's own peer table is ~3ms at degree 20. The figure is a latency, which the 64-way throughput numbers do not measure. |
 | Relay failover | < 1 s | 0.22–0.83s | 0.46–0.83s | A 200 ms probe interval plus an endpoint rewrite on both sides. |
-| Round-trip time added by a relay, p50 and p99, idle and under load | — | p50 0.22ms idle, 4.8ms loaded | p50 0.25ms idle, 7.5ms loaded | Idle, the detour through the relay sets it. Under load, a relay that falls behind queues in its socket buffers before it drops. |
+| Round-trip time added by a relay, p50 and p99, idle and under load | — | p50 0.22ms idle; loaded, 2.5–3.5ms at an 8,941-byte MTU and 4.1ms at 1,380 | p50 0.25ms idle, 7.5ms loaded | Idle, the detour through the relay sets it. Under load, a relay that falls behind queues in its socket buffers before it drops. |
 | Interfaces per host | 1000+ | 1000, attach p50 rising from 24ms to 134ms | 920 before attach p50 rose tenfold | A netdev and a peer table each. |
 | Attaches per second, one network, degree ≤ 20 | 100+ | 46 pairs a second across 4 hosts | 24–38 pairs a second across 3 hosts | Device work allows 621/s. Every control-plane write takes the next revision from one row, which bounds the whole control plane; see [Open questions](#open-questions). Peer work shares one RTNL lane of ~10,000–19,000 operations a second per host, so the target depends on degree and on how many hosts the network spreads across. |
 | Slot-map rewrite across many namespaces | — | 30 namespaces within the change figures | 30 namespaces within the change figures | A 1024-entry map in each of 400 namespaces could take most of the convergence budget. |

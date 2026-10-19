@@ -111,11 +111,12 @@ func (r *run) measureRule(s convergeSetup, name, want string, refused bool, appl
 			if !r.check(res.Reached, "%s: sandbox %s never settled: %d attempts, %d failures, answers %v, %s", name, res.Namespace, res.Attempts, res.Failures, res.Answers, res.Error) {
 				continue
 			}
-			// An attempt dials once its thread enters the namespace, so
-			// one launched within an interval before the commit can meet
-			// the change; it counts as settling at the commit.
+			// A connection in flight at the commit can fail because of the
+			// change, since removing a peer destroys its flows' sockets; it
+			// counts as settling at the commit. One begun longer before
+			// had timed out by then.
 			took := time.Duration(res.Converged - c.Commit.UnixNano())
-			if r.check(took > -policyDial, "%s: sandbox %s settled %v before the commit", name, res.Namespace, -took) {
+			if r.check(took > -dialTimeout, "%s: sandbox %s settled %v before the commit", name, res.Namespace, -took) {
 				settled = append(settled, max(took, 0))
 			}
 		}

@@ -77,7 +77,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "keepalive-both-sides",
 		Breaks: "exactly one side of a co-located pair arms persistent-keepalive",
-		Edits:  []Edit{{compileGo, "p.Keepalive = x.ID < y.ID", "p.Keepalive = true"}},
+		Edits:  []Edit{{compileGo, "p.Keepalive = keepsAlive(x, y, reaches)", "p.Keepalive = true"}},
 		Catch:  []string{"cp", "sim"},
 	},
 	{
@@ -776,6 +776,12 @@ var Mutants = []Mutant{
 		Breaks: "Postgres keeps whether a rule denies",
 		Edits:  []Edit{{pgTx, "Created: r.Created,\n\t\tDeny: r.Deny,\n\t}))", "Created: r.Created,\n\t}))"}},
 		Catch:  []string{"pgstore"},
+	},
+	{
+		ID:     "keepalive-on-the-reached-side",
+		Breaks: "the side of a co-located pair that reaches the other keeps alive",
+		Edits:  []Edit{{compileGo, "\tif xy != yx {\n\t\treturn xy\n\t}", "\tif xy != yx {\n\t\treturn yx\n\t}"}},
+		Catch:  []string{"cp", "sim"},
 	},
 	{
 		ID:     "dormant-edge-keeps-secrets",

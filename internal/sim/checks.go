@@ -262,7 +262,14 @@ func (w *World) expect(net model.NetworkID, rev uint64, id model.InterfaceID) (e
 			e.draining[y.PublicKey] = allowed
 			continue
 		}
-		e.peers[y.PublicKey] = expPeer{allowed: allowed, keepalive: y.Host == x.Host && x.ID < y.ID}
+		// The side that reaches the other keeps alive, or the lower ID
+		// when each reaches the other or neither does.
+		xy, yx := reaches(rules, pts, x.Service, y.Service), reaches(rules, pts, y.Service, x.Service)
+		keeps := x.ID < y.ID
+		if xy != yx {
+			keeps = xy
+		}
+		e.peers[y.PublicKey] = expPeer{allowed: allowed, keepalive: y.Host == x.Host && keeps}
 	}
 	if rs := egressRules(rules, x.Service); len(rs) > 0 {
 		e.egress = &kernel.EgressConfig{Index: x.ListenPort, Rules: rs}

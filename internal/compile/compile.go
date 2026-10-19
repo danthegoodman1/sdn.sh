@@ -155,10 +155,12 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 	// Each interface reads only the grants from and to its own service and
 	// the services it fronts.
 	from, to := map[model.ServiceID][]Grant{}, map[model.ServiceID][]Grant{}
+	reaches := map[[2]model.ServiceID]bool{}
 	for _, g := range grants {
 		from[g.From] = append(from[g.From], g)
 		if g.To != "" {
 			to[g.To] = append(to[g.To], g)
+			reaches[[2]model.ServiceID{g.From, g.To}] = true
 		}
 	}
 	edges := map[[2]model.InterfaceID]store.Edge{}
@@ -220,7 +222,7 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 				if y.ID == x.ID || y.Kind == api.Device || !links.Connects(x, y) {
 					continue
 				}
-				if p, ok := peer(x, y, edges, relays, s.Network.Relays); ok {
+				if p, ok := peer(x, y, reaches, edges, relays, s.Network.Relays); ok {
 					p.Fronts = links.fronts(x, y)
 					iface.Peers = append(iface.Peers, p)
 				}
@@ -292,9 +294,22 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 	return out
 }
 
+// keepsAlive reports whether x keeps a session up with a co-located y.
+// Exactly one side does, so the two never initiate at the same instant:
+// the side that reaches the other, whose keepalive and first connection
+// then start from one device, or the lower ID when each reaches the other
+// or neither does.
+func keepsAlive(x, y store.Interface, reaches map[[2]model.ServiceID]bool) bool {
+	xy, yx := reaches[[2]model.ServiceID{x.Service, y.Service}], reaches[[2]model.ServiceID{y.Service, x.Service}]
+	if xy != yx {
+		return xy
+	}
+	return x.ID < y.ID
+}
+
 // peer builds x's peer entry for y, or reports false when the edge a relay
 // path needs has yet to exist.
-func peer(x, y store.Interface, edges map[[2]model.InterfaceID]store.Edge, relays map[model.RelayID]store.Relay, order []model.RelayID) (api.Peer, bool) {
+func peer(x, y store.Interface, reaches map[[2]model.ServiceID]bool, edges map[[2]model.InterfaceID]store.Edge, relays map[model.RelayID]store.Relay, order []model.RelayID) (api.Peer, bool) {
 	p := api.Peer{
 		Interface: y.ID,
 		Service:   y.Service,
@@ -307,9 +322,7 @@ func peer(x, y store.Interface, edges map[[2]model.InterfaceID]store.Edge, relay
 	}
 	if x.Host == y.Host {
 		p.Loopback = y.ListenPort
-		// Exactly one side of a co-located pair keeps a session up, so the
-		// two never initiate at the same instant.
-		p.Keepalive = x.ID < y.ID
+		p.Keepalive = keepsAlive(x, y, reaches)
 		return p, true
 	}
 	a, b := Pair(x.ID, y.ID)

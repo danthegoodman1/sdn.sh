@@ -194,3 +194,45 @@ func TestEachScopeListsThePairsItCovers(t *testing.T) {
 		}
 	}
 }
+
+// TestTheSideThatReachesKeepsALoopbackPairAlive puts sandboxes on db's host
+// under `box -> db`: each sandbox's peer for db carries keepalive and db's
+// for it does not, whichever has the lower ID, so a sandbox's first
+// connection and its keepalive start from one device.
+func TestTheSideThatReachesKeepsALoopbackPairAlive(t *testing.T) {
+	eachStore(t, func(t *testing.T, f *fixture) {
+		f.network(api.CreateNetwork{Name: "n"})
+		f.service("n", "db", false)
+		f.service("n", "box", false)
+		f.rule("n", "box", "db", model.TCP, 5432)
+		db, _ := f.attach("h1", "n", "db")
+		var boxes []store.Interface
+		for range 6 {
+			b, _ := f.attach("h1", "n", "box")
+			boxes = append(boxes, b)
+		}
+		keeps := func(x, y store.Interface) bool {
+			t.Helper()
+			for _, n := range f.state("h1").Networks {
+				xi, _ := n.Interface(x.ID)
+				for _, p := range xi.Peers {
+					if p.Interface == y.ID {
+						return p.Keepalive
+					}
+				}
+			}
+			t.Fatalf("%s holds no peer for %s", x.ID, y.ID)
+			return false
+		}
+		higher := false
+		for _, b := range boxes {
+			higher = higher || db.ID < b.ID
+			if !keeps(b, db) || keeps(db, b) {
+				t.Errorf("%s toward db %v, db toward it %v: want the sandbox alone", b.ID, keeps(b, db), keeps(db, b))
+			}
+		}
+		if !higher {
+			t.Fatal("no sandbox drew an identifier above db's, where the lower ID alone would arm db, so the test proves nothing")
+		}
+	})
+}

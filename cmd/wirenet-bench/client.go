@@ -276,12 +276,9 @@ func dialLoop(ns, target, want string, refused bool, streak int, until, interval
 		mu.Unlock()
 		t0 := time.Now()
 		go func() {
-			name, at, err := askName(ns, target, timeout)
-			if at.IsZero() {
-				at = t0
-			}
+			name, err := askName(ns, target, timeout)
 			mu.Lock()
-			attempts[i] = &dialAttempt{launched: at, done: time.Now(), name: name, err: err}
+			attempts[i] = &dialAttempt{launched: t0, done: time.Now(), name: name, err: err}
 			mu.Unlock()
 			select {
 			case finished <- struct{}{}:
@@ -378,29 +375,19 @@ func tally(d *bench.Dial, attempts []*dialAttempt) {
 	}
 }
 
-// askName asks target for its name from namespace ns, and returns when
-// the connection began: once the thread is in the namespace, which can
-// trail the attempt's launch by milliseconds when many dial at once.
-func askName(ns, target string, timeout time.Duration) (string, time.Time, error) {
-	var c net.Conn
-	var at time.Time
-	err := inNetns(ns, func() error {
-		var err error
-		at = time.Now()
-		c, err = net.DialTimeout("tcp", target, timeout)
-		return err
-	})
+func askName(ns, target string, timeout time.Duration) (string, error) {
+	c, err := dialTCP(ns, target, timeout)
 	if err != nil {
-		return "", at, err
+		return "", err
 	}
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(timeout))
 	if _, err := c.Write([]byte{modeName}); err != nil {
-		return "", at, err
+		return "", err
 	}
 	line, err := bufio.NewReader(c).ReadString('\n')
 	if err != nil {
-		return "", at, err
+		return "", err
 	}
-	return strings.TrimSuffix(line, "\n"), at, nil
+	return strings.TrimSuffix(line, "\n"), nil
 }

@@ -658,20 +658,20 @@ Each edge streams one TCP connection from one of two sending hosts to one of two
 
 | Quantity | Result |
 |---|--:|
-| Attach, the local API call returning, degree 20 | p50 42.6ms, p90 50.3ms, max 52.7ms |
-| Attach to first connection to a remote peer, degree 20 | p50 44.0ms, p90 51.7ms, max 54.2ms |
-| Service change to settled, 30 clients, under churn: cold replacement | p50 26.1–30.9ms, max 46.3–61.3ms |
-| The same, warm removal, half the slots rewritten in every client | p50 96.3–126ms, max 136–166ms |
-| A deny taking 30 sandboxes out of `* -> db`, from its commit until each sandbox's connections fail | p50 4.4–9.3ms, max 9.3–17.0ms |
-| The deny removed, until every sandbox reaches db again | p50 18.5–20.1ms, max 36.3–46.4ms |
+| Attach, the local API call returning, degree 20 | p50 46.9ms, p90 54.4ms, max 56.3ms |
+| Attach to first connection to a remote peer, degree 20 | p50 48.3ms, p90 55.7ms, max 57.8ms |
+| Service change to settled, 30 clients, under churn: cold replacement | p50 27.6–37.0ms, max 47.1–59.5ms |
+| The same, warm removal, half the slots rewritten in every client | p50 132–143ms, max 171–191ms |
+| A deny taking 30 sandboxes out of `* -> db`, from its commit until each sandbox's connections fail | p50 7.5–8.9ms, max 9.6–13.9ms |
+| The deny removed, until every sandbox reaches db again | p50 20.7–26.1ms, max 32.9–40.9ms |
 | An edge's relay killed: an established flow's stall | 0.82–0.83s |
 | An edge's relay killed: a new connection through another relay, from the kill command's return | 0.22–0.26s |
-| Attach-and-detach pairs, 4 workers on each of 4 hosts, degree 4 | 47 a second in each of two runs, no failures; attach p50 157–208ms, p99 0.93–1.53s; detach p50 60–66ms |
+| Attach-and-detach pairs, 4 workers on each of 4 hosts, degree 4 | 45 a second in each of two runs, no failures; attach p50 172–221ms, p99 1.01–1.63s; detach p50 59–66ms |
 | Interfaces on one host, degree 1, to a cap of 1000 | 1000 held at 841 KiB each; attach p50 rose from 24ms to 134ms |
 
-Attach and failover figures come from 30 and 3 rounds, the service changes and churn from two runs, the rule changes from six, dialing every 2ms. A deny settles faster than its removal: the deny takes the sandboxes' slots for db away at once, and its reject refuses their next connections locally, while the removal installs their peers again, each sandbox's slots wait for its relay to acknowledge a registration in the edge's new epoch, and its first initiation waits at the relay until db registers too. Before the reject, 9 sandboxes took 0.5–1.0s in 1 run of 6, as in the lab. Across every run since the release moved ahead of teardown, a warm removal's maximum spans 114–198ms and a cold replacement's 45–71ms. Chrony held every clock within a few microseconds of Amazon's time service, which the convergence figures need, since they run from the backend's detach on one machine to each client's settling on another. **Releasing before teardown took a cold replacement from a second to 27–48ms.** When a detach told the control plane only after it had deleted the device, the same plan read p50 1,037ms cold and 1,372ms warm, max 1,921ms: the departing backend's device held 30 peers, and clients kept routing to it until it was gone.
+Attach and failover figures come from 30 and 3 rounds, the service changes and churn from two runs, the rule changes from six, dialing every 2ms. A deny settles faster than its removal: the deny takes the sandboxes' slots for db away at once, and its reject refuses their next connections locally, while the removal installs their peers again, each sandbox's slots wait for its relay to acknowledge a registration in the edge's new epoch, and its first initiation waits at the relay until db registers too. Before the reject, 9 sandboxes took 0.5–1.0s in 1 run of 6, as in the lab. Across every run since the release moved ahead of teardown, a warm removal's p50 spans 72–148ms and its maximum 114–198ms, and a cold replacement's maximum 45–71ms. Chrony held every clock within a few microseconds of Amazon's time service, which the convergence figures need, since they run from the backend's detach on one machine to each client's settling on another. **Releasing before teardown took a cold replacement from a second to 27–48ms.** When a detach told the control plane only after it had deleted the device, the same plan read p50 1,037ms cold and 1,372ms warm, max 1,921ms: the departing backend's device held 30 peers, and clients kept routing to it until it was gone.
 
-The attach figures match Postgres on the bare-metal desktop rather than its memory store. Churn reached the same 47 pairs a second before the release moved ahead of teardown.
+The attach figures match Postgres on the bare-metal desktop rather than its memory store. Churn has read 45–47 pairs a second in every pair of runs, before and after the release moved ahead of teardown.
 
 ## Targets
 
@@ -681,13 +681,13 @@ The EC2 column is the fleet in [The fleet on EC2](#the-fleet-on-ec2). The lab co
 |---|--:|--:|--:|---|
 | Relay forwarding, XDP or TC | 1M+ pps per core, 100k+ edges | 2.1 Gbit per busy relay core | — | Required for the stated edge capacity, not merely faster. Batched userspace Go carried ~118k pps on a hot edge; `sk_lookup` alone fixes only the receive side. |
 | A network's throughput across its relays | — | 14.5 Gbit/s over three relays, bounded by the receivers' CPU | — | One edge gets one relay core, so a network's throughput is its edges spread over its relays. |
-| Service change to converged, p99 in one region | < 250 ms | 46–166ms | 11–33ms | The cost of a change, and the number the product is judged on. |
-| Rule change to enforced, 30 sandboxes under one wildcard | — | a deny's max 9–17ms; its removal's 36–46ms | a deny's max 2–5ms; its removal's 9–17ms | Rules reach agents as compiled grants, through the same snapshot as a service change. |
-| Attach to first packet, peer already converged, degree ≤ 20 | < 100 ms | max 54ms | max 54ms | Device work is ~5ms and the interface's own peer table is ~3ms at degree 20. The figure is a latency, which the 64-way throughput numbers do not measure. |
+| Service change to converged, p99 in one region | < 250 ms | 47–191ms | 11–33ms | The cost of a change, and the number the product is judged on. |
+| Rule change to enforced, 30 sandboxes under one wildcard | — | a deny's max 10–14ms; its removal's 33–41ms | a deny's max 2–5ms; its removal's 9–17ms | Rules reach agents as compiled grants, through the same snapshot as a service change. |
+| Attach to first packet, peer already converged, degree ≤ 20 | < 100 ms | max 58ms | max 54ms | Device work is ~5ms and the interface's own peer table is ~3ms at degree 20. The figure is a latency, which the 64-way throughput numbers do not measure. |
 | Relay failover | < 1 s | 0.22–0.83s | 0.46–0.83s | A 200 ms probe interval plus an endpoint rewrite on both sides. |
 | Round-trip time added by a relay, p50 and p99, idle and under load | — | p50 0.22ms idle, 4.8ms loaded | p50 0.25ms idle, 7.5ms loaded | Idle, the detour through the relay sets it. Under load, a relay that falls behind queues in its socket buffers before it drops. |
 | Interfaces per host | 1000+ | 1000, attach p50 rising from 24ms to 134ms | 920 before attach p50 rose tenfold | A netdev and a peer table each. |
-| Attaches per second, one network, degree ≤ 20 | 100+ | 47 pairs a second across 4 hosts | 24–38 pairs a second across 3 hosts | Device work allows 621/s. Every control-plane write takes the next revision from one row, which bounds the whole control plane; see [Open questions](#open-questions). Peer work shares one RTNL lane of ~10,000–19,000 operations a second per host, so the target depends on degree and on how many hosts the network spreads across. |
+| Attaches per second, one network, degree ≤ 20 | 100+ | 45 pairs a second across 4 hosts | 24–38 pairs a second across 3 hosts | Device work allows 621/s. Every control-plane write takes the next revision from one row, which bounds the whole control plane; see [Open questions](#open-questions). Peer work shares one RTNL lane of ~10,000–19,000 operations a second per host, so the target depends on degree and on how many hosts the network spreads across. |
 | Slot-map rewrite across many namespaces | — | 30 namespaces within the change figures | 30 namespaces within the change figures | A 1024-entry map in each of 400 namespaces could take most of the convergence budget. |
 | Softirq CPU attribution | — | — | — | Unmeasured, and the standing risk to the density thesis. |
 

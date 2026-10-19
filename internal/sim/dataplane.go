@@ -16,8 +16,10 @@ import (
 // packet is one underlay datagram: a registration, a relay's
 // acknowledgment of one, a probe, or WireGuard.
 type packet struct {
-	reg     *[regproto.Size]byte
+	reg *[regproto.Size]byte
+	// ack marks an acknowledgment, of the registration at counter.
 	ack     bool
+	counter uint64
 	isProbe bool
 	probe   uint64
 	wg      *wgPacket

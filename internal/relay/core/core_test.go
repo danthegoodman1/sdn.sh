@@ -1,7 +1,9 @@
 package core
 
 import (
+	"encoding/json"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -26,8 +28,10 @@ var (
 	wg       = []byte{1, 0, 0, 0, 9, 9, 9}
 )
 
-func table() *Table {
-	t := New(Config{})
+func table() *Table { return tableWith(Config{}) }
+
+func tableWith(cfg Config) *Table {
+	t := New(cfg)
 	t.Load(api.RelayState{Generation: 1, Ports: []api.RelayPort{
 		{Local: portAB, Peer: 7002, Advertised: advAB, Key: keyAB},
 		{Local: portBA, Peer: 7001, Advertised: advBA, Key: keyBA},
@@ -166,41 +170,133 @@ func TestAReloadKeepsRegistrationsOfUnchangedPorts(t *testing.T) {
 	}
 }
 
-// TestANewEpochForgetsEndpointsAndKeepsCounters reloads a table whose
-// edge went dormant: both directions forget their endpoints, so a returning
-// sender's data goes nowhere until it registers again, and a replay from
-// before the epoch cannot do that. The state that survives a restart says
-// the same.
-func TestANewEpochForgetsEndpointsAndKeepsCounters(t *testing.T) {
-	tb := table()
-	register(t, tb, portAB, keyAB, advAB, senderA, 10)
-	register(t, tb, portBA, keyBA, advBA, senderB, 10)
-	old := regproto.Encode(keyAB, advAB, 10)
-	tb.Load(api.RelayState{Generation: 2, Ports: []api.RelayPort{
-		{Local: portAB, Peer: 7002, Advertised: advAB, Key: keyAB, Epoch: 1},
-		{Local: portBA, Peer: 7001, Advertised: advBA, Key: keyBA, Epoch: 1},
-	}})
-	for _, port := range []netip.AddrPort{portAB, portBA} {
-		if dir, _ := tb.Dir(port); dir.Endpoint.IsValid() || dir.Counter != 10 {
-			t.Fatalf("%v after a new epoch: endpoint %v, counter %d", port, dir.Endpoint, dir.Counter)
+// TestAWithdrawalOutranksTheClaimSentBeforeIt replays the race a
+// withdrawal closes. An agent's periodic claim leaves just before its edge
+// goes dormant and arrives just after the agent's withdrawal, or just
+// before: either way the direction ends withdrawn, so a returning sender's
+// first initiation waits for the receiver's next claim instead of reaching
+// a device that lacks the sender's key. The next claim then lets it go.
+func TestAWithdrawalOutranksTheClaimSentBeforeIt(t *testing.T) {
+	for _, staleFirst := range []bool{true, false} {
+		tb := tableWith(Config{WaitFor: time.Second, WaitMax: 8, WaitTotal: 64})
+		register(t, tb, portAB, keyAB, advAB, senderA, 10)
+		register(t, tb, portBA, keyBA, advBA, senderB, 10)
+		stale := regproto.Encode(keyBA, advBA, 11)
+		withdrawal := regproto.EncodeWithdrawal(keyBA, advBA, 12)
+		order := [][regproto.Size]byte{withdrawal, stale}
+		if staleFirst {
+			order = [][regproto.Size]byte{stale, withdrawal}
+		}
+		for _, b := range order {
+			if d := tb.Packet(t0, portBA, senderB, b[:]); d.Verdict == Register {
+				tb.Commit(d.Registration)
+			}
+		}
+		if dir, _ := tb.Dir(portBA); dir.Endpoint.IsValid() || dir.Counter != 12 {
+			t.Fatalf("stale first %v: endpoint %v, counter %d, want withdrawn at 12", staleFirst, dir.Endpoint, dir.Counter)
+		}
+		d := tb.Packet(t0, portAB, senderA, wg)
+		if d.Verdict != Wait {
+			t.Fatalf("stale first %v: A's initiation got %+v, want a wait", staleFirst, d)
+		}
+		if !register(t, tb, portBA, keyBA, advBA, senderB, 13) {
+			t.Fatalf("stale first %v: the claim after the withdrawal failed", staleFirst)
+		}
+		if rel := tb.Release(t0); len(rel) != 1 || rel[0].Token != d.Token || rel[0].To != senderB {
+			t.Fatalf("stale first %v: released %+v", staleFirst, rel)
 		}
 	}
-	if d := tb.Packet(t0, portAB, senderA, old[:]); d.Verdict == Register {
-		t.Fatal("a registration from before the epoch was accepted")
+}
+
+// TestTheHighestCounterDecidesTheEndpoint delivers every subset of a run
+// of claims and withdrawals, in every order, and finds the endpoint the
+// highest counter delivered names: a claim's sender or, for a withdrawal,
+// none. However the underlay loses and reorders an agent's registrations,
+// the relay ends where the agent's latest one says once that one lands,
+// so no interleaving leaves a direction stuck. A restart from the durable
+// state agrees.
+func TestTheHighestCounterDecidesTheEndpoint(t *testing.T) {
+	other := netip.MustParseAddrPort("203.0.113.20:42999")
+	type reg struct {
+		counter  uint64
+		withdraw bool
+		from     netip.AddrPort
 	}
-	if d := tb.Packet(t0, portBA, senderB, wg); d.Verdict == Forward {
-		t.Fatalf("data on a forgotten direction went: %+v", d)
+	run := []reg{{11, false, senderB}, {12, true, senderB}, {13, false, other}, {14, true, other}, {15, false, senderB}}
+	sequences := 0
+	var walk func(sent, rest []reg)
+	walk = func(sent, rest []reg) {
+		sequences++
+		tb := table()
+		register(t, tb, portBA, keyBA, advBA, senderB, 10)
+		want, top := senderB, uint64(10)
+		for _, r := range sent {
+			b := regproto.Encode(keyBA, advBA, r.counter)
+			if r.withdraw {
+				b = regproto.EncodeWithdrawal(keyBA, advBA, r.counter)
+			}
+			if d := tb.Packet(t0, portBA, r.from, b[:]); d.Verdict == Register {
+				tb.Commit(d.Registration)
+			}
+			if r.counter > top {
+				top, want = r.counter, r.from
+				if r.withdraw {
+					want = netip.AddrPort{}
+				}
+			}
+		}
+		for _, tbl := range []*Table{tb, restart(t, tb)} {
+			if dir, _ := tbl.Dir(portBA); dir.Endpoint != want || dir.Counter != top {
+				t.Fatalf("after %+v: endpoint %v counter %d, want %v at %d", sent, dir.Endpoint, dir.Counter, want, top)
+			}
+		}
+		for i := range rest {
+			walk(append(slices.Clone(sent), rest[i]), slices.Delete(slices.Clone(rest), i, i+1))
+		}
+	}
+	walk(nil, run)
+	if sequences != 326 {
+		t.Fatalf("checked %d sequences, want every ordered subset of 5", sequences)
+	}
+}
+
+// restart round-trips a table's durable state through JSON, as a relay's
+// state file does, into a new table.
+func restart(t *testing.T, tb *Table) *Table {
+	t.Helper()
+	b, err := json.Marshal(tb.Persisted())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st State
+	if err := json.Unmarshal(b, &st); err != nil {
+		t.Fatal(err)
+	}
+	out := New(Config{})
+	out.Restore(st, nil)
+	return out
+}
+
+// TestAWithdrawalLoggedBeforeACrashHoldsAfterIt restores a withdrawal
+// from the registration log written since the last state file, and a
+// replay of the claim it outranked still fails.
+func TestAWithdrawalLoggedBeforeACrashHoldsAfterIt(t *testing.T) {
+	tb := table()
+	register(t, tb, portBA, keyBA, advBA, senderB, 10)
+	st := tb.Persisted()
+	w := regproto.EncodeWithdrawal(keyBA, advBA, 11)
+	d := tb.Packet(t0, portBA, senderB, w[:])
+	if d.Verdict != Register || !d.Registration.Withdraw {
+		t.Fatalf("withdrawal: %+v", d)
 	}
 	restored := New(Config{})
-	restored.Restore(tb.Persisted(), nil)
-	if dir, _ := restored.Dir(portAB); dir.Endpoint.IsValid() || dir.Counter != 10 || dir.Epoch != 1 {
-		t.Fatalf("after a restart: endpoint %v, counter %d, epoch %d", dir.Endpoint, dir.Counter, dir.Epoch)
+	restored.Restore(st, []Registration{d.Registration})
+	if dir, _ := restored.Dir(portBA); dir.Endpoint.IsValid() || dir.Counter != 11 {
+		t.Fatalf("after a restart: endpoint %v, counter %d", dir.Endpoint, dir.Counter)
 	}
-	if !register(t, tb, portAB, keyAB, advAB, senderA, 11) || !register(t, tb, portBA, keyBA, advBA, senderB, 11) {
-		t.Fatal("a fresh registration failed")
-	}
-	if d := tb.Packet(t0, portAB, senderA, wg); d.Verdict != Forward || d.To != senderB {
-		t.Fatalf("after both registered again: %+v", d)
+	old := regproto.Encode(keyBA, advBA, 10)
+	if d := restored.Packet(t0, portBA, senderB, old[:]); d.Verdict == Register {
+		t.Fatal("a claim the withdrawal outranked was accepted")
 	}
 }
 

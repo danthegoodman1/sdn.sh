@@ -1,15 +1,17 @@
 //wirenet:deterministic
 
 // Package regproto is the registration datagram an agent sends a relay to
-// claim a direction's endpoint, the acknowledgment the relay sends back once
-// it commits one, and the probe an agent uses to tell whether a relay
-// answers.
+// claim or withdraw a direction's endpoint, the acknowledgment the relay
+// sends back once it commits one, and the probe an agent uses to tell
+// whether a relay answers.
 //
 // A registration is 32 bytes:
 //
 //	0:4   magic 0xff 'S' 'D' 'R'
 //	4     version 1
-//	5:8   zero
+//	5     kind: 0 claims the sender's address as the direction's
+//	      endpoint, 1 withdraws the endpoint
+//	6:8   zero
 //	8:16  counter, big-endian
 //	16:32 HMAC-SHA256 over a label, the relay's advertised address and
 //	      port, and bytes 0:16, truncated to 16 bytes
@@ -51,12 +53,29 @@ func RelayKey(secret model.Secret, relay model.RelayID) model.Secret {
 	return k
 }
 
-// Encode builds a registration for the relay port advertised, under that
-// relay's key for the direction.
+// Kinds of registration.
+const (
+	claim    = 0
+	withdraw = 1
+)
+
+// Encode builds a registration that claims the direction's endpoint at the
+// relay port advertised, under that relay's key for the direction.
 func Encode(key model.Secret, advertised netip.AddrPort, counter uint64) [Size]byte {
+	return encode(key, advertised, counter, claim)
+}
+
+// EncodeWithdrawal builds a registration that withdraws the direction's
+// endpoint at the relay port advertised. The relay orders it against
+// claims by counter, as it orders claims.
+func EncodeWithdrawal(key model.Secret, advertised netip.AddrPort, counter uint64) [Size]byte {
+	return encode(key, advertised, counter, withdraw)
+}
+
+func encode(key model.Secret, advertised netip.AddrPort, counter uint64, kind byte) [Size]byte {
 	var b [Size]byte
 	b[0], b[1], b[2], b[3] = 0xff, 'S', 'D', 'R'
-	b[4] = version
+	b[4], b[5] = version, kind
 	binary.BigEndian.PutUint64(b[8:16], counter)
 	copy(b[16:], mac(key, advertised, b[:16]))
 	return b
@@ -68,15 +87,16 @@ func IsRegistration(b []byte) bool {
 }
 
 // Verify checks a registration against a relay's key for the direction and
-// the port it arrived on, and returns its counter.
-func Verify(key model.Secret, advertised netip.AddrPort, b []byte) (uint64, bool) {
-	if !IsRegistration(b) || b[4] != version || b[5]|b[6]|b[7] != 0 {
-		return 0, false
+// the port it arrived on, and returns its counter and whether it withdraws
+// the endpoint.
+func Verify(key model.Secret, advertised netip.AddrPort, b []byte) (counter uint64, withdrawal, ok bool) {
+	if !IsRegistration(b) || b[4] != version || b[5] > withdraw || b[6]|b[7] != 0 {
+		return 0, false, false
 	}
 	if subtle.ConstantTimeCompare(mac(key, advertised, b[:16]), b[16:]) != 1 {
-		return 0, false
+		return 0, false, false
 	}
-	return binary.BigEndian.Uint64(b[8:16]), true
+	return binary.BigEndian.Uint64(b[8:16]), b[5] == withdraw, true
 }
 
 func mac(key model.Secret, advertised netip.AddrPort, header []byte) []byte {
@@ -110,13 +130,13 @@ func ProbeNonce(b []byte) (uint64, bool) {
 	return binary.BigEndian.Uint64(b[8:16]), true
 }
 
-// Ack builds the acknowledgment a relay sends from a direction's port to the
-// endpoint a registration named, once the relay has committed it: magic
-// 0xff 'S' 'D' 'A', version 1, three zero bytes and the registration's
-// counter. It tells the agent the port is bound and holds its direction.
+// Ack builds the acknowledgment a relay sends from a direction's port to a
+// registration's sender, once the relay has committed it: magic 0xff 'S'
+// 'D' 'A', version 1, three zero bytes and the registration's counter. It
+// tells the agent the port is bound and holds what that registration said.
 // It carries no MAC: one forged by an off-path sender can only make an
-// agent stop waiting early, which costs a handshake retry and nothing else,
-// and it is smaller than the registration that earns it.
+// agent stop waiting or resending early, which costs a handshake retry and
+// nothing else, and it is smaller than the registration that earns it.
 func Ack(counter uint64) [AckSize]byte {
 	var b [AckSize]byte
 	b[0], b[1], b[2], b[3] = 0xff, 'S', 'D', 'A'

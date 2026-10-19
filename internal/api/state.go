@@ -165,9 +165,6 @@ type Peer struct {
 	// Registration is this direction's secret, from which the agent derives
 	// each relay's registration key.
 	Registration model.Secret `json:"registration,omitzero"`
-	// Epoch moves each time the edge goes dormant, when every relay forgets
-	// this direction's endpoint.
-	Epoch uint64 `json:"epoch,omitempty"`
 	// DialsIn marks a development machine at its gateway: it dials the
 	// gateway, so roaming alone sets its endpoint.
 	DialsIn bool `json:"dials_in,omitempty"`

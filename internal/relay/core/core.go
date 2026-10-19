@@ -12,7 +12,10 @@
 //     port's advertised address and the highest counter accepted, and on
 //     success becomes a pending registration the shell makes durable before
 //     committing — a registration never moves an endpoint the relay could
-//     forget in a crash;
+//     forget in a crash. One that claims the endpoint sets it to E; one
+//     that withdraws it clears it, so the opposite direction's packets
+//     wait for the next claim. The highest counter wins, whichever order
+//     the two arrive in;
 //  3. otherwise, if E is this direction's registered endpoint and the
 //     opposite direction has registered, forwards from the opposite
 //     direction's port to the endpoint it registered;
@@ -117,14 +120,16 @@ type Release struct {
 	Drop     bool
 }
 
-// Registration is a verified endpoint claim. Key is the direction's key it
-// verified under, so a claim made durable after its port was reallocated
-// commits to nothing.
+// Registration is a verified claim to an endpoint, or with Withdraw set,
+// a withdrawal of one. Endpoint is its sender. Key is the direction's key
+// it verified under, so a registration made durable after its port was
+// reallocated commits to nothing.
 type Registration struct {
 	Local    netip.AddrPort `json:"local"`
 	Endpoint netip.AddrPort `json:"endpoint"`
 	Counter  uint64         `json:"counter"`
 	Key      model.Secret   `json:"key"`
+	Withdraw bool           `json:"withdraw,omitempty"`
 }
 
 // Counters are one direction's packet counts.
@@ -208,21 +213,16 @@ func (t *Table) Dir(local netip.AddrPort) (*Dir, bool) {
 }
 
 // Load replaces the pushed table. A direction whose key is unchanged keeps
-// its counter, and its endpoint too unless its epoch moved, as when its
-// edge went dormant: both ends then register afresh before it forwards,
-// while a registration replayed from before still fails. One whose key
-// changed starts over, since its port was reallocated. Packets waiting on
-// a port the table keeps go on waiting, and those on a port it drops end.
+// its endpoint and counter; one whose key changed starts over, since its
+// port was reallocated. Packets waiting on a port the table keeps go on
+// waiting, and those on a port it drops end.
 func (t *Table) Load(st api.RelayState) {
 	next := map[netip.AddrPort]*Dir{}
 	for _, p := range st.Ports {
 		d := t.newDir(p)
 		if old, ok := t.ports[p.Local]; ok {
 			if old.Key == p.Key && old.Advertised == p.Advertised {
-				d.Counter, d.Stats = old.Counter, old.Stats
-				if old.Epoch == p.Epoch {
-					d.Endpoint = old.Endpoint
-				}
+				d.Endpoint, d.Counter, d.Stats = old.Endpoint, old.Counter, old.Stats
 			}
 			d.waits = old.waits
 			t.touch(d)
@@ -398,7 +398,7 @@ func (t *Table) Waiting() int { return t.held }
 
 // verify checks a registration and returns it, or why it fails.
 func (t *Table) verify(d *Dir, src netip.AddrPort, b []byte) (Registration, Reason) {
-	counter, ok := regproto.Verify(d.Key, d.Advertised, b)
+	counter, withdraw, ok := regproto.Verify(d.Key, d.Advertised, b)
 	if !ok {
 		d.Stats.BadMAC++
 		return Registration{}, BadMAC
@@ -407,7 +407,7 @@ func (t *Table) verify(d *Dir, src netip.AddrPort, b []byte) (Registration, Reas
 		d.Stats.Replayed++
 		return Registration{}, Replay
 	}
-	return Registration{Local: d.Local, Endpoint: src, Counter: counter, Key: d.Key}, ""
+	return Registration{Local: d.Local, Endpoint: src, Counter: counter, Key: d.Key, Withdraw: withdraw}, ""
 }
 
 // Commit applies a durable registration, unless a later one won meanwhile.
@@ -416,7 +416,12 @@ func (t *Table) Commit(r Registration) bool {
 	if !ok || r.Key != d.Key || r.Counter <= d.Counter {
 		return false
 	}
-	d.Counter, d.Endpoint = r.Counter, r.Endpoint
+	d.Counter = r.Counter
+	if r.Withdraw {
+		d.Endpoint = netip.AddrPort{}
+		return true
+	}
+	d.Endpoint = r.Endpoint
 	d.Stats.Registered++
 	// Packets waiting on this port, and on its peer for this port to
 	// register, may now go.
@@ -441,7 +446,7 @@ func (t *Table) Persisted() State {
 	for _, d := range t.Dirs() {
 		st.Ports = append(st.Ports, d.RelayPort)
 		if d.Counter > 0 {
-			st.Registrations = append(st.Registrations, Registration{Local: d.Local, Endpoint: d.Endpoint, Counter: d.Counter, Key: d.Key})
+			st.Registrations = append(st.Registrations, Registration{Local: d.Local, Endpoint: d.Endpoint, Counter: d.Counter, Key: d.Key, Withdraw: !d.Endpoint.IsValid()})
 		}
 	}
 	return st

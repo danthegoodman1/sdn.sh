@@ -253,7 +253,7 @@ func (c *Core) awaitsAck(now time.Time, st *nsState, port uint16, p api.Peer, tp
 		if _, installed := st.peers[p.PublicKey]; installed {
 			return false
 		}
-		w = &ackWait{until: now.Add(c.cfg.AckWait)}
+		w = &ackWait{until: now.Add(c.cfg.AckWait), after: c.counter}
 		st.acks[p.PublicKey] = w
 	}
 	if w.path != tp.endpoint {

@@ -541,8 +541,12 @@ func (s *Server) committer(ctx context.Context) error {
 			for _, r := range batch {
 				if s.table.Commit(r) {
 					acked = append(acked, r)
-					s.m.registrations.WithLabelValues("accepted").Inc()
-					s.log.Debug().Stringer("port", r.Local).Stringer("endpoint", r.Endpoint).Uint64("counter", r.Counter).Msg("registration")
+					result := "accepted"
+					if r.Withdraw {
+						result = "withdrawn"
+					}
+					s.m.registrations.WithLabelValues(result).Inc()
+					s.log.Debug().Stringer("port", r.Local).Stringer("endpoint", r.Endpoint).Uint64("counter", r.Counter).Bool("withdraw", r.Withdraw).Msg("registration")
 				} else {
 					s.m.registrations.WithLabelValues("superseded").Inc()
 				}

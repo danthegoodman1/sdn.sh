@@ -297,7 +297,6 @@ func (t *tx) PutEdge(e store.Edge) error {
 	return t.check(t.q.PutEdge(t.ctx, db.PutEdgeParams{
 		Network: string(e.Network), A: string(e.A), B: string(e.B),
 		SecretAb: e.SecretAB[:], SecretBa: e.SecretBA[:], Ports: ports, Created: e.Created, Dormant: dormant,
-		Epoch: int64(e.Epoch),
 	}))
 }
 
@@ -469,7 +468,7 @@ func edge(r db.Edge) (store.Edge, error) {
 	}
 	e := store.Edge{
 		Network: model.NetworkID(r.Network), A: model.InterfaceID(r.A), B: model.InterfaceID(r.B),
-		SecretAB: model.Secret(ab), SecretBA: model.Secret(ba), Created: r.Created.UTC(), Epoch: uint64(r.Epoch),
+		SecretAB: model.Secret(ab), SecretBA: model.Secret(ba), Created: r.Created.UTC(),
 	}
 	if r.Dormant != nil {
 		e.Dormant = r.Dormant.UTC()

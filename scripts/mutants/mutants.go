@@ -95,7 +95,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "keepalive-on-relay-peers",
 		Breaks: "relay peers carry no persistent-keepalive; the registration datagram holds the NAT mapping",
-		Edits:  []Edit{{compileGo, "p.Registration, p.Epoch = e.SecretAB, e.Epoch", "p.Registration, p.Epoch, p.Keepalive = e.SecretAB, e.Epoch, true"}},
+		Edits:  []Edit{{compileGo, "\tp.Registration = e.SecretAB\n", "\tp.Registration, p.Keepalive = e.SecretAB, true\n"}},
 		Catch:  []string{"cp", "sim"},
 	},
 	{
@@ -573,7 +573,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "registration-never-resent",
 		Breaks: "a fresh direction's registration is sent again on a tripling schedule, since one that beats the relay's bind is lost",
-		Edits:  []Edit{{agentRelays, "r.left, r.gap = c.cfg.RegisterRetries, c.cfg.RegisterRetry", "r.left, r.gap = 0, c.cfg.RegisterRetry"}},
+		Edits:  []Edit{{agentRelays, "r.left, r.gap, r.after = c.cfg.RegisterRetries, c.cfg.RegisterRetry, floor", "r.left, r.gap, r.after = 0, c.cfg.RegisterRetry, floor"}},
 		Catch:  []string{"agent-core"},
 	},
 	{
@@ -604,7 +604,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "unawaited-ack-reports-change",
 		Breaks: "an acknowledgment nobody awaits changes nothing, so the agent's loop skips its pass over every namespace",
-		Edits:  []Edit{{agentRelays, "\tif !ok {\n\t\treturn changed\n\t}\n\tif c.Debug", "\tif !ok {\n\t\treturn true\n\t}\n\tif c.Debug"}},
+		Edits:  []Edit{{agentRelays, "\tname, ok := c.awaitingAck[key]\n\tif !ok {\n\t\treturn changed\n\t}\n", "\tname, ok := c.awaitingAck[key]\n\tif !ok {\n\t\treturn true\n\t}\n"}},
 		Catch:  []string{"agent-core"},
 	},
 	{
@@ -850,39 +850,75 @@ var Mutants = []Mutant{
 		Catch:  []string{"kernel"},
 	},
 	{
-		ID:     "dormant-edge-keeps-epoch",
-		Breaks: "an edge going dormant moves its epoch, so its relays forget both endpoints",
-		Edits:  []Edit{{cpEdges, "\t\t\t\te.Epoch++\n", ""}},
-		Catch:  []string{"cp"},
-	},
-	{
-		ID:     "peer-epoch-unsent",
-		Breaks: "an agent learns its relay peer's epoch",
-		Edits:  []Edit{{compileGo, "p.Registration, p.Epoch = e.SecretAB, e.Epoch", "p.Registration = e.SecretAB"}},
-		Catch:  []string{"cp"},
-	},
-	{
-		ID:     "relay-keeps-endpoint-across-epoch",
-		Breaks: "a relay forgets a direction's endpoint when its epoch moves",
-		Edits:  []Edit{{relayCore, "\t\t\t\tif old.Epoch == p.Epoch {\n", "\t\t\t\tif true {\n"}},
+		ID:     "relay-reload-resets-counter",
+		Breaks: "a reload keeps an unchanged port's counter, so a registration from before it stays a replay",
+		Edits:  []Edit{{relayCore, "d.Endpoint, d.Counter, d.Stats = old.Endpoint, old.Counter, old.Stats", "d.Endpoint, d.Stats = old.Endpoint, old.Stats"}},
 		Catch:  []string{"relay-core"},
 	},
 	{
-		ID:     "relay-epoch-resets-counter",
-		Breaks: "a registration from before an epoch stays a replay after it",
-		Edits:  []Edit{{relayCore, "\t\t\t\td.Counter, d.Stats = old.Counter, old.Stats\n", "\t\t\t\td.Stats = old.Stats\n"}},
+		ID:     "withdrawal-unsent",
+		Breaks: "an agent withdraws a relay peer's direction once a batch removes the peer",
+		Edits:  []Edit{{agentPlan, "\tc.withdraw(now, st, b.Ops[:done])\n", ""}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "withdrawal-untracked",
+		Breaks: "an agent keeps what withdrawing a relay peer's direction takes until the peer is gone",
+		Edits:  []Edit{{agentPlan, "\t\tc.track(st, x)\n", ""}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "withdrawal-claims",
+		Breaks: "a withdrawal is encoded as one, not as a claim",
+		Edits:  []Edit{{regprotoGo, "return encode(key, advertised, counter, withdraw)", "return encode(key, advertised, counter, claim)"}},
+		Catch:  []string{"regproto", "relay-core", "agent-core"},
+	},
+	{
+		ID:     "registration-unknown-kind",
+		Breaks: "a relay verifies no registration of a kind it does not know",
+		Edits:  []Edit{{regprotoGo, "b[5] > withdraw || ", ""}},
+		Catch:  []string{"regproto"},
+	},
+	{
+		ID:     "relay-reads-withdrawal-as-claim",
+		Breaks: "a relay reads a verified withdrawal as one",
+		Edits:  []Edit{{relayCore, "Key: d.Key, Withdraw: withdraw}", "Key: d.Key}"}},
 		Catch:  []string{"relay-core"},
 	},
 	{
-		ID:     "dormant-edge-relays-untold",
-		Breaks: "the relays of an edge going dormant load its new epoch",
-		Edits:  []Edit{{cpEdges, "\t\t\t\ttouched = append(touched, relayIDs(e)...)\n", ""}},
-		Catch:  []string{"cp"},
+		ID:     "withdrawal-keeps-endpoint",
+		Breaks: "a committed withdrawal clears the direction's endpoint",
+		Edits:  []Edit{{relayCore, "\t\td.Endpoint = netip.AddrPort{}\n\t\treturn true\n", "\t\treturn true\n"}},
+		Catch:  []string{"relay-core"},
 	},
 	{
-		ID:     "reregister-skipped",
-		Breaks: "a relay peer whose secret or epoch changes registers at once",
-		Edits:  []Edit{{agentPlan, "\t\tc.reregister(now, st, x)\n", ""}},
+		ID:     "withdrawal-not-resent",
+		Breaks: "a withdrawal goes again until its relay acknowledges it",
+		Edits:  []Edit{{agentRelays, "\tc.resendWithdrawals(now)\n", ""}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "withdrawal-ends-on-any-ack",
+		Breaks: "only an acknowledgment of a withdrawal's own counter ends its resends",
+		Edits:  []Edit{{agentRelays, "if w, ok := c.withdrawals[key]; ok && w.counter == counter {", "if _, ok := c.withdrawals[key]; ok {"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "withdrawal-outlives-claim",
+		Breaks: "a claim ends the resends of the withdrawal it outranks",
+		Edits:  []Edit{{agentRelays, "\t\t\tdelete(c.withdrawals, ackKey{i.port, rp.Send})\n", ""}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "slot-on-withdrawal-ack",
+		Breaks: "a relay peer back after its withdrawal takes its slot only once the relay acknowledges a claim made for it",
+		Edits:  []Edit{{agentRelays, "w.path == from && !w.acked && counter > w.after", "w.path == from && !w.acked"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "claim-resend-ends-on-old-ack",
+		Breaks: "only an acknowledgment of a claim the schedule sent ends its resends",
+		Edits:  []Edit{{agentRelays, "if scheduled && counter > r.after {", "if scheduled {"}},
 		Catch:  []string{"agent-core"},
 	},
 	{

@@ -192,19 +192,14 @@ func (p *Plane) reconcileEdges(tx store.Tx, now time.Time, n *store.Network, sc 
 			}
 		case attached:
 			// Policy no longer connects a pair that is still attached: keep
-			// the edge, dormant, in case it reconnects. A new epoch makes
-			// each relay forget both endpoints, so a relay holds a
-			// returning sender's first initiation until the receiver has
-			// its peer back and registers, rather than deliver it to a
-			// device that drops it. Secrets stay, so an agent that kept the
-			// peer through an outage registers again unchanged.
+			// the edge, dormant, in case it reconnects. Its relays hold
+			// what they did; each agent withdraws its direction as it
+			// removes the peer.
 			if e.Dormant.IsZero() {
 				e.Dormant = now
-				e.Epoch++
 				if err := tx.PutEdge(e); err != nil {
 					return err
 				}
-				touched = append(touched, relayIDs(e)...)
 			}
 		default:
 			if err := releasePorts(tx, e, now); err != nil {

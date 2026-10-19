@@ -18,32 +18,53 @@ func TestARegistrationVerifiesWhereItWasMeant(t *testing.T) {
 	if !IsRegistration(b[:]) {
 		t.Fatal("not recognized as a registration")
 	}
-	c, ok := Verify(key, here, b[:])
-	if !ok || c != 42 {
-		t.Fatalf("verify = %d, %v", c, ok)
+	c, withdrawal, ok := Verify(key, here, b[:])
+	if !ok || c != 42 || withdrawal {
+		t.Fatalf("verify = %d, %v, %v", c, withdrawal, ok)
+	}
+}
+
+// TestAWithdrawalVerifiesAsOne keeps a withdrawal apart from a claim: the
+// kind byte is under the MAC, so neither becomes the other in flight, and
+// a relay reads no kind it does not know.
+func TestAWithdrawalVerifiesAsOne(t *testing.T) {
+	key := RelayKey(secret, "relay-a")
+	w := EncodeWithdrawal(key, here, 43)
+	if c, withdrawal, ok := Verify(key, here, w[:]); !ok || c != 43 || !withdrawal {
+		t.Fatalf("verify = %d, %v, %v", c, withdrawal, ok)
+	}
+	claim := Encode(key, here, 43)
+	turned := claim
+	turned[5] = 1
+	if _, _, ok := Verify(key, here, turned[:]); ok {
+		t.Error("a claim with its kind flipped verified")
+	}
+	unknown := encode(key, here, 43, 2)
+	if _, _, ok := Verify(key, here, unknown[:]); ok {
+		t.Error("an unknown kind verified")
 	}
 }
 
 func TestARegistrationFailsAnywhereElse(t *testing.T) {
 	key := RelayKey(secret, "relay-a")
 	b := Encode(key, here, 42)
-	if _, ok := Verify(RelayKey(secret, "relay-b"), here, b[:]); ok {
+	if _, _, ok := Verify(RelayKey(secret, "relay-b"), here, b[:]); ok {
 		t.Error("verified under another relay's key")
 	}
-	if _, ok := Verify(key, netip.MustParseAddrPort("203.0.113.7:7002"), b[:]); ok {
+	if _, _, ok := Verify(key, netip.MustParseAddrPort("203.0.113.7:7002"), b[:]); ok {
 		t.Error("verified at another port")
 	}
-	if _, ok := Verify(key, netip.MustParseAddrPort("203.0.113.8:7001"), b[:]); ok {
+	if _, _, ok := Verify(key, netip.MustParseAddrPort("203.0.113.8:7001"), b[:]); ok {
 		t.Error("verified at another address")
 	}
 	for i := range Size {
 		tampered := b
 		tampered[i] ^= 1
-		if _, ok := Verify(key, here, tampered[:]); ok {
+		if _, _, ok := Verify(key, here, tampered[:]); ok {
 			t.Errorf("verified with byte %d flipped", i)
 		}
 	}
-	if _, ok := Verify(key, here, b[:Size-1]); ok {
+	if _, _, ok := Verify(key, here, b[:Size-1]); ok {
 		t.Error("verified a short datagram")
 	}
 }

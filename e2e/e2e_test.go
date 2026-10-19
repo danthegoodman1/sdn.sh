@@ -289,6 +289,36 @@ func TestAWildcardOpensAServiceAndADenyClosesItAgain(t *testing.T) {
 		reach(box1.Namespace, netip.AddrPortFrom(a, 5432), "db")
 		reach(box2.Namespace, netip.AddrPortFrom(a, 5432), "db")
 	}
+
+	// The deny again takes both sandboxes' edges to db dormant, and each
+	// agent withdraws its two directions' endpoints at the relay as it
+	// removes the peer. Lifted again, every sandbox reaches db within
+	// WireGuard's 5-second handshake retry.
+	withdrawn := func() float64 {
+		return metric(must(lab.Metrics(relay.Telemetry)), `wirenet_relay_registrations_total{result="withdrawn"}`)
+	}
+	before := withdrawn()
+	boxOut = rule("box", "db", model.AnyProto, model.PortRange{}, api.Deny)
+	for start := time.Now(); withdrawn() < before+4; time.Sleep(50 * time.Millisecond) {
+		if time.Since(start) > 10*time.Second {
+			t.Fatalf("the relay committed %v withdrawals after the deny returned, want 4", withdrawn()-before)
+		}
+	}
+	for _, a := range []netip.Addr{db.Addr6, db.Addr4} {
+		mustNotReach(t, box1.Namespace, netip.AddrPortFrom(a, 5432), "a sandbox the returned deny takes out of db's wildcard")
+	}
+	if err := l.Admin.DeleteRule(ctx, "prod", boxOut.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range []api.LocalInterface{box1, box2} {
+		for _, a := range []netip.Addr{db.Addr6, db.Addr4} {
+			took, got, err := timeToReach(b.Namespace, netip.AddrPortFrom(a, 5432), 20*time.Second)
+			if err != nil || got != "db" || took > 4*time.Second {
+				t.Fatalf("%s to db at %v after the deny lifted again: %q in %v, %v; want db within a handshake retry", b.Name, a, got, took, err)
+			}
+			t.Logf("%s reached db at %v in %v", b.Name, a, took)
+		}
+	}
 }
 
 // metric returns a sample's value from metrics text, summing every series

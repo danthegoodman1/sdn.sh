@@ -238,19 +238,12 @@ func (t *Transaction) Size() int {
 	return n
 }
 
-func protoMatches(rule model.Proto, ports model.PortRange, proto model.Proto, port uint16) bool {
-	if rule == model.AnyProto {
-		return true
-	}
-	return rule == proto && ports.Contains(port)
-}
-
 // TranslateOut returns where a new outbound flow's first packet goes: the
 // backend in slot draw of the matching rule's map, or dst itself when no
 // rule matches. draw is the slot numgen random picked.
 func (r *Ruleset) TranslateOut(dst netip.Addr, proto model.Proto, port uint16, draw int) (netip.Addr, bool) {
 	for _, t := range r.Rules.Translate {
-		if t.Addr == dst && protoMatches(t.Proto, t.Ports, proto, port) {
+		if t.Addr == dst && t.Proto.Matches(t.Ports, proto, port) {
 			m, ok := r.Map(t.Map)
 			if !ok {
 				return dst, false
@@ -270,7 +263,7 @@ func (r *Ruleset) Rejected(dst netip.Addr) bool {
 // Admit reports whether the inbound chain accepts a new flow from src.
 func (r *Ruleset) Admit(src netip.Addr, proto model.Proto, port uint16) bool {
 	for _, a := range r.Rules.Accept {
-		if a.Family != FamilyOf(src) || !protoMatches(a.Proto, a.Ports, proto, port) {
+		if a.Family != FamilyOf(src) || !a.Proto.Matches(a.Ports, proto, port) {
 			continue
 		}
 		if s, ok := r.Set(a.Set); ok {

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"github.com/danthegoodman1/wirenet/internal/kernel"
 	"github.com/danthegoodman1/wirenet/internal/model"
 	"github.com/danthegoodman1/wirenet/internal/prng"
+	"github.com/danthegoodman1/wirenet/internal/regproto"
 )
 
 var (
@@ -562,6 +564,279 @@ func TestAnAcknowledgedDirectionIsNotResentAndANewPeerResendsAlone(t *testing.T)
 	}
 	if got := total[other.Relays[0].Send]; got != 1+c.cfg.RegisterRetries {
 		t.Fatalf("the new direction was registered %d times, want %d", got, 1+c.cfg.RegisterRetries)
+	}
+}
+
+// TestEveryServiceTheNamespaceDoesNotTranslateIsRejected gives a client
+// db, then takes db away as a deny does, which moves it from the host's
+// services to its unreached addresses: the namespace rejects db's address
+// throughout, so a connection to the address the workload learned leaves
+// no conntrack entry to outlast the deny.
+func TestEveryServiceTheNamespaceDoesNotTranslateIsRejected(t *testing.T) {
+	c, now := adopted(t)
+	update := func(rev uint64, n api.NetworkState) {
+		t.Helper()
+		if err := c.State(now, api.StateUpdate{Host: "h1", Generation: rev, Networks: []api.NetworkState{n},
+			Present: []api.NetworkRef{{Network: "net-1", Revision: rev}}}); err != nil {
+			t.Fatal(err)
+		}
+		drive(c, now, succeed)
+		c.RegistrationAcked(now, 40000, relayAt)
+		drive(c, now, succeed)
+	}
+	rejects := func() []netip.Addr { return c.ns["wirenet-a"].rules.Rules.Reject }
+	db, other := netip.MustParseAddr("fd00::100"), netip.MustParseAddr("fd00::200")
+	reaching := client(3, "if-a", self, backend("if-b", peer, "fd00::6"))
+	reaching.Unreached = []netip.Addr{other}
+	update(3, reaching)
+	if !slotted(c, "wirenet-a") || !slices.Equal(rejects(), []netip.Addr{db, other}) {
+		t.Fatalf("reaching db: slotted %v, rejecting %v", slotted(c, "wirenet-a"), rejects())
+	}
+	denied := client(4, "if-a", self)
+	denied.Services, denied.Interfaces[0].Reach, denied.Unreached = nil, nil, []netip.Addr{db, other}
+	update(4, denied)
+	if rs := c.ns["wirenet-a"].rules; len(rs.Rules.Translate) != 0 || !slices.Equal(rejects(), []netip.Addr{db, other}) {
+		t.Fatalf("denied db: translating %v, rejecting %v; want db's address and the other service's", rs.Rules.Translate, rejects())
+	}
+}
+
+// pairOnOneHost is a core holding if-a in wirenet-a and if-b in wirenet-b,
+// whose services reach each other, and a network state for them as the
+// control plane compiles it: if-a, the lower ID, keeps the pair alive.
+func pairOnOneHost(t *testing.T) (*Core, time.Time, api.StateUpdate) {
+	t.Helper()
+	c, now := New(DefaultConfig("h1"), prng.New(1)), time.Unix(1000, 0)
+	keyB := model.Key{9}
+	var journal []JournalEntry
+	var snap kernel.Snapshot
+	for _, e := range []JournalEntry{
+		{Interface: "if-a", Name: "a", Network: "net-1", Service: "svc-1", Kind: api.Workload, Namespace: "wirenet-a", ListenPort: 40000, PublicKey: self},
+		{Interface: "if-b", Name: "b", Network: "net-1", Service: "svc-2", Kind: api.Workload, Namespace: "wirenet-b", ListenPort: 40001, PublicKey: keyB},
+	} {
+		journal = append(journal, e)
+		snap.Namespaces = append(snap.Namespaces, kernel.Namespace{Name: e.Namespace,
+			Devices: []kernel.Device{{Name: c.cfg.Device, HasKey: true, PublicKey: e.PublicKey, ListenPort: e.ListenPort}}})
+	}
+	c.Start(now, journal, snap)
+	a6, b6 := netip.MustParseAddr("fd00::5"), netip.MustParseAddr("fd00::6")
+	svc1 := api.Service{ID: "svc-1", Name: "one", Addr6: netip.MustParseAddr("fd00::101"), Backends: []api.Backend{{Interface: "if-a", Addr6: a6}}}
+	svc2 := api.Service{ID: "svc-2", Name: "two", Addr6: netip.MustParseAddr("fd00::102"), Backends: []api.Backend{{Interface: "if-b", Addr6: b6}}}
+	tcp := model.PortRange{Lo: 80, Hi: 80}
+	n := api.NetworkState{Network: "net-1", Name: "n", Revision: 3, Prefix6: pfx("fd00::/64"), MTU: 1380, Services: []api.Service{svc1, svc2},
+		Interfaces: []api.Interface{
+			{ID: "if-a", Service: "svc-1", Kind: api.Workload, PublicKey: self, Addr6: a6, ListenPort: 40000, State: api.Live,
+				Peers:   []api.Peer{{Interface: "if-b", Service: "svc-2", PublicKey: keyB, Allowed: []netip.Prefix{pfx("fd00::6/128")}, Loopback: 40001, Keepalive: true}},
+				Reach:   []api.Reach{{Service: "svc-2", Proto: model.TCP, Ports: tcp}},
+				Inbound: []api.Inbound{{From: "svc-2", Proto: model.TCP, Ports: tcp}}},
+			{ID: "if-b", Service: "svc-2", Kind: api.Workload, PublicKey: keyB, Addr6: b6, ListenPort: 40001, State: api.Live,
+				Peers:   []api.Peer{{Interface: "if-a", Service: "svc-1", PublicKey: self, Allowed: []netip.Prefix{pfx("fd00::5/128")}, Loopback: 40000}},
+				Reach:   []api.Reach{{Service: "svc-1", Proto: model.TCP, Ports: tcp}},
+				Inbound: []api.Inbound{{From: "svc-1", Proto: model.TCP, Ports: tcp}}},
+		}}
+	return c, now, api.StateUpdate{Host: "h1", Generation: 3, Networks: []api.NetworkState{n}, Present: []api.NetworkRef{{Network: "net-1", Revision: 3}}}
+}
+
+// runPair carries out the core's batches and returns the session checks it
+// asks for, unanswered.
+func runPair(c *Core, now time.Time) []CheckSessions {
+	var checks []CheckSessions
+	for acts := c.Actions(now); len(acts) > 0; acts = c.Actions(now) {
+		for _, a := range acts {
+			switch a := a.(type) {
+			case RunBatch:
+				c.BatchDone(now, a.Namespace, a.ID, len(a.Ops), nil)
+			case CheckSessions:
+				checks = append(checks, a)
+			}
+		}
+	}
+	return checks
+}
+
+// TestAPeerWhoseNamespaceLostItsNameStopsTakingSlots forms a loopback pair,
+// then has a scan find if-b's device in a namespace only a process holds,
+// as when an operator deletes the name while the workload keeps it: the
+// reap takes if-b's device, so if-a takes its slots for if-b away at once,
+// and if-b detaches, deleting its namespace's name in case it still
+// stands.
+func TestAPeerWhoseNamespaceLostItsNameStopsTakingSlots(t *testing.T) {
+	c, now, u := pairOnOneHost(t)
+	if err := c.State(now, u); err != nil {
+		t.Fatal(err)
+	}
+	runPair(c, now)
+	if !slotted(c, "wirenet-a") {
+		t.Fatal("a never slotted b")
+	}
+	c.Scanned(now, kernel.Snapshot{Namespaces: []kernel.Namespace{{Ref: "ns-1",
+		Devices: []kernel.Device{{Name: c.cfg.Device, HasKey: true, PublicKey: model.Key{9}, ListenPort: 40001, Alias: kernel.Alias(c.cfg.AliasPrefix(), "if-b")}}}}}, nil)
+	var deleted bool
+	for acts := c.Actions(now); len(acts) > 0; acts = c.Actions(now) {
+		for _, a := range acts {
+			if b, ok := a.(RunBatch); ok {
+				for _, op := range b.Ops {
+					deleted = deleted || op.Kind == kernel.DeleteNamespace && op.Namespace == "wirenet-b"
+				}
+				c.BatchDone(now, b.Namespace, b.ID, len(b.Ops), nil)
+			}
+		}
+	}
+	if slotted(c, "wirenet-a") || !deleted {
+		t.Fatalf("after the scan: a slotted %v, b's name deleted %v", slotted(c, "wirenet-a"), deleted)
+	}
+}
+
+// TestTheSideWithoutKeepaliveSlotsAPeerOnceItHoldsASession forms a loopback
+// pair whose ends each reach the other: if-a keeps the pair alive and gets
+// its slot at once, while if-b's slot waits for its device to hold a
+// session with if-a, asked of the kernel, and goes in when one shows.
+func TestTheSideWithoutKeepaliveSlotsAPeerOnceItHoldsASession(t *testing.T) {
+	c, now, u := pairOnOneHost(t)
+	if err := c.State(now, u); err != nil {
+		t.Fatal(err)
+	}
+	checks := runPair(c, now)
+	if !slotted(c, "wirenet-a") || slotted(c, "wirenet-b") {
+		t.Fatalf("slotted: a %v, b %v; want a alone before b's session", slotted(c, "wirenet-a"), slotted(c, "wirenet-b"))
+	}
+	if len(checks) != 1 || checks[0].Namespace != "wirenet-b" || !slices.Equal(checks[0].Keys, []model.Key{self}) {
+		t.Fatalf("session checks %+v, want one in wirenet-b for if-a's key", checks)
+	}
+	c.SessionsSeen(now, "wirenet-b", nil, nil)
+	if again := runPair(c, now); slotted(c, "wirenet-b") || len(again) != 1 {
+		t.Fatalf("with no session yet: slotted %v, checks %+v", slotted(c, "wirenet-b"), again)
+	}
+	c.SessionsSeen(now, "wirenet-b", []model.Key{self}, nil)
+	runPair(c, now)
+	if !slotted(c, "wirenet-b") {
+		t.Fatal("b's slot never went in once its session showed")
+	}
+}
+
+// TestASessionWaitEndsAtAckWait never answers if-b's session checks, and
+// checks its slot goes in once AckWait passes.
+func TestASessionWaitEndsAtAckWait(t *testing.T) {
+	c, now, u := pairOnOneHost(t)
+	if err := c.State(now, u); err != nil {
+		t.Fatal(err)
+	}
+	runPair(c, now)
+	c.SessionsSeen(now, "wirenet-b", nil, nil)
+	at := now.Add(c.cfg.AckWait)
+	if wake := c.NextWake(now); wake.After(at) {
+		t.Fatalf("next wake %v, after the wait ends at %v", wake, at)
+	}
+	c.Tick(at)
+	runPair(c, at)
+	if !slotted(c, "wirenet-b") || c.Stats.SessionTimeouts != 1 {
+		t.Fatalf("after AckWait: slotted %v, %d session timeouts", slotted(c, "wirenet-b"), c.Stats.SessionTimeouts)
+	}
+}
+
+// TestASessionWaitStartsOnceTheReverseIsHeld holds if-a's batches past
+// AckWait, so if-a's device lacks if-b all that time: if-b's slot still
+// waits for a session once if-a's batch lands, with a deadline counted
+// from then.
+func TestASessionWaitStartsOnceTheReverseIsHeld(t *testing.T) {
+	c, now, u := pairOnOneHost(t)
+	if err := c.State(now, u); err != nil {
+		t.Fatal(err)
+	}
+	var held []RunBatch
+	for acts := c.Actions(now); len(acts) > 0; acts = c.Actions(now) {
+		for _, a := range acts {
+			if b, ok := a.(RunBatch); ok {
+				if b.Namespace == "wirenet-a" {
+					held = append(held, b)
+					continue
+				}
+				c.BatchDone(now, b.Namespace, b.ID, len(b.Ops), nil)
+			}
+		}
+	}
+	later := now.Add(2 * c.cfg.AckWait)
+	c.Tick(later)
+	for _, b := range held {
+		c.BatchDone(later, b.Namespace, b.ID, len(b.Ops), nil)
+	}
+	checks := runPair(c, later)
+	if slotted(c, "wirenet-b") {
+		t.Fatal("b slotted a with no session, its wait spent before a's device held it")
+	}
+	if len(checks) != 1 || !checks[0].Until.Equal(later.Add(c.cfg.AckWait)) {
+		t.Fatalf("session checks %+v, want one until %v", checks, later.Add(c.cfg.AckWait))
+	}
+}
+
+// TestASessionCheckThatFailsEndsTheWait answers if-b's session check with
+// an error: its slot goes in at once and no further check runs.
+func TestASessionCheckThatFailsEndsTheWait(t *testing.T) {
+	c, now, u := pairOnOneHost(t)
+	if err := c.State(now, u); err != nil {
+		t.Fatal(err)
+	}
+	runPair(c, now)
+	c.SessionsSeen(now, "wirenet-b", nil, errors.New("read failed"))
+	if checks := runPair(c, now); !slotted(c, "wirenet-b") || len(checks) != 0 {
+		t.Fatalf("after a failed check: slotted %v, checks %+v", slotted(c, "wirenet-b"), checks)
+	}
+}
+
+// TestARelayPeerWhoseEpochOrSecretChangesRegistersAtOnce keeps a relay
+// peer installed while its edge goes dormant and back, and then while its
+// secret changes: each time the direction registers at once, rather than
+// at the periodic registration.
+func TestARelayPeerWhoseEpochOrSecretChangesRegistersAtOnce(t *testing.T) {
+	c, now := adopted(t)
+	c.cfg.RegisterEvery = time.Hour
+	update := func(rev uint64, peers ...api.Peer) {
+		t.Helper()
+		if err := c.State(now, api.StateUpdate{Host: "h1", Generation: rev, Networks: []api.NetworkState{client(rev, "if-a", self, peers...)},
+			Present: []api.NetworkRef{{Network: "net-1", Revision: rev}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sends := func() [][regproto.Size]byte {
+		var out [][regproto.Size]byte
+		for acts := c.Actions(now); len(acts) > 0; acts = c.Actions(now) {
+			for _, a := range acts {
+				switch a := a.(type) {
+				case RunBatch:
+					c.BatchDone(now, a.Namespace, a.ID, len(a.Ops), nil)
+				case SendRegistration:
+					if a.To == relayAt {
+						out = append(out, a.Payload)
+					}
+				}
+			}
+		}
+		return out
+	}
+	b := backend("if-b", peer, "fd00::6")
+	b.Registration = model.Secret{1}
+	update(3, b)
+	if n := len(sends()); n != 1 {
+		t.Fatalf("registered %d times on install, want once", n)
+	}
+	c.RegistrationAcked(now, 40000, relayAt)
+	b.Epoch = 1
+	update(4, b)
+	if n := len(sends()); n != 1 {
+		t.Fatalf("registered %d times after the epoch moved, want once", n)
+	}
+	c.RegistrationAcked(now, 40000, relayAt)
+	update(5, b)
+	if n := len(sends()); n != 0 {
+		t.Fatalf("registered %d times with nothing changed, want none", n)
+	}
+	b.Registration = model.Secret{2}
+	update(6, b)
+	got := sends()
+	if len(got) != 1 {
+		t.Fatalf("registered %d times after the secret changed, want once", len(got))
+	}
+	if _, ok := regproto.Verify(regproto.RelayKey(b.Registration, "r1"), relayAt, got[0][:]); !ok {
+		t.Fatal("the registration was not made under the new secret")
 	}
 }
 

@@ -408,24 +408,32 @@ func (p *Plane) DeleteService(tx store.Tx, now time.Time, netRef, ref string) er
 	return bump(tx, now, &n)
 }
 
-// CreateRule permits a flow from one service to another, or to the
-// internet.
+// CreateRule allows or denies flows from a service, or every service, to a
+// service, every service, or the internet.
 func (p *Plane) CreateRule(tx store.Tx, now time.Time, netRef string, req api.CreateRule) (store.Rule, error) {
 	n, err := ResolveNetwork(tx, netRef)
 	if err != nil {
 		return store.Rule{}, err
 	}
-	from, err := ResolveService(tx, n.ID, req.From)
+	action := req.Action
+	if action == "" {
+		action = api.Allow
+	}
+	if action != api.Allow && action != api.Deny {
+		return store.Rule{}, apiErr(api.CodeInvalid, "action %q must be allow or deny", req.Action)
+	}
+	if req.From == api.Internet {
+		return store.Rule{}, apiErr(api.CodeInvalid, "the internet is a destination only")
+	}
+	from, err := ruleSide(tx, n.ID, req.From)
 	if err != nil {
 		return store.Rule{}, err
 	}
 	var to model.ServiceID
 	if req.To != api.Internet {
-		svc, err := ResolveService(tx, n.ID, req.To)
-		if err != nil {
+		if to, err = ruleSide(tx, n.ID, req.To); err != nil {
 			return store.Rule{}, err
 		}
-		to = svc.ID
 	}
 	if !req.Proto.Valid() {
 		return store.Rule{}, apiErr(api.CodeInvalid, "protocol %q must be tcp, udp or any", req.Proto)
@@ -440,8 +448,9 @@ func (p *Plane) CreateRule(tx store.Tx, now time.Time, netRef string, req api.Cr
 	if err != nil {
 		return store.Rule{}, err
 	}
+	deny := action == api.Deny
 	for _, r := range rules {
-		if r.From == from.ID && r.To == to && r.Proto == req.Proto && r.Ports == req.Ports {
+		if r.From == from && r.To == to && r.Proto == req.Proto && r.Ports == req.Ports && r.Deny == deny {
 			return r, nil
 		}
 	}
@@ -449,16 +458,25 @@ func (p *Plane) CreateRule(tx store.Tx, now time.Time, netRef string, req api.Cr
 	if err != nil {
 		return store.Rule{}, err
 	}
-	r := store.Rule{ID: model.RuleID(id), Network: n.ID, From: from.ID, To: to, Proto: req.Proto, Ports: req.Ports, Created: now}
+	r := store.Rule{ID: model.RuleID(id), Network: n.ID, From: from, To: to, Proto: req.Proto, Ports: req.Ports, Created: now, Deny: deny}
 	if err := tx.PutRule(r); err != nil {
 		return store.Rule{}, err
 	}
 	if to != "" {
-		if err := p.reconcileEdges(tx, now, &n, servicesScope(from.ID, to)); err != nil {
+		if err := p.reconcileEdges(tx, now, &n, ruleScope(r)); err != nil {
 			return store.Rule{}, err
 		}
 	}
 	return r, bump(tx, now, &n)
+}
+
+// ruleSide resolves one side of a rule: a service, or every service.
+func ruleSide(tx store.ReadTx, net model.NetworkID, ref string) (model.ServiceID, error) {
+	if ref == api.Wildcard {
+		return model.AnyService, nil
+	}
+	svc, err := ResolveService(tx, net, ref)
+	return svc.ID, err
 }
 
 // DeleteRule removes a rule, and the edges no other rule keeps.
@@ -478,7 +496,7 @@ func (p *Plane) DeleteRule(tx store.Tx, now time.Time, netRef string, id model.R
 		return err
 	}
 	if r.To != "" {
-		if err := p.reconcileEdges(tx, now, &n, servicesScope(r.From, r.To)); err != nil {
+		if err := p.reconcileEdges(tx, now, &n, ruleScope(r)); err != nil {
 			return err
 		}
 	}

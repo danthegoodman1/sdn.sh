@@ -18,6 +18,7 @@ type Edge struct {
 	Ports    []byte
 	Created  time.Time
 	Dormant  *time.Time
+	Epoch    int64
 }
 
 type Host struct {
@@ -111,6 +112,7 @@ type Rule struct {
 	PortLo      int32
 	PortHi      int32
 	Created     time.Time
+	Deny        bool
 }
 
 type Service struct {

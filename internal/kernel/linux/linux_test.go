@@ -14,12 +14,16 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/nftables"
+	"github.com/google/nftables/expr"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+	"golang.org/x/sys/unix"
 
 	"github.com/danthegoodman1/wirenet/internal/kernel"
 	"github.com/danthegoodman1/wirenet/internal/kernel/kmodel"
@@ -218,6 +222,33 @@ func dial(t *testing.T, ns string, addr netip.AddrPort, timeout time.Duration) (
 		c, err = net.DialTimeout("tcp", addr.String(), timeout)
 	})
 	return c, err
+}
+
+// udpArrives sends datagrams from one namespace to a socket bound in
+// another, and reports whether any arrived within a second.
+func udpArrives(t *testing.T, from, to string, addr netip.AddrPort) bool {
+	t.Helper()
+	var pc net.PacketConn
+	inNamespace(t, to, func() {
+		var err error
+		if pc, err = net.ListenPacket("udp", addr.String()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	defer pc.Close()
+	inNamespace(t, from, func() {
+		c, err := net.Dial("udp", addr.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		for range 3 {
+			c.Write([]byte("probe"))
+		}
+	})
+	pc.SetReadDeadline(time.Now().Add(time.Second))
+	_, _, err := pc.ReadFrom(make([]byte, 16))
+	return err == nil
 }
 
 func readReply(t *testing.T, c net.Conn) string {
@@ -432,6 +463,184 @@ func TestServicesTranslateInBothFamilies(t *testing.T) {
 	out, err := exec.Command("ip", "netns", "exec", a.ns, "nft", "list", "ruleset").CombinedOutput()
 	if err != nil || !bytes.Contains(out, []byte("numgen random mod 1024")) {
 		t.Fatalf("nft list: %v\n%s", err, out)
+	}
+}
+
+// TestOtherProtocolsPassWhereTCPAndUDPStop admits a peer for every protocol
+// but TCP and UDP, the grant a deny leaves when it takes TCP out of an
+// allow for any protocol: ICMP reaches the receiver in each family, and TCP
+// and UDP do not.
+func TestOtherProtocolsPassWhereTCPAndUDPStop(t *testing.T) {
+	k := newKernel(t)
+	a, b := pair(t, k, prng.New(9))
+	rules := &nft.Ruleset{
+		Sets: []nft.Set{{Name: "f_cli_6", Family: nft.IPv6, Addrs: []netip.Addr{a.addr}}, {Name: "f_cli_4", Family: nft.IPv4, Addrs: []netip.Addr{a.a4}}},
+		Rules: nft.Rules{Accept: []nft.Accept{
+			{Set: "f_cli_6", Family: nft.IPv6, Proto: model.OtherProto},
+			{Set: "f_cli_4", Family: nft.IPv4, Proto: model.OtherProto},
+		}},
+	}
+	rules.Normalize()
+	run(t, k, kernel.Op{Kind: kernel.ApplyRules, Namespace: b.ns, Rules: &nft.Transaction{Replace: rules}})
+	for _, addr := range []netip.Addr{b.addr, b.a4} {
+		if out, err := exec.Command("ip", "netns", "exec", a.ns, "ping", "-c", "1", "-W", "5", addr.String()).CombinedOutput(); err != nil {
+			dump(t, a.ns, b.ns)
+			t.Fatalf("ping %v through a grant for other protocols: %v\n%s", addr, err, out)
+		}
+		serve(t, b.ns, netip.AddrPortFrom(addr, 9999), "secret")
+		if c, err := dial(t, a.ns, netip.AddrPortFrom(addr, 9999), time.Second); err == nil {
+			c.Close()
+			t.Fatalf("reached %v over TCP through a grant for other protocols", addr)
+		}
+		if udpArrives(t, a.ns, b.ns, netip.AddrPortFrom(addr, 9998)) {
+			t.Fatalf("reached %v over UDP through a grant for other protocols", addr)
+		}
+	}
+}
+
+// TestARejectedServiceLeavesNoEntryToRefuseItsReturn dials a service from
+// fixed source ports while policy keeps the namespace from it, then
+// restores the service. Under a reject the dial is refused at once and
+// leaves conntrack nothing, so the restored service's first connection
+// from the same port reaches it. Under no rule at all, as a namespace
+// once had for a service it could not reach, the dial leaves an entry
+// with no translation, and the same port stays refused once the service
+// translates, since NAT runs once per entry.
+func TestARejectedServiceLeavesNoEntryToRefuseItsReturn(t *testing.T) {
+	k := newKernel(t)
+	a, b := pair(t, k, prng.New(4))
+	svc6, svc4 := netip.MustParseAddr("fd00::7"), netip.MustParseAddr("10.99.0.7")
+	serve(t, b.ns, netip.AddrPortFrom(b.addr, 5432), "db")
+	target := netip.AddrPortFrom(svc6, 5432)
+	from := func(port int) (net.Conn, error) {
+		var c net.Conn
+		var err error
+		inNamespace(t, a.ns, func() {
+			d := net.Dialer{Timeout: 300 * time.Millisecond, LocalAddr: &net.TCPAddr{IP: a.addr.AsSlice(), Port: port}}
+			c, err = d.Dial("tcp", target.String())
+		})
+		return c, err
+	}
+	entries := func(port int) string {
+		out, err := exec.Command("ip", "netns", "exec", a.ns, "conntrack", "-L", "-p", "tcp", "--sport", strconv.Itoa(port)).Output()
+		if err != nil {
+			t.Fatalf("conntrack: %v", err)
+		}
+		return string(bytes.TrimSpace(out))
+	}
+	reach := serviceRules(svc6, svc4, []netip.Addr{b.addr}, nil, 5432, nil)
+	rejected := &nft.Ruleset{Rules: nft.Rules{Reject: []netip.Addr{svc6, svc4}}}
+	rejected.Normalize()
+	none := &nft.Ruleset{}
+	none.Normalize()
+	for _, c := range []struct {
+		name   string
+		denied *nft.Ruleset
+		port   int
+		reach  bool
+	}{{"rejected", rejected, 40711, true}, {"without a rule", none, 40712, false}} {
+		run(t, k, kernel.Op{Kind: kernel.ApplyRules, Namespace: a.ns, Rules: &nft.Transaction{Replace: c.denied}})
+		conn, err := from(c.port)
+		if err == nil {
+			conn.Close()
+			t.Fatalf("%s: reached a service policy keeps the namespace from", c.name)
+		}
+		if refused := errors.Is(err, unix.ECONNREFUSED); refused != c.reach {
+			t.Fatalf("%s: dial failed with %v", c.name, err)
+		}
+		if left := entries(c.port); (left == "") != c.reach {
+			t.Fatalf("%s: conntrack holds %q", c.name, left)
+		}
+		tx := nft.Diff(c.denied, reach)
+		run(t, k, kernel.Op{Kind: kernel.ApplyRules, Namespace: a.ns, Rules: &tx})
+		conn, err = from(c.port)
+		if (err == nil) != c.reach {
+			t.Fatalf("%s: the restored service's first connection from port %d: %v", c.name, c.port, err)
+		}
+		if err == nil {
+			if got := readReply(t, conn); got != "db" {
+				t.Fatalf("%s: reached %q", c.name, got)
+			}
+			conn.Close()
+		}
+	}
+}
+
+// TestASessionShowsOnceAHandshakeCompletes reads b's sessions after a's
+// keepalive handshake, which lists a, then gives b a fresh peer for a,
+// which lists nothing until traffic shakes hands again.
+func TestASessionShowsOnceAHandshakeCompletes(t *testing.T) {
+	k := newKernel(t)
+	a, b := pair(t, k, prng.New(12))
+	read := func() []model.Key {
+		t.Helper()
+		r, err := k.Run(kernel.Op{Kind: kernel.ReadSessions, Namespace: b.ns, Device: "wirenet0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.Sessions
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !slices.Equal(read(), []model.Key{a.pub()}) {
+		if time.Now().After(deadline) {
+			t.Fatalf("b reads sessions %v after a's keepalive, want a's key", read())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	update := kernel.PeerUpdate{PublicKey: a.pub(), Allowed: []netip.Prefix{netip.PrefixFrom(a.addr, 128), netip.PrefixFrom(a.a4, 32)},
+		Endpoint: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), a.port)}
+	remove := update
+	remove.Remove = true
+	run(t, k, kernel.Op{Kind: kernel.SetPeers, Namespace: b.ns, Device: "wirenet0", Peers: []kernel.PeerUpdate{remove}})
+	run(t, k, kernel.Op{Kind: kernel.SetPeers, Namespace: b.ns, Device: "wirenet0", Peers: []kernel.PeerUpdate{update}})
+	if got := read(); len(got) != 0 {
+		t.Fatalf("a fresh peer reads sessions %v before any handshake", got)
+	}
+}
+
+// TestASideThatWaitsForItsSessionConnectsAtOnce re-forms a loopback pair
+// twenty times, arming a's keepalive while b, the side without it, waits
+// for its device to read a session with a before dialing. Dialing as a
+// arms instead crossed the two initiations and waited out WireGuard's
+// 5-second retry in 29 of 40 rounds.
+func TestASideThatWaitsForItsSessionConnectsAtOnce(t *testing.T) {
+	k := newKernel(t)
+	a, b := pair(t, k, prng.New(11))
+	serve(t, a.ns, netip.AddrPortFrom(a.addr, 5432), "a")
+	set := func(from, to end, keepalive time.Duration, remove bool) kernel.Op {
+		u := kernel.PeerUpdate{PublicKey: to.pub(), Remove: remove}
+		if !remove {
+			u.Allowed = []netip.Prefix{netip.PrefixFrom(to.addr, 128), netip.PrefixFrom(to.a4, 32)}
+			u.Endpoint = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), to.port)
+			u.Keepalive = keepalive
+		}
+		return kernel.Op{Kind: kernel.SetPeers, Namespace: from.ns, Device: "wirenet0", Peers: []kernel.PeerUpdate{u}}
+	}
+	for round := range 20 {
+		run(t, k, set(a, b, 0, true), set(b, a, 0, true), set(a, b, 0, false), set(b, a, 0, false))
+		armed := make(chan error, 1)
+		go func() { _, err := k.Run(set(a, b, 25*time.Second, false)); armed <- err }()
+		for end := time.Now().Add(time.Second); time.Now().Before(end); time.Sleep(200 * time.Microsecond) {
+			r, err := k.Run(kernel.Op{Kind: kernel.ReadSessions, Namespace: b.ns, Device: "wirenet0"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if slices.Contains(r.Sessions, a.pub()) {
+				break
+			}
+		}
+		start := time.Now()
+		c, err := dial(t, b.ns, netip.AddrPortFrom(a.addr, 5432), 7*time.Second)
+		if err := <-armed; err != nil {
+			t.Fatal(err)
+		}
+		if err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		c.Close()
+		if took := time.Since(start); took > time.Second {
+			t.Fatalf("round %d: the first connection took %v", round, took)
+		}
 	}
 }
 
@@ -788,6 +997,81 @@ func TestTheModelAgreesWithLinuxOnEgress(t *testing.T) {
 		mns, _ := m.Namespace(name, "")
 		if !lns.Egress.Equal(mns.Egress) {
 			t.Fatalf("round %d after %+v: linux %+v, model %+v", round, cfg, lns.Egress, mns.Egress)
+		}
+	}
+}
+
+// TestAGrantSplitByManyDeniesReadsBack installs a grant of 44 flows, the
+// shape forty single-port denies leave of an allow for any protocol, and
+// observes all of it back.
+func TestAGrantSplitByManyDeniesReadsBack(t *testing.T) {
+	k := newKernel(t)
+	if err := k.EnsureEgress(nil); err != nil {
+		t.Fatal(err)
+	}
+	name := namespace(t, k, prefix(t)+"x")
+	cfg := &kernel.EgressConfig{Index: 41000}
+	lo := uint16(1)
+	for p := uint16(25); p < 4025; p += 100 {
+		cfg.Rules = append(cfg.Rules, kernel.EgressRule{Proto: model.TCP, Ports: model.PortRange{Lo: lo, Hi: p - 1}})
+		lo = p + 1
+	}
+	cfg.Rules = append(cfg.Rules, kernel.EgressRule{Proto: model.TCP, Ports: model.PortRange{Lo: lo, Hi: 65535}},
+		kernel.EgressRule{Proto: model.UDP}, kernel.EgressRule{Proto: model.OtherProto})
+	run(t, k, kernel.Op{Kind: kernel.SetEgress, Namespace: name, Egress: cfg})
+	ns, err := k.Namespace(name, "")
+	if err != nil || !ns.Egress.Equal(cfg) {
+		t.Fatalf("observed %+v (%v), want %d flows", ns.Egress, err, len(cfg.Rules))
+	}
+}
+
+// TestAGrantChainThatRecordsNothingIsRewritten writes a link's chain as an
+// agent that kept grants in the link's alias did, with rules that record
+// no flow, and a blocked prefix tagged in bare text. The namespace still
+// reads, its grant as empty, and the rewrite reads back whole; the blocked
+// prefix reads too, and nft shows what the agent records as comments.
+func TestAGrantChainThatRecordsNothingIsRewritten(t *testing.T) {
+	k := newKernel(t)
+	if err := k.EnsureEgress(nil); err != nil {
+		t.Fatal(err)
+	}
+	name := namespace(t, k, prefix(t)+"x")
+	cfg := &kernel.EgressConfig{Index: 41001, Rules: []kernel.EgressRule{{Proto: model.TCP, Ports: model.PortRange{Lo: 443, Hi: 443}}}}
+	run(t, k, kernel.Op{Kind: kernel.SetEgress, Namespace: name, Egress: cfg})
+	c, err := nftables.New(nftables.WithNetNSFd(int(k.root)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseLasting()
+	tb := &nftables.Table{Name: egressTable, Family: nftables.TableFamilyINet}
+	ch := &nftables.Chain{Name: egressLink(cfg.Index), Table: tb}
+	c.FlushChain(ch)
+	c.AddRule(&nftables.Rule{Table: tb, Chain: ch, Exprs: append(protoMatch(model.TCP, cfg.Rules[0].Ports), accept())})
+	bare := netip.MustParsePrefix("198.18.0.0/15")
+	c.AddRule(&nftables.Rule{Table: tb, Chain: &nftables.Chain{Name: "forward", Table: tb},
+		Exprs:    concat(ifnamePrefix(expr.MetaKeyIIFNAME, egressPrefix), prefixMatch(bare), []expr.Any{drop()}),
+		UserData: []byte(blockedTag + bare.String())})
+	if err := c.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	ns, err := k.Namespace(name, "")
+	if err != nil || ns.Egress == nil || ns.Egress.Index != cfg.Index || len(ns.Egress.Rules) != 0 {
+		t.Fatalf("an unrecorded chain observed as %+v (%v), want link %d with an empty grant", ns.Egress, err, cfg.Index)
+	}
+	if blocked, err := k.EgressBlocked(); err != nil || !slices.Contains(blocked, bare) {
+		t.Fatalf("blocked %v (%v), want %v among them", blocked, err, bare)
+	}
+	run(t, k, kernel.Op{Kind: kernel.SetEgress, Namespace: name, Egress: cfg})
+	if ns, err = k.Namespace(name, ""); err != nil || !ns.Egress.Equal(cfg) {
+		t.Fatalf("after the rewrite observed %+v (%v), want %+v", ns.Egress, err, cfg)
+	}
+	out, err := exec.Command("nft", "list", "table", "inet", egressTable).CombinedOutput()
+	if err != nil {
+		t.Fatalf("nft: %v: %s", err, out)
+	}
+	for _, want := range []string{`comment "grant tcp/443-443"`, `comment "blocked 10.0.0.0/8"`} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("nft shows no %s:\n%s", want, out)
 		}
 	}
 }

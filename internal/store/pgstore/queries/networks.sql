@@ -54,12 +54,13 @@ SELECT * FROM rules WHERE id = $1;
 SELECT * FROM rules WHERE network = $1 ORDER BY id;
 
 -- name: PutRule :exec
-INSERT INTO rules (id, network, from_service, to_service, proto, port_lo, port_hi, created)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO rules (id, network, from_service, to_service, proto, port_lo, port_hi, created, deny)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (id) DO UPDATE SET
 	network = excluded.network, from_service = excluded.from_service,
 	to_service = excluded.to_service, proto = excluded.proto,
-	port_lo = excluded.port_lo, port_hi = excluded.port_hi, created = excluded.created;
+	port_lo = excluded.port_lo, port_hi = excluded.port_hi, created = excluded.created,
+	deny = excluded.deny;
 
 -- name: DeleteRule :exec
 DELETE FROM rules WHERE id = $1;

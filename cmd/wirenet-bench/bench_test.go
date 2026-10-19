@@ -62,7 +62,7 @@ func TestDialLoopPlacesASwitchWithinAnInterval(t *testing.T) {
 		name.Store("new")
 	}()
 	const interval = 5 * time.Millisecond
-	d := dialLoop("", addr, "new", 10, 5*time.Second, interval, time.Second)
+	d := dialLoop("", addr, "new", false, 10, 5*time.Second, interval, time.Second)
 	if !d.Reached {
 		t.Fatalf("never settled: %+v", d)
 	}
@@ -78,6 +78,46 @@ func TestDialLoopPlacesASwitchWithinAnInterval(t *testing.T) {
 	}
 }
 
+// TestARefusedDialLoopSettlesOnceConnectionsFail stops a server mid-loop:
+// the loop settles at the first of a run of failures, after the server's
+// last answer.
+func TestARefusedDialLoopSettlesOnceConnectionsFail(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				handle(c, "db")
+			}()
+		}
+	}()
+	var stopped atomic.Int64
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		stopped.Store(time.Now().UnixNano())
+		ln.Close()
+	}()
+	const interval = 5 * time.Millisecond
+	d := dialLoop("", ln.Addr().String(), "", true, 10, 5*time.Second, interval, time.Second)
+	if !d.Reached || !d.Refused {
+		t.Fatalf("never settled: %+v", d)
+	}
+	at := stopped.Load()
+	if d.Answers["db"] == 0 || d.Other >= at || d.Converged < d.Other || d.Failures < 10 {
+		t.Fatalf("answers %v, last at %d, run from %d, failures %d; the server stopped at %d", d.Answers, d.Other, d.Converged, d.Failures, at)
+	}
+	if late := time.Duration(d.Converged - at); late > 2*interval {
+		t.Errorf("settled %v after the server stopped, more than two intervals", late)
+	}
+}
+
 func TestDialLoopGivesUpAndSaysWhy(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -85,7 +125,7 @@ func TestDialLoopGivesUpAndSaysWhy(t *testing.T) {
 	}
 	addr := ln.Addr().String()
 	ln.Close()
-	d := dialLoop("", addr, "", 1, 100*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond)
+	d := dialLoop("", addr, "", false, 1, 100*time.Millisecond, 10*time.Millisecond, 50*time.Millisecond)
 	if d.Reached || d.Failures == 0 || d.Failures != d.Attempts || d.Error == "" || d.Converged != 0 {
 		t.Fatalf("%+v", d)
 	}

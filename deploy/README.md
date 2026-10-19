@@ -22,6 +22,7 @@
 | `failover` | Killing the relay an edge sends through, mid-flow: the established flow's stall and a new connection's wait. |
 | `density` | Interfaces on one host until an attach fails, attach latency degrades tenfold, or `--max-interfaces`. |
 | `spread` | `--edges` edges streaming at once through one relay, then two, then three: aggregate throughput, edges and CPU per relay, and each host's CPU, which shows when the endpoints rather than the relays bound the aggregate. Run it with `relay_count = 3` and an even `agent_count`, so clients and servers split the hosts evenly. |
+| `policy` | `--clients` sandboxes spread over the hosts dial a db that `* -> db` opens to every other service; times a `box -> db` deny from its commit until every sandbox's new connections fail, and its removal until they reach db again. |
 
 Every plan starts from a fresh fleet, measures the plain-TCP underlay ceiling in the same run, and purges the fleet afterwards. `wirenet-lab plans` lists them.
 

@@ -50,6 +50,9 @@ type Network struct {
 	MTU      int             `json:"mtu"`
 	Relays   []model.RelayID `json:"relays,omitempty"`
 	Revision uint64          `json:"revision"`
+	// Changed is when the revision was committed, which agents measure
+	// convergence from.
+	Changed time.Time `json:"changed"`
 }
 
 // CreateService declares a service.
@@ -69,26 +72,57 @@ type ServiceInfo struct {
 	Mode    Mode            `json:"mode"`
 }
 
-// CreateRule permits a flow between services. To may name "internet".
+// CreateRule allows or denies flows from one service to another. Either
+// side may be Wildcard, and To may be Internet.
 type CreateRule struct {
 	From  string          `json:"from"`
 	To    string          `json:"to"`
 	Proto model.Proto     `json:"proto"`
 	Ports model.PortRange `json:"ports"`
+	// Action is Allow, the default, or Deny.
+	Action Action `json:"action,omitempty"`
 }
+
+// Action is what a rule does to the flows it names.
+type Action string
+
+const (
+	Allow Action = "allow"
+	// Deny takes the flows a rule names out of every allow.
+	Deny Action = "deny"
+)
 
 // Internet is the rule target that grants egress.
 const Internet = "internet"
+
+// Wildcard names every service of the network but the one on the rule's
+// other side.
+const Wildcard = string(model.AnyService)
 
 // Rule describes a policy rule.
 type Rule struct {
 	ID      model.RuleID    `json:"id"`
 	Network model.NetworkID `json:"network"`
-	From    model.ServiceID `json:"from"`
-	// To is a service, or empty for internet egress.
+	Action  Action          `json:"action"`
+	// From is a service, or Wildcard.
+	From model.ServiceID `json:"from"`
+	// To is a service, Wildcard, or empty for internet egress.
 	To    model.ServiceID `json:"to,omitempty"`
 	Proto model.Proto     `json:"proto"`
 	Ports model.PortRange `json:"ports"`
+}
+
+// Grant is a flow policy leaves open once every wildcard is expanded and
+// every deny applied: from one service to another, or to the internet when
+// To is empty. Proto may be model.OtherProto, every protocol but TCP and
+// UDP.
+type Grant struct {
+	From     model.ServiceID `json:"from"`
+	FromName string          `json:"from_name"`
+	To       model.ServiceID `json:"to,omitempty"`
+	ToName   string          `json:"to_name"`
+	Proto    model.Proto     `json:"proto"`
+	Ports    model.PortRange `json:"ports"`
 }
 
 // InterfaceInfo describes an interface to an operator.
@@ -228,6 +262,9 @@ type RelayPort struct {
 	Advertised netip.AddrPort `json:"advertised"`
 	// Key is this relay's registration key for the direction.
 	Key model.Secret `json:"key"`
+	// Epoch moves when the edge goes dormant, and the relay forgets the
+	// direction's endpoint, though not its highest counter.
+	Epoch uint64 `json:"epoch,omitempty"`
 }
 
 // Agent local API, on the agent's unix socket.

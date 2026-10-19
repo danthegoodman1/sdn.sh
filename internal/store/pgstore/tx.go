@@ -277,6 +277,7 @@ func (t *tx) PutRule(r store.Rule) error {
 	return t.check(t.q.PutRule(t.ctx, db.PutRuleParams{
 		ID: string(r.ID), Network: string(r.Network), FromService: string(r.From), ToService: string(r.To),
 		Proto: string(r.Proto), PortLo: int32(r.Ports.Lo), PortHi: int32(r.Ports.Hi), Created: r.Created,
+		Deny: r.Deny,
 	}))
 }
 
@@ -296,6 +297,7 @@ func (t *tx) PutEdge(e store.Edge) error {
 	return t.check(t.q.PutEdge(t.ctx, db.PutEdgeParams{
 		Network: string(e.Network), A: string(e.A), B: string(e.B),
 		SecretAb: e.SecretAB[:], SecretBa: e.SecretBA[:], Ports: ports, Created: e.Created, Dormant: dormant,
+		Epoch: int64(e.Epoch),
 	}))
 }
 
@@ -452,6 +454,7 @@ func rule(r db.Rule) (store.Rule, error) {
 		ID: model.RuleID(r.ID), Network: model.NetworkID(r.Network), From: model.ServiceID(r.FromService),
 		To: model.ServiceID(r.ToService), Proto: model.Proto(r.Proto),
 		Ports: model.PortRange{Lo: uint16(r.PortLo), Hi: uint16(r.PortHi)}, Created: r.Created.UTC(),
+		Deny: r.Deny,
 	}, nil
 }
 
@@ -466,7 +469,7 @@ func edge(r db.Edge) (store.Edge, error) {
 	}
 	e := store.Edge{
 		Network: model.NetworkID(r.Network), A: model.InterfaceID(r.A), B: model.InterfaceID(r.B),
-		SecretAB: model.Secret(ab), SecretBA: model.Secret(ba), Created: r.Created.UTC(),
+		SecretAB: model.Secret(ab), SecretBA: model.Secret(ba), Created: r.Created.UTC(), Epoch: uint64(r.Epoch),
 	}
 	if r.Dormant != nil {
 		e.Dormant = r.Dormant.UTC()

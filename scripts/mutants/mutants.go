@@ -33,6 +33,8 @@ const (
 	simCP        = "internal/sim/cpnode.go"
 	kmodelGo     = "internal/kernel/kmodel/kmodel.go"
 	modelWeight  = "internal/model/relayweight.go"
+	modelGo      = "internal/model/model.go"
+	policyGo     = "internal/compile/policy.go"
 	agentFDStore = "internal/agent/resolver/fdstore.go"
 )
 
@@ -75,7 +77,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "keepalive-both-sides",
 		Breaks: "exactly one side of a co-located pair arms persistent-keepalive",
-		Edits:  []Edit{{compileGo, "p.Keepalive = x.ID < y.ID", "p.Keepalive = true"}},
+		Edits:  []Edit{{compileGo, "p.Keepalive = keepsAlive(x, y, links)", "p.Keepalive = true"}},
 		Catch:  []string{"cp", "sim"},
 	},
 	{
@@ -93,7 +95,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "keepalive-on-relay-peers",
 		Breaks: "relay peers carry no persistent-keepalive; the registration datagram holds the NAT mapping",
-		Edits:  []Edit{{compileGo, "p.Registration = e.SecretAB", "p.Registration, p.Keepalive = e.SecretAB, true"}},
+		Edits:  []Edit{{compileGo, "p.Registration, p.Epoch = e.SecretAB, e.Epoch", "p.Registration, p.Epoch, p.Keepalive = e.SecretAB, e.Epoch, true"}},
 		Catch:  []string{"cp", "sim"},
 	},
 	{
@@ -289,7 +291,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "vanished-namespace-stays-ready",
 		Breaks: "an interface whose namespace vanishes behind the agent is torn down, since its key went with the device",
-		Edits:  []Edit{{agentPlan, "\t\t\ti.phase = detaching\n\t\t\tc.emit(WriteJournal{Entry: c.entry(i)})\n\t\t\tc.scan()\n", "\t\t\tc.scan()\n"}},
+		Edits:  []Edit{{agentLife, "\ti.phase = detaching\n\tc.emit(WriteJournal{Entry: c.entry(i)})\n\tfor _, name := range slices.Sorted(maps.Keys(c.ns)) {", "\tfor _, name := range slices.Sorted(maps.Keys(c.ns)) {"}},
 		Catch:  []string{"agent-core", "sim"},
 	},
 	{
@@ -499,7 +501,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "egress-filter-forgets-blocked",
 		Breaks: "the egress filter records what it blocks, so a restarted agent keeps blocking every relay it knew of",
-		Edits:  []Edit{{linuxEgress, "\t\t\tUserData: []byte(blockedTag + p.String())})", "\t\t})"}},
+		Edits:  []Edit{{linuxEgress, "\t\t\tUserData: comment(blockedTag + p.String())})", "\t\t})"}},
 		Catch:  []string{"kernel"},
 	},
 	{
@@ -559,7 +561,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "failover-holds-slots-back",
 		Breaks: "a peer installed before never waits for an acknowledgment, so a failover holds back no slot",
-		Edits:  []Edit{{agentTarget, "\t\tif _, installed := st.peers[p.PublicKey]; installed {\n\t\t\treturn false\n\t\t}\n", ""}},
+		Edits:  []Edit{{agentTarget, "\tif !ok {\n\t\tif _, installed := st.peers[p.PublicKey]; installed {\n\t\t\treturn false\n\t\t}\n\t\tw = &ackWait{", "\tif !ok {\n\t\tw = &ackWait{"}},
 		Catch:  []string{"agent-core"},
 	},
 	{
@@ -696,5 +698,215 @@ var Mutants = []Mutant{
 		Edits: []Edit{{agentFDStore, "\tif err := rc.Control(func(fd uintptr) {\n\t\tserr = unix.Sendmsg(s.fd, []byte(msg), unix.UnixRights(int(fd)), s.addr, 0)\n\t}); err != nil {\n\t\treturn err\n\t}\n",
 			"\tif f, ok := c.(interface{ File() (*os.File, error) }); ok {\n\t\tif file, err := f.File(); err == nil {\n\t\t\tdefer file.Close()\n\t\t\tserr = unix.Sendmsg(s.fd, []byte(msg), unix.UnixRights(int(file.Fd())), s.addr, 0)\n\t\t}\n\t}\n\t_ = rc\n"}},
 		Catch: []string{"agent-resolver", "e2e"},
+	},
+	{
+		ID:     "wildcard-reaches-its-own-service",
+		Breaks: "a wildcard destination never matches the service on the rule's other side",
+		Edits:  []Edit{{policyGo, "\t\t\t\tif to != from {\n", "\t\t\t\tif true {\n"}},
+		Catch:  []string{"compile", "cp", "sim", "e2e"},
+	},
+	{
+		ID:     "wildcard-source-reaches-its-own-service",
+		Breaks: "a wildcard source never matches the service on the rule's other side",
+		Edits:  []Edit{{policyGo, "case has(r.To) && (r.From != model.AnyService || r.To != from):", "case has(r.To):"}},
+		Catch:  []string{"compile", "sim"},
+	},
+	{
+		ID:     "deny-ignored",
+		Breaks: "a deny takes the flows it names out of every allow",
+		Edits:  []Edit{{policyGo, "\t\t\tif names(r, p.from, p.to) {", "\t\t\tif false && names(r, p.from, p.to) {"}},
+		Catch:  []string{"compile", "cp", "cpserver", "sim", "e2e"},
+	},
+	{
+		ID:     "wildcard-deny-matches-its-own-service",
+		Breaks: "a wildcard deny spares a service's rule naming itself on both sides",
+		Edits:  []Edit{{policyGo, "return s == self || s == model.AnyService && self != other }", "return s == self || s == model.AnyService }"}},
+		Catch:  []string{"compile", "sim"},
+	},
+	{
+		ID:     "egress-deny-ignored",
+		Breaks: "a deny toward the internet takes egress back",
+		Edits:  []Edit{{policyGo, "\t\treturn r.To == \"\" && (r.From == from || r.From == model.AnyService)\n", "\t\treturn false\n"}},
+		Catch:  []string{"compile", "sim"},
+	},
+	{
+		ID:     "port-deny-takes-the-protocol",
+		Breaks: "a deny of some TCP ports leaves the allow's other TCP ports",
+		Edits:  []Edit{{policyGo, "\t\tf.tcp = f.tcp.remove(spanOf(ports))", "\t\tf.tcp = nil"}},
+		Catch:  []string{"compile", "sim", "e2e"},
+	},
+	{
+		ID:     "adjacent-ranges-kept-apart",
+		Breaks: "allows whose port ranges touch merge into one grant",
+		Edits:  []Edit{{policyGo, "case x.hi+1 < n.lo || n.hi+1 < x.lo:", "case x.hi < n.lo || n.hi < x.lo:"}},
+		Catch:  []string{"compile"},
+	},
+	{
+		ID:     "other-protocols-dropped",
+		Breaks: "a deny that takes TCP or UDP out of an allow for any protocol leaves every other protocol open",
+		Edits:  []Edit{{policyGo, "\tif f.other {\n\t\tout = append(out, Grant{From: from, To: to, Proto: model.OtherProto})\n\t}\n", ""}},
+		Catch:  []string{"compile", "sim", "e2e"},
+	},
+	{
+		ID:     "other-protocols-admit-tcp",
+		Breaks: "a grant for other protocols admits neither TCP nor UDP",
+		Edits:  []Edit{{modelGo, "\t\treturn proto != TCP && proto != UDP\n", "\t\treturn true\n"}},
+		Catch:  []string{"model", "compile", "sim"},
+	},
+	{
+		ID:     "linux-other-protocols-admit-everything",
+		Breaks: "nftables matches the other-protocols grant as anything but TCP and UDP",
+		Edits:  []Edit{{linuxNFT, "\tcase model.AnyProto:\n\t\treturn nil\n\tcase model.OtherProto:", "\tcase model.AnyProto, model.OtherProto:\n\t\treturn nil\n\tcase \"none\":"}},
+		Catch:  []string{"kernel", "e2e"},
+	},
+	{
+		ID:     "wildcard-rule-reconciles-one-pair",
+		Breaks: "a rule whose source is every service reconciles the edges of every pair with its destination",
+		Edits:  []Edit{{cpEdges, "\t\treturn serviceScope(r.To)\n", "\t\treturn servicesScope(r.From, r.To)\n"}},
+		Catch:  []string{"cp", "sim"},
+	},
+	{
+		ID:     "rule-deduplicated-across-actions",
+		Breaks: "an allow and a deny of the same flows are two rules",
+		Edits:  []Edit{{cpPlane, " && r.Ports == req.Ports && r.Deny == deny {", " && r.Ports == req.Ports {"}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "pgstore-forgets-deny",
+		Breaks: "Postgres keeps whether a rule denies",
+		Edits:  []Edit{{pgTx, "Created: r.Created,\n\t\tDeny: r.Deny,\n\t}))", "Created: r.Created,\n\t}))"}},
+		Catch:  []string{"pgstore"},
+	},
+	{
+		ID:     "keepalive-on-the-reached-side",
+		Breaks: "the side of a co-located pair that reaches the other keeps alive",
+		Edits:  []Edit{{compileGo, "\tif xy != yx {\n\t\treturn xy\n\t}", "\tif xy != yx {\n\t\treturn yx\n\t}"}},
+		Catch:  []string{"cp", "sim"},
+	},
+	{
+		ID:     "keepalive-ignores-fronted",
+		Breaks: "a gateway whose development machines reach a co-located peer keeps the pair alive",
+		Edits:  []Edit{{compileGo, "xy, yx := links.Opens(x, y), links.Opens(y, x)", "xy, yx := links.adj.Reaches(x.Service, y.Service), links.adj.Reaches(y.Service, x.Service)"}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "keepalive-counts-shielded-flows",
+		Breaks: "flows into a gateway's development machines, which its shield turns away, never choose the keepalive side",
+		Edits:  []Edit{{compileGo, "xy, yx := links.Opens(x, y), links.Opens(y, x)", "xy, yx := links.Reaches(x, y), links.Reaches(y, x)"}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "denied-service-unrejected",
+		Breaks: "a namespace rejects the services no interface on its host reaches, so a deny leaves no untranslated flow",
+		Edits:  []Edit{{agentTarget, "\tothers := slices.Clone(n.Unreached)\n", "\tvar others []netip.Addr\n"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "unreached-services-unsent",
+		Breaks: "a host learns the addresses of the services none of its interfaces reach",
+		Edits:  []Edit{{compileGo, "\t\t\t\t\tns.Unreached = append(ns.Unreached, a)\n", ""}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "scan-deletes-no-name",
+		Breaks: "an interface whose device a scan finds elsewhere deletes its namespace's name, which may still stand",
+		Edits:  []Edit{{agentLife, "\tst.device, st.egress = false, nil\n", "\tst.exists, st.device, st.egress = false, false, nil\n"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "session-deadline-before-reverse",
+		Breaks: "a session wait's deadline starts once the other device holds the reverse peer",
+		Edits:  []Edit{{agentTarget, "\tif held && w.until.IsZero() {\n", "\tif w.until.IsZero() {\n"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "failed-session-check-keeps-waiting",
+		Breaks: "a session check that fails ends the wait instead of asking again at once",
+		Edits:  []Edit{{agentTarget, "\t\tfor _, key := range slices.SortedFunc(maps.Keys(st.sessions), compareKey) {\n\t\t\tst.sessions[key].up = true\n\t\t}\n", ""}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "scan-keeps-unnamed-peer",
+		Breaks: "a scan that finds a held interface's device where only a process holds it drops that namespace's peers, so co-located clients stop slotting it",
+		Edits:  []Edit{{agentLife, "\t\t\tif named, ok := c.ns[i.ns]; ok {\n\t\t\t\tc.lost(named)\n", "\t\t\tif named, ok := c.ns[i.ns]; ok && false {\n\t\t\t\tc.lost(named)\n"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "lost-peer-leaves-clients-planned",
+		Breaks: "a namespace whose co-located peer is lost replans at once",
+		Edits:  []Edit{{agentLife, "\t\t\tc.ns[name].dirty = true\n", ""}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "session-wait-skipped",
+		Breaks: "the side of a co-located pair without keepalive slots its peer once it holds a session",
+		Edits:  []Edit{{agentTarget, "\tif p.Keepalive || !slices.ContainsFunc(x.Reach,", "\tif true || p.Keepalive || !slices.ContainsFunc(x.Reach,"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "sessions-read-without-handshake",
+		Breaks: "a device reads as holding a session only once a handshake completes",
+		Edits:  []Edit{{linuxKernel, "\t\t\tif !p.LastHandshakeTime.IsZero() {\n\t\t\t\tr.Sessions", "\t\t\tif true {\n\t\t\t\tr.Sessions"}},
+		Catch:  []string{"kernel"},
+	},
+	{
+		ID:     "dormant-edge-keeps-epoch",
+		Breaks: "an edge going dormant moves its epoch, so its relays forget both endpoints",
+		Edits:  []Edit{{cpEdges, "\t\t\t\te.Epoch++\n", ""}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "peer-epoch-unsent",
+		Breaks: "an agent learns its relay peer's epoch",
+		Edits:  []Edit{{compileGo, "p.Registration, p.Epoch = e.SecretAB, e.Epoch", "p.Registration = e.SecretAB"}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "relay-keeps-endpoint-across-epoch",
+		Breaks: "a relay forgets a direction's endpoint when its epoch moves",
+		Edits:  []Edit{{relayCore, "\t\t\t\tif old.Epoch == p.Epoch {\n", "\t\t\t\tif true {\n"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "relay-epoch-resets-counter",
+		Breaks: "a registration from before an epoch stays a replay after it",
+		Edits:  []Edit{{relayCore, "\t\t\t\td.Counter, d.Stats = old.Counter, old.Stats\n", "\t\t\t\td.Stats = old.Stats\n"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "dormant-edge-relays-untold",
+		Breaks: "the relays of an edge going dormant load its new epoch",
+		Edits:  []Edit{{cpEdges, "\t\t\t\ttouched = append(touched, relayIDs(e)...)\n", ""}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "reregister-skipped",
+		Breaks: "a relay peer whose secret or epoch changes registers at once",
+		Edits:  []Edit{{agentPlan, "\t\tc.reregister(now, st, x)\n", ""}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "egress-grant-unrecorded",
+		Breaks: "an egress grant reads back whole from its chain, however many flows it holds",
+		Edits:  []Edit{{linuxEgress, ",\n\t\t\tUserData: comment(grantTag + formatRule(r))})", "})"}},
+		Catch:  []string{"kernel"},
+	},
+	{
+		ID:     "unrecorded-grant-fails-observation",
+		Breaks: "a grant chain that records no flow reads as an empty grant, which the agent rewrites",
+		Edits:  []Edit{{linuxEgress, "\t\tif !ok || err != nil {\n\t\t\treturn nil, nil\n", "\t\tif !ok || err != nil {\n\t\t\treturn nil, fmt.Errorf(\"rule %d records %q\", r.Handle, r.UserData)\n"}},
+		Catch:  []string{"kernel"},
+	},
+	{
+		ID:     "egress-records-bare-text",
+		Breaks: "nft shows what an egress rule records as its comment",
+		Edits:  []Edit{{linuxEgress, "func comment(s string) []byte { return userdata.AppendString(nil, userdata.TypeComment, s) }", "func comment(s string) []byte { _ = userdata.TypeComment; return []byte(s) }"}},
+		Catch:  []string{"kernel"},
+	},
+	{
+		ID:     "service-scope-pairs-twice",
+		Breaks: "a wildcard rule's scope lists each pair within its service once",
+		Edits:  []Edit{{cpEdges, "case j == i || j < i && y.Service == s.service:", "case j == i:"}},
+		Catch:  []string{"cp"},
 	},
 }

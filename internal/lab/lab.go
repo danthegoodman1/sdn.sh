@@ -191,7 +191,13 @@ func (l *Lab) underlay() error {
 	steps := [][]string{
 		{"ip", "netns", "add", l.net},
 		{"ip", "-n", l.net, "link", "set", "lo", "up"},
-		{"ip", "-n", l.net, "link", "add", "br0", "type", "bridge"},
+		// A bridge with no address of its own takes its lowest port's,
+		// which changes as nodes join (br_stp_recalculate_bridge_id), and
+		// routes only frames sent to its current address: br_handle_frame
+		// marks those alone PACKET_HOST, and ip_rcv_core drops the rest. A
+		// host that resolved the gateway before a lower address joined
+		// would lose the underlay until its neighbour entry expired.
+		{"ip", "-n", l.net, "link", "add", "br0", "address", "02:00:0a:d5:00:01", "type", "bridge"},
 		{"ip", "-n", l.net, "addr", "add", bridgeAddr.String() + "/24", "dev", "br0"},
 		{"ip", "-n", l.net, "addr", "add", "fd13:213::1/64", "dev", "br0", "nodad"},
 		{"ip", "-n", l.net, "link", "set", "br0", "up"},

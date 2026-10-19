@@ -15,6 +15,7 @@ import (
 // scope limits an edge reconciliation to the pairs a change can affect.
 type scope struct {
 	iface    model.InterfaceID
+	service  model.ServiceID
 	services [2]model.ServiceID
 	all      bool
 }
@@ -22,6 +23,22 @@ type scope struct {
 func interfaceScope(id model.InterfaceID) scope { return scope{iface: id} }
 
 func servicesScope(a, b model.ServiceID) scope { return scope{services: [2]model.ServiceID{a, b}} }
+
+// serviceScope covers every pair with an interface of s.
+func serviceScope(s model.ServiceID) scope { return scope{service: s} }
+
+// ruleScope covers the pairs a rule between services names.
+func ruleScope(r store.Rule) scope {
+	switch {
+	case r.From == model.AnyService && r.To == model.AnyService:
+		return networkScope()
+	case r.From == model.AnyService:
+		return serviceScope(r.To)
+	case r.To == model.AnyService:
+		return serviceScope(r.From)
+	}
+	return servicesScope(r.From, r.To)
+}
 
 // edgeScope covers the edges an interface's end changes. A development
 // machine's edges are its gateway's.
@@ -42,6 +59,9 @@ func (s scope) covers(x, y store.Interface) bool {
 	}
 	if s.iface != "" {
 		return x.ID == s.iface || y.ID == s.iface
+	}
+	if s.service != "" {
+		return x.Service == s.service || y.Service == s.service
 	}
 	a, b := s.services[0], s.services[1]
 	return x.Service == a && y.Service == b || x.Service == b && y.Service == a
@@ -75,6 +95,24 @@ func (s scope) pairs(connected []store.Interface) [][2]store.Interface {
 		}
 		return out
 	}
+	if s.service != "" {
+		for i, x := range connected {
+			if x.Service != s.service {
+				continue
+			}
+			for j, y := range connected {
+				switch {
+				case j == i || j < i && y.Service == s.service:
+					// A pair within the service comes once, from its first.
+				case j < i:
+					out = append(out, [2]store.Interface{y, x})
+				default:
+					out = append(out, [2]store.Interface{x, y})
+				}
+			}
+		}
+		return out
+	}
 	for i, x := range connected {
 		if x.Service != s.services[0] && x.Service != s.services[1] {
 			continue
@@ -100,7 +138,11 @@ func (p *Plane) reconcileEdges(tx store.Tx, now time.Time, n *store.Network, sc 
 	if err != nil {
 		return err
 	}
-	links := compile.NewLinks(compile.NewAdjacency(rules), ifaces)
+	svcs, err := tx.Services(n.ID)
+	if err != nil {
+		return err
+	}
+	links := compile.NewLinks(compile.NewAdjacency(compile.Resolve(svcs, rules)), ifaces)
 	if links.HasDevices() && sc.iface == "" {
 		// A rule naming a development machine's service changes which
 		// interfaces its gateway peers with.
@@ -150,12 +192,19 @@ func (p *Plane) reconcileEdges(tx store.Tx, now time.Time, n *store.Network, sc 
 			}
 		case attached:
 			// Policy no longer connects a pair that is still attached: keep
-			// the edge, dormant, in case it reconnects.
+			// the edge, dormant, in case it reconnects. A new epoch makes
+			// each relay forget both endpoints, so a relay holds a
+			// returning sender's first initiation until the receiver has
+			// its peer back and registers, rather than deliver it to a
+			// device that drops it. Secrets stay, so an agent that kept the
+			// peer through an outage registers again unchanged.
 			if e.Dormant.IsZero() {
 				e.Dormant = now
+				e.Epoch++
 				if err := tx.PutEdge(e); err != nil {
 					return err
 				}
+				touched = append(touched, relayIDs(e)...)
 			}
 		default:
 			if err := releasePorts(tx, e, now); err != nil {

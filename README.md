@@ -39,15 +39,17 @@ Nine c6i.xlarge instances (4 vCPU, up to 12.5 Gb/s) in one placement group in us
 
 | Event | Result |
 |---|---|
-| A new workload's first connection to a peer on another host, 20 peers | 44 ms p50, 54 ms max |
-| A backend replaced, until every client reaches the new one | 34–41 ms p50, 45–53 ms p99 |
-| One of two backends removed, rewriting half of each client's slots | 111–144 ms p50, 152–175 ms p99 |
+| A new workload's first connection to a peer on another host, 20 peers | 48 ms p50, 58 ms max |
+| A backend replaced, until every client reaches the new one | 28–37 ms p50, 47–60 ms p99 |
+| One of two backends removed, rewriting half of each client's slots | 132–143 ms p50, 171–191 ms p99 |
+| A deny closing a wildcard to 30 sandboxes, from its commit | 8–9 ms p50, 14 ms max |
+| The deny lifted, until every sandbox reaches db again | 21–26 ms p50, 41 ms max |
 | A relay killed: an open TCP connection stalls | 0.82 s, then carries on |
 | A relay killed: the next new connection | 0.22–0.26 s |
-| Attaches and detaches across four hosts, 4 workers each | 47 pairs a second, no failures |
+| Attaches and detaches across four hosts, 4 workers each | 45 pairs a second, no failures |
 | Interfaces on one host | 1,000, at 841 KiB each |
 
-Service changes ran under attach churn, with 30 clients over the four hosts. Ranges span two runs.
+Service changes ran under attach churn, with 30 clients over the four hosts. Ranges span two runs, and six for the rule changes.
 
 | One edge, 8 streams | Throughput | Middle box busy | Traffic per CPU-second | Round trip p50, idle / loaded |
 |---|--:|--:|--:|--:|
@@ -66,7 +68,7 @@ Each edge streams one TCP connection, from two sending hosts to two receiving ho
 - **A dead relay costs an open connection 0.82 s.** Keys, sessions and conntrack live at the ends, so TCP retransmits across the switch and the connection carries on. Each edge the relay carried moves to its own next relay, so the survivors share its load.
 - **Relays add throughput until the hosts run out of CPU.** One relay fills its CPU at 6.2 Gb/s. Two carry 14.1 Gb/s, more than plain TCP between one pair of hosts. With three, the receiving hosts spend every core decrypting and the relays have CPU to spare.
 - **A relay costs less than half a gateway's CPU.** It forwards ciphertext, where a gateway decrypts and re-encrypts every byte. On one edge the gateway carries 17% more by using three cores; the relay reads each edge on one.
-- **A detach tells the control plane first.** Deleting a WireGuard device waits a grace period for each peer it holds: about a second under churn for a backend with 30 peers. Clients leave a departing backend while its device is deleted, which took a replacement from 1,037 ms to 34–41 ms.
+- **A detach tells the control plane first.** Deleting a WireGuard device waits a grace period for each peer it holds: about a second under churn for a backend with 30 peers. Clients leave a departing backend while its device is deleted, which took a replacement from 1,037 ms to 27–48 ms.
 - **Short windows.** A c6i.xlarge's network bursts to 12.5 Gb/s above a lower baseline, so each throughput test runs 10 seconds.
 
 `bin/wirenet-lab run --env aws --plan all` reruns the test on a fleet from [deploy/README.md](deploy/README.md). [SPEC.md](SPEC.md#the-fleet-on-ec2) records every figure with its method.
@@ -216,7 +218,18 @@ The slot count stays fixed, so a backend change rewrites only the slots whose ba
 
 ### Policy
 
-Policy names services, and denies every flow it does not name: `wirenetctl rule create shop web db --proto tcp --ports 5432` lets `web` reach `db` on one port. An interface gets a peer only where policy permits a flow, so its peer count is its policy degree, whatever the network's size. `AllowedIPs` decides whether a peer may speak as an address, and nftables decides whether a flow may happen. Both run in the receiver's kernel.
+Policy names services, and denies every flow it does not name. A rule allows or denies, and either side may be `*`, every service but the one on the rule's other side:
+
+```console
+wirenetctl rule create shop web db --proto tcp --ports 5432        # web reaches db on one port
+wirenetctl rule create shop '*' mirror --proto tcp --ports 443     # every other service reaches the mirror
+wirenetctl rule create shop box mirror --deny --proto tcp --ports 443   # except the sandboxes
+wirenetctl policy shop                                             # the flows the rules leave open
+```
+
+A deny takes its flows out of every allow, whatever the order, exactly down to the port. `*` never matches a service's own members: sandboxes in one service reach each other only through a rule naming the service on both sides, since a service connected to itself peers every two of its members.
+
+An interface gets a peer only where policy permits a flow, so its peer count is its policy degree, whatever the network's size; `allow * -> mirror` makes the mirror's degree the network's. `AllowedIPs` decides whether a peer may speak as an address, and nftables decides whether a flow may happen. Both run in the receiver's kernel.
 
 ### Leases and keys
 
@@ -312,6 +325,7 @@ Relaying ciphertext is common: Tailscale's DERP, Nebula's relays and NetBird all
 ## Known limits
 
 - **Not a lock.** A service that needs a single writer fences in its storage layer.
+- **Rules name one service or every service.** Selecting services by label is planned, and would follow the same rule for a service's own members.
 - **Relays are trusted for availability.** A relay can drop or misdeliver packets, though it can never read or forge them.
 - **A host's token admits it to every network.** A compromised host speaks only as the interfaces it holds, but can attach new ones to any service.
 - **One control plane orders every change.** Every write takes the next revision from one row, so attaches, releases and policy changes serialize across networks.

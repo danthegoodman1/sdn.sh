@@ -37,10 +37,12 @@ func (f *Failure) Error() string {
 
 // Summary describes a run that passed.
 type Summary struct {
-	Seed                                  uint64
-	Events                                uint64
-	Attaches, Detaches, Revokes, Rules    int
-	EgressGrants                          int
+	Seed                               uint64
+	Events                             uint64
+	Attaches, Detaches, Revokes, Rules int
+	EgressGrants                       int
+	// Policies counts wildcard and deny rules added and removed.
+	Policies                              int
 	AgentCrashes, RelayCrashes, CPCrashes int
 	Reboots, Rebinds, Strays, Unnamed     int
 	FlowsOK, FlowsDenied                  int
@@ -54,8 +56,8 @@ type Summary struct {
 }
 
 func (s Summary) String() string {
-	return fmt.Sprintf("seed %d: %d events; %d attaches, %d detaches, %d revokes, %d rule changes, %d egress grants; crashes agent %d relay %d cp %d, reboots %d, rebinds %d, strays %d, unnamed %d; flows ok %d denied %d; batches %d, conflicts %d, failovers %d, registrations %d, acked %d, ack timeouts %d, attacker sent %d; relay edges %d, split %d, drifted %d",
-		s.Seed, s.Events, s.Attaches, s.Detaches, s.Revokes, s.Rules, s.EgressGrants, s.AgentCrashes, s.RelayCrashes, s.CPCrashes,
+	return fmt.Sprintf("seed %d: %d events; %d attaches, %d detaches, %d revokes, %d rule changes, %d egress grants, %d wildcard and deny changes; crashes agent %d relay %d cp %d, reboots %d, rebinds %d, strays %d, unnamed %d; flows ok %d denied %d; batches %d, conflicts %d, failovers %d, registrations %d, acked %d, ack timeouts %d, attacker sent %d; relay edges %d, split %d, drifted %d",
+		s.Seed, s.Events, s.Attaches, s.Detaches, s.Revokes, s.Rules, s.EgressGrants, s.Policies, s.AgentCrashes, s.RelayCrashes, s.CPCrashes,
 		s.Reboots, s.Rebinds, s.Strays, s.Unnamed, s.FlowsOK, s.FlowsDenied, s.Batches, s.Conflicts, s.Failovers, s.Registrations, s.Acked, s.AckTimeouts, s.AttackerSent,
 		s.RelayEdges, s.RelaySplit, s.RelayDrift)
 }

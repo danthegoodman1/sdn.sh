@@ -69,6 +69,11 @@ type NetworkState struct {
 	Relays     []RelayRef  `json:"relays,omitempty"`
 	Interfaces []Interface `json:"interfaces"`
 	Services   []Service   `json:"services,omitempty"`
+	// Unreached holds the addresses of the network's other services, which
+	// no interface on this host reaches, sorted. Every namespace rejects
+	// them, so a workload dialing an address it learned before a deny
+	// leaves no conntrack entry to outlast it.
+	Unreached []netip.Addr `json:"unreached,omitempty"`
 }
 
 // Domain is the DNS suffix the network's names resolve under.
@@ -160,6 +165,9 @@ type Peer struct {
 	// Registration is this direction's secret, from which the agent derives
 	// each relay's registration key.
 	Registration model.Secret `json:"registration,omitzero"`
+	// Epoch moves each time the edge goes dormant, when every relay forgets
+	// this direction's endpoint.
+	Epoch uint64 `json:"epoch,omitempty"`
 	// DialsIn marks a development machine at its gateway: it dials the
 	// gateway, so roaming alone sets its endpoint.
 	DialsIn bool `json:"dials_in,omitempty"`

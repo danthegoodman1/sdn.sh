@@ -231,7 +231,7 @@ func fullEdge(net model.NetworkID, a, b model.InterfaceID) store.Edge {
 			{Relay: "relay-b", Addr: addr("10.0.0.2"), AB: 20001, BA: 20002},
 			{Relay: "relay-a", Addr: addr("2001:db8::2"), AB: 65534, BA: 1024},
 		},
-		Created: fine, Dormant: fine.Add(time.Hour),
+		Created: fine, Dormant: fine.Add(time.Hour), Epoch: 1<<63 + 5,
 	}
 }
 
@@ -478,13 +478,15 @@ func testRules(t *testing.T, s store.Store) {
 	}
 	internet := store.Rule{ID: "rule-a", Network: "net-a", From: "svc-a", Proto: model.AnyProto, Created: t0}
 	other := store.Rule{ID: "rule-c", Network: "net-b", From: "svc-c", To: "svc-c", Proto: model.UDP, Ports: model.PortRange{Lo: 53, Hi: 53}, Created: t0}
-	put(t, s, putRule, full, internet, other)
-	for _, want := range []store.Rule{full, internet, other} {
+	denied := store.Rule{ID: "rule-d", Network: "net-b", From: model.AnyService, To: "svc-c", Proto: model.TCP, Ports: model.PortRange{Lo: 22, Hi: 22}, Created: t0, Deny: true}
+	put(t, s, putRule, full, internet, other, denied)
+	for _, want := range []store.Rule{full, internet, other, denied} {
 		same(t, "Rule", read(t, s, func(tx store.ReadTx) (store.Rule, error) { return tx.Rule(want.ID) }), want)
 	}
 	same(t, "Rules", read(t, s, func(tx store.ReadTx) ([]store.Rule, error) { return tx.Rules("net-a") }), []store.Rule{internet, full})
 	missing(t, s, "Rule", func(tx store.ReadTx) (store.Rule, error) { return tx.Rule("rule-none") })
-	full.Ports = model.PortRange{Lo: 1, Hi: 2}
+	same(t, "Rules", read(t, s, func(tx store.ReadTx) ([]store.Rule, error) { return tx.Rules("net-b") }), []store.Rule{other, denied})
+	full.Ports, full.Deny = model.PortRange{Lo: 1, Hi: 2}, true
 	put(t, s, putRule, full)
 	same(t, "replaced Rule", read(t, s, func(tx store.ReadTx) (store.Rule, error) { return tx.Rule("rule-b") }), full)
 	update(t, s, func(tx store.Tx) error { return tx.DeleteRule("rule-a") })

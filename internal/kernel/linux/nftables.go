@@ -274,16 +274,31 @@ func (w *nftWriter) rules(r nft.Rules) error {
 			w.add("services_fwd", exprs...)
 		}
 	}
-	for _, a := range r.Reject {
-		f := nft.FamilyOf(a)
+	// The rejected addresses are a set per family, so every packet the
+	// namespace sends meets the same few rules however many services the
+	// network holds. Each rule takes its own anonymous set, since the
+	// kernel binds one to a single rule (nf_tables_bind_set).
+	for _, f := range []nft.Family{nft.IPv6, nft.IPv4} {
+		addrs := slices.DeleteFunc(slices.Clone(r.Reject), func(a netip.Addr) bool { return nft.FamilyOf(a) != f })
+		if len(addrs) == 0 {
+			continue
+		}
 		for _, chain := range []string{"untranslated", "untranslated_fwd"} {
 			if chain == "untranslated_fwd" && !w.forward {
 				continue
 			}
-			match := append(family(f), addrField(f, false), eq(a.AsSlice()))
-			tcp := append(slices.Clone(match), l4(unix.IPPROTO_TCP)...)
-			w.add(chain, append(tcp, &expr.Reject{Type: unix.NFT_REJECT_TCP_RST})...)
-			w.add(chain, append(match, &expr.Reject{Type: unix.NFT_REJECT_ICMPX_UNREACH, Code: unix.NFT_REJECT_ICMPX_PORT_UNREACH})...)
+			for _, tcp := range []bool{true, false} {
+				set := &nftables.Set{Table: w.table, Anonymous: true, Constant: true, KeyType: addrType(f)}
+				if err := w.c.AddSet(set, addrElems(addrs)); err != nil {
+					return err
+				}
+				match := append(family(f), addrField(f, false), &expr.Lookup{SourceRegister: 1, SetName: set.Name, SetID: set.ID})
+				if tcp {
+					w.add(chain, append(append(match, l4(unix.IPPROTO_TCP)...), &expr.Reject{Type: unix.NFT_REJECT_TCP_RST})...)
+				} else {
+					w.add(chain, append(match, &expr.Reject{Type: unix.NFT_REJECT_ICMPX_UNREACH, Code: unix.NFT_REJECT_ICMPX_PORT_UNREACH})...)
+				}
+			}
 		}
 	}
 	for _, name := range r.Shield {
@@ -348,8 +363,13 @@ func l4(proto byte) []expr.Any {
 
 // protoMatch matches a policy rule's protocol and ports.
 func protoMatch(proto model.Proto, ports model.PortRange) []expr.Any {
-	if proto == model.AnyProto {
+	switch proto {
+	case model.AnyProto:
 		return nil
+	case model.OtherProto:
+		return []expr.Any{&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
+			&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{unix.IPPROTO_UDP}}}
 	}
 	p := byte(unix.IPPROTO_TCP)
 	if proto == model.UDP {

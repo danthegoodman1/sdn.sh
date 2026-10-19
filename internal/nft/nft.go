@@ -10,7 +10,7 @@
 //	chain services { type nat hook output priority dstnat; }
 //	    ip6 daddr <service> tcp dport 5432 dnat ip6 to numgen random mod 1024 map @s_<service>_6
 //	chain untranslated { type filter hook output priority filter; }
-//	    ip6 daddr <service> reject
+//	    ip6 daddr { <service>, ... } reject
 //	chain inbound { type filter hook input priority filter; policy drop; }
 //	    iif lo accept; ct state established,related accept; ct state invalid drop
 //	    ICMP errors accept
@@ -20,8 +20,10 @@
 //
 // A packet to a service address that the services chain translated no longer
 // carries that address when the untranslated chain sees it, so the reject
-// catches only what found no translation: a service with no backends, or a
-// port policy does not name. A client fails fast rather than hanging.
+// catches only what found no translation: a service with no backends, a
+// port policy does not name, or a service policy keeps the namespace from.
+// The reject lists every service address of the network. A client fails
+// fast rather than hanging, and the failure leaves no conntrack entry.
 //
 // A Ruleset is the table's content as data; Diff turns two of them into one
 // Transaction, which nftables applies atomically; Apply plays a transaction

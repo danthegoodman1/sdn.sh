@@ -220,16 +220,20 @@ type Interface struct {
 	Drained bool `json:"drained,omitempty"`
 }
 
-// Rule permits flows from one service to another, or to the internet when
-// To is empty.
+// Rule allows or denies flows from a service to a service or the internet.
+// Either side may be every service.
 type Rule struct {
 	ID      model.RuleID    `json:"id"`
 	Network model.NetworkID `json:"network"`
-	From    model.ServiceID `json:"from"`
+	// From is a service or model.AnyService.
+	From model.ServiceID `json:"from"`
+	// To is a service, model.AnyService, or empty for internet egress.
 	To      model.ServiceID `json:"to,omitempty"`
 	Proto   model.Proto     `json:"proto"`
 	Ports   model.PortRange `json:"ports"`
 	Created time.Time       `json:"created"`
+	// Deny takes the flows the rule names out of every allow.
+	Deny bool `json:"deny,omitempty"`
 }
 
 // Edge is a pair of policy-connected interfaces on different hosts, with a
@@ -246,9 +250,12 @@ type Edge struct {
 	Created  time.Time    `json:"created"`
 	// Dormant is when policy stopped connecting a pair that is still
 	// attached. A dormant edge keeps its ports and secrets for the port
-	// quarantine, so a pair that reconnects gets the same edge back and its
-	// peers' endpoints stay valid.
+	// quarantine, so a pair that reconnects gets the same edge back.
 	Dormant time.Time `json:"dormant,omitzero"`
+	// Epoch counts the times the edge has gone dormant. A relay forgets the
+	// endpoints of a port whose epoch moves, so a reconnecting pair
+	// registers afresh before the relay forwards between them.
+	Epoch uint64 `json:"epoch,omitempty"`
 }
 
 // EdgePorts are an edge's two ports on one relay address.

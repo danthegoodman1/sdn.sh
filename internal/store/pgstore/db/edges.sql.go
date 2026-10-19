@@ -26,7 +26,7 @@ func (q *Queries) DeleteEdge(ctx context.Context, arg DeleteEdgeParams) error {
 }
 
 const listDormantEdges = `-- name: ListDormantEdges :many
-SELECT network, a, b, secret_ab, secret_ba, ports, created, dormant FROM edges
+SELECT network, a, b, secret_ab, secret_ba, ports, created, dormant, epoch FROM edges
 WHERE dormant IS NOT NULL AND dormant < $1::timestamptz
 ORDER BY dormant, network, a, b
 LIMIT $2
@@ -55,6 +55,7 @@ func (q *Queries) ListDormantEdges(ctx context.Context, arg ListDormantEdgesPara
 			&i.Ports,
 			&i.Created,
 			&i.Dormant,
+			&i.Epoch,
 		); err != nil {
 			return nil, err
 		}
@@ -67,7 +68,7 @@ func (q *Queries) ListDormantEdges(ctx context.Context, arg ListDormantEdgesPara
 }
 
 const listEdges = `-- name: ListEdges :many
-SELECT network, a, b, secret_ab, secret_ba, ports, created, dormant FROM edges WHERE network = $1 ORDER BY a, b
+SELECT network, a, b, secret_ab, secret_ba, ports, created, dormant, epoch FROM edges WHERE network = $1 ORDER BY a, b
 `
 
 func (q *Queries) ListEdges(ctx context.Context, network string) ([]Edge, error) {
@@ -88,6 +89,7 @@ func (q *Queries) ListEdges(ctx context.Context, network string) ([]Edge, error)
 			&i.Ports,
 			&i.Created,
 			&i.Dormant,
+			&i.Epoch,
 		); err != nil {
 			return nil, err
 		}
@@ -100,7 +102,7 @@ func (q *Queries) ListEdges(ctx context.Context, network string) ([]Edge, error)
 }
 
 const listRelayEdges = `-- name: ListRelayEdges :many
-SELECT network, a, b, secret_ab, secret_ba, ports, created, dormant FROM edges
+SELECT network, a, b, secret_ab, secret_ba, ports, created, dormant, epoch FROM edges
 WHERE ports @> jsonb_build_array(jsonb_build_object('relay', $1::text))
 ORDER BY network, a, b
 `
@@ -123,6 +125,7 @@ func (q *Queries) ListRelayEdges(ctx context.Context, relay string) ([]Edge, err
 			&i.Ports,
 			&i.Created,
 			&i.Dormant,
+			&i.Epoch,
 		); err != nil {
 			return nil, err
 		}
@@ -135,11 +138,12 @@ func (q *Queries) ListRelayEdges(ctx context.Context, relay string) ([]Edge, err
 }
 
 const putEdge = `-- name: PutEdge :exec
-INSERT INTO edges (network, a, b, secret_ab, secret_ba, ports, created, dormant)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO edges (network, a, b, secret_ab, secret_ba, ports, created, dormant, epoch)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (network, a, b) DO UPDATE SET
 	secret_ab = excluded.secret_ab, secret_ba = excluded.secret_ba,
-	ports = excluded.ports, created = excluded.created, dormant = excluded.dormant
+	ports = excluded.ports, created = excluded.created, dormant = excluded.dormant,
+	epoch = excluded.epoch
 `
 
 type PutEdgeParams struct {
@@ -151,6 +155,7 @@ type PutEdgeParams struct {
 	Ports    []byte
 	Created  time.Time
 	Dormant  *time.Time
+	Epoch    int64
 }
 
 func (q *Queries) PutEdge(ctx context.Context, arg PutEdgeParams) error {
@@ -163,6 +168,7 @@ func (q *Queries) PutEdge(ctx context.Context, arg PutEdgeParams) error {
 		arg.Ports,
 		arg.Created,
 		arg.Dormant,
+		arg.Epoch,
 	)
 	return err
 }

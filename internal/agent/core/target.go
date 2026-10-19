@@ -74,6 +74,7 @@ func (c *Core) target(now time.Time, st *nsState, n *api.NetworkState, x *api.In
 	}
 	draining := map[model.Key]bool{}
 	acking := map[model.Key]bool{}
+	sessioning, checkable := map[model.Key]bool{}, map[model.Key]bool{}
 	var port uint16
 	if i, ok := c.ifaces[st.iface]; ok {
 		port = i.port
@@ -109,8 +110,13 @@ func (c *Core) target(now time.Time, st *nsState, n *api.NetworkState, x *api.In
 			switch {
 			case p.Draining:
 			case p.Loopback != 0:
-				tp.awaiting = !c.holdsReverse(st, p)
-				if tp.awaiting {
+				// Both waits start while the peer is new; a session can
+				// form only once the other device holds this one.
+				held := c.holdsReverse(st, p)
+				sessioning[p.PublicKey] = c.awaitsSession(now, st, x, p, held)
+				checkable[p.PublicKey] = held
+				tp.awaiting = !held || sessioning[p.PublicKey]
+				if !held {
 					reverse = append(reverse, p.Interface)
 				}
 			default:
@@ -155,6 +161,34 @@ func (c *Core) target(now time.Time, st *nsState, n *api.NetworkState, x *api.In
 		}
 		delete(c.awaitingAck, ackKey{port, w.path})
 		delete(st.acks, key)
+	}
+	var check []model.Key
+	var checkBy time.Time
+	for _, key := range slices.SortedFunc(maps.Keys(st.sessions), compareKey) {
+		w := st.sessions[key]
+		if !sessioning[key] {
+			if !w.up && !w.until.IsZero() && !now.Before(w.until) {
+				c.Stats.SessionTimeouts++
+			}
+			delete(st.sessions, key)
+			continue
+		}
+		if w.until.IsZero() {
+			continue
+		}
+		if st.ackBy.IsZero() || w.until.Before(st.ackBy) {
+			st.ackBy = w.until
+		}
+		if _, installed := st.peers[key]; installed && checkable[key] {
+			check = append(check, key)
+			if checkBy.IsZero() || w.until.After(checkBy) {
+				checkBy = w.until
+			}
+		}
+	}
+	if len(check) > 0 && !st.checking {
+		st.checking = true
+		c.emit(CheckSessions{Namespace: st.name, Device: c.cfg.Device, Keys: check, Until: checkBy})
 	}
 	slices.SortFunc(t.peers, func(a, b tpeer) int { return compareKey(a.peer.PublicKey, b.peer.PublicKey) })
 	t.rules = c.rules(n, x, t.peers)
@@ -233,6 +267,59 @@ func (c *Core) awaitsAck(now time.Time, st *nsState, port uint16, p api.Peer, tp
 	return true
 }
 
+// awaitsSession reports whether a co-located peer new to the namespace,
+// which keeps the pair alive from its side and which this interface
+// reaches too, still waits for this namespace's device to hold a session
+// with it. Arming keepalive sends an initiation, and so would this side's
+// first connection: two initiations that cross each discard the other's
+// pending handshake and cost both sides 5 seconds (noise.c, send.c). Once
+// a session holds, the connection uses it and initiates nothing. A peer
+// installed before never waits, and none waits past AckWait from when the
+// other device holds the reverse peer.
+func (c *Core) awaitsSession(now time.Time, st *nsState, x *api.Interface, p api.Peer, held bool) bool {
+	if p.Keepalive || !slices.ContainsFunc(x.Reach, func(r api.Reach) bool { return r.Service == p.Service }) {
+		return false
+	}
+	w, ok := st.sessions[p.PublicKey]
+	if !ok {
+		if _, installed := st.peers[p.PublicKey]; installed {
+			return false
+		}
+		w = &sessionWait{}
+		st.sessions[p.PublicKey] = w
+	}
+	if held && w.until.IsZero() {
+		w.until = now.Add(c.cfg.AckWait)
+	}
+	return !w.up && (w.until.IsZero() || now.Before(w.until))
+}
+
+// SessionsSeen takes a session check's answer: the peers the namespace's
+// device holds a session with. A check that failed ends every wait, so the
+// slots go in as they would without one.
+func (c *Core) SessionsSeen(now time.Time, namespace string, up []model.Key, err error) {
+	st, ok := c.ns[namespace]
+	if !ok {
+		return
+	}
+	st.checking = false
+	st.dirty = true
+	if err != nil {
+		if c.Debug != nil {
+			c.Debug(fmt.Sprintf("%s: session check: %v", namespace, err))
+		}
+		for _, key := range slices.SortedFunc(maps.Keys(st.sessions), compareKey) {
+			st.sessions[key].up = true
+		}
+		return
+	}
+	for _, key := range up {
+		if w, ok := st.sessions[key]; ok {
+			w.up = true
+		}
+	}
+}
+
 func conflicted(owner map[netip.Prefix]model.Key, p api.Peer) bool {
 	for _, a := range allowedOf(p) {
 		if o, ok := owner[a]; ok && o != p.PublicKey {
@@ -274,7 +361,8 @@ func (c *Core) tpeer(self model.InterfaceID, p api.Peer) tpeer {
 
 // rules builds the namespace's nftables table from the peers it holds, so a
 // slot never names an address without a peer and a source set never names
-// an address with none.
+// an address with none, and rejects every service address of the network
+// it does not translate.
 func (c *Core) rules(n *api.NetworkState, x *api.Interface, peers []tpeer) *nft.Ruleset {
 	rs := &nft.Ruleset{Forward: x.Kind == api.Gateway}
 	live := map[model.InterfaceID]bool{x.ID: true}
@@ -317,6 +405,21 @@ func (c *Core) rules(n *api.NetworkState, x *api.Interface, peers []tpeer) *nft.
 				rs.Maps = append(rs.Maps, nft.Map{Name: name, Family: f, Slots: slotMap(backends, f)})
 			}
 			rs.Rules.Translate = append(rs.Rules.Translate, nft.Translate{Addr: addr, Proto: r.Proto, Ports: r.Ports, Map: name})
+		}
+	}
+	// So is every other service of the network, whether another interface
+	// here reaches it or none does. A connection to one fails at once and
+	// leaves conntrack nothing. Sent untranslated, it would keep an entry
+	// for 120 seconds, and NAT runs once per entry, so a later connection
+	// landing on its tuple would miss the service's translation once policy
+	// restored it, and be refused.
+	others := slices.Clone(n.Unreached)
+	for _, svc := range n.Services {
+		others = append(others, svc.Addr6, svc.Addr4)
+	}
+	for _, a := range others {
+		if a.IsValid() && (a.Is6() || x.Addr4.IsValid()) {
+			rs.Rules.Reject = append(rs.Rules.Reject, a)
 		}
 	}
 	madeSet := map[string]bool{}

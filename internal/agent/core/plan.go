@@ -509,6 +509,7 @@ func (c *Core) Observed(now time.Time, ns kernel.Namespace, err error) {
 	st.observe = false
 	st.dirty = true
 	if errors.Is(err, kernel.ErrNoNamespace) {
+		st.exists = false
 		if c.lost(st) {
 			c.scan()
 		}

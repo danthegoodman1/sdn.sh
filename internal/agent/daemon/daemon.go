@@ -576,18 +576,20 @@ func (d *Daemon) runOp(op kernel.Op) error {
 	return err
 }
 
-// checkSessions reads a device's sessions every 2ms, for up to 50ms or
-// until it holds one with every peer asked about, and tells the core.
+// checkSessions reads a device's sessions, each gap twice the last, until
+// it holds one with every peer asked about, a read fails or the check's
+// deadline passes, and tells the core.
 func (d *Daemon) checkSessions(a agentcore.CheckSessions) {
 	go func() {
 		var r kernel.Result
 		var err error
-		for range 25 {
+		for gap := agentcore.SessionPoll; ; gap = min(2*gap, agentcore.SessionPollMax) {
 			r, err = d.kern.Run(kernel.Op{Kind: kernel.ReadSessions, Namespace: a.Namespace, Device: a.Device})
-			if err != nil || !slices.ContainsFunc(a.Keys, func(k model.Key) bool { return !slices.Contains(r.Sessions, k) }) {
+			left := time.Until(a.Until)
+			if err != nil || left <= 0 || !slices.ContainsFunc(a.Keys, func(k model.Key) bool { return !slices.Contains(r.Sessions, k) }) {
 				break
 			}
-			time.Sleep(2 * time.Millisecond)
+			time.Sleep(min(gap, left))
 		}
 		d.post(func() { d.core.SessionsSeen(d.now(), a.Namespace, r.Sessions, err) })
 	}()

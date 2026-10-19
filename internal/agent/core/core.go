@@ -173,11 +173,23 @@ type SendProbe struct {
 type Observe struct{ Namespace string }
 
 // CheckSessions asks which of Keys a namespace's device holds a session
-// with, which comes back through SessionsSeen. It may poll briefly.
+// with, which comes back through SessionsSeen. It polls, each gap twice
+// the last from 2ms to 128ms, until every key holds one, a read fails, or
+// Until passes.
 type CheckSessions struct {
 	Namespace, Device string
 	Keys              []model.Key
+	Until             time.Time
 }
+
+// SessionPoll and SessionPollMax bound a session check's gaps. Each read
+// takes RTNL, so the gaps grow: a session forms within a few milliseconds
+// of the reverse peer, and a wait that runs to AckWait reads about a dozen
+// times.
+const (
+	SessionPoll    = 2 * time.Millisecond
+	SessionPollMax = 128 * time.Millisecond
+)
 
 // Scan asks for a snapshot of the kernel, which comes back through Scanned,
 // to find devices the agent made in namespaces only a process holds.
@@ -278,9 +290,6 @@ type nsState struct {
 	// registered holds what each relay peer's registrations last depended
 	// on.
 	registered map[model.Key]registration
-	// services holds every service address the namespace has known, which
-	// it rejects while it holds no translation for one.
-	services map[netip.Addr]bool
 	// unflushed holds addresses of removed peers whose flows have yet to
 	// be flushed; sweep asks for a sweep of every flow no installed peer
 	// accounts for, after a restart lost track.
@@ -323,7 +332,6 @@ func newNS(name string, id model.InterfaceID) *nsState {
 		drain:      map[model.Key]time.Time{},
 		fresh:      map[model.Key]bool{},
 		registered: map[model.Key]registration{},
-		services:   map[netip.Addr]bool{},
 		acks:       map[model.Key]*ackWait{},
 		sessions:   map[model.Key]*sessionWait{},
 	}
@@ -338,7 +346,8 @@ type ackWait struct {
 }
 
 // sessionWait is a co-located peer whose slots wait for this namespace's
-// device to hold a session with it.
+// device to hold a session with it. Its deadline starts once the other
+// device holds the reverse peer, since no session forms before.
 type sessionWait struct {
 	until time.Time
 	up    bool

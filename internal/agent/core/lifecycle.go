@@ -119,9 +119,10 @@ func (c *Core) Scanned(now time.Time, snap kernel.Snapshot, err error) {
 				continue
 			}
 			// An interface the agent holds whose device sits where only a
-			// process holds it lost its namespace's name, and the reap
-			// takes its device: co-located peers must stop counting on it
-			// before the agent observes the name gone.
+			// process holds it lost its namespace's name, or its device
+			// left that namespace, and the reap takes the device:
+			// co-located peers must stop counting on it at once. The name
+			// may still stand, and the detach deletes it if it does.
 			if named, ok := c.ns[i.ns]; ok {
 				c.lost(named)
 			}
@@ -129,13 +130,13 @@ func (c *Core) Scanned(now time.Time, snap kernel.Snapshot, err error) {
 	}
 }
 
-// lost takes a namespace as gone behind the agent's back, its device with
-// it or into a namespace only a process holds: the key is gone either way,
-// and so is the interface, which detaches. Every namespace holding it as a
-// peer replans, so a co-located client takes its slots away at once. It
-// reports whether the interface was live.
+// lost takes a namespace's device as gone behind the agent's back, with
+// the namespace or into one only a process holds: the key is gone either
+// way, and so is the interface, which detaches. Every namespace holding it
+// as a peer replans, so a co-located client takes its slots away at once.
+// It reports whether the interface was live.
 func (c *Core) lost(st *nsState) bool {
-	st.exists, st.device, st.egress = false, false, nil
+	st.device, st.egress = false, nil
 	st.peers = map[model.Key]kernel.Peer{}
 	st.link, st.rules = nil, nil
 	st.dirty = true

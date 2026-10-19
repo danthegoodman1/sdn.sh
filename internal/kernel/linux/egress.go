@@ -114,7 +114,9 @@ const blockedTag = "blocked "
 func comment(s string) []byte { return userdata.AppendString(nil, userdata.TypeComment, s) }
 
 // ruleComment reads the text a rule records: its comment, or the whole
-// user data for a rule an earlier agent tagged with bare text.
+// user data for a rule an earlier agent tagged with bare text. It reads
+// the TLV itself, since userdata.Get slices before it checks a length and
+// panics on bare text.
 func ruleComment(udata []byte) string {
 	if len(udata) >= 2 && userdata.Type(udata[0]) == userdata.TypeComment && 2+int(udata[1]) <= len(udata) {
 		return strings.TrimSuffix(string(udata[2:2+int(udata[1])]), "\x00")

@@ -134,13 +134,15 @@ func TestADeviceReachesWhatPolicyGrantsThroughItsGateway(t *testing.T) {
 
 // TestAGatewayWhoseDevicesReachKeepsALoopbackPairAlive puts db beside a
 // gateway whose development machines reach it under `dev -> db`, though
-// nothing grants the gateway's own service anything: the gateway's peer
-// for each db carries keepalive and db's for the gateway does not,
+// nothing grants the gateway's own service anything, and lets db reach
+// the machines too, which the gateway's shield turns away: the gateway's
+// peer for each db carries keepalive and db's for the gateway does not,
 // whichever has the lower ID, since the machines' first connections leave
-// from the gateway's device.
+// from the gateway's device and db opens none.
 func TestAGatewayWhoseDevicesReachKeepsALoopbackPairAlive(t *testing.T) {
 	eachStore(t, func(t *testing.T, f *fixture) {
 		gw, _, _ := shopWithDevices(f)
+		f.rule("shop", "db", "dev", model.TCP, 22)
 		if _, err := f.device("shop", "dev", gw.ID, 24*time.Hour); err != nil {
 			t.Fatal(err)
 		}

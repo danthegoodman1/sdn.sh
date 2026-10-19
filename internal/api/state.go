@@ -69,6 +69,11 @@ type NetworkState struct {
 	Relays     []RelayRef  `json:"relays,omitempty"`
 	Interfaces []Interface `json:"interfaces"`
 	Services   []Service   `json:"services,omitempty"`
+	// Unreached holds the addresses of the network's other services, which
+	// no interface on this host reaches, sorted. Every namespace rejects
+	// them, so a workload dialing an address it learned before a deny
+	// leaves no conntrack entry to outlast it.
+	Unreached []netip.Addr `json:"unreached,omitempty"`
 }
 
 // Domain is the DNS suffix the network's names resolve under.

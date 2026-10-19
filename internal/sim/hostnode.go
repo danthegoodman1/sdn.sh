@@ -283,11 +283,19 @@ func (h *hostNode) carry(a agentcore.Action) {
 		})
 	case agentcore.CheckSessions:
 		op := kernel.Op{Kind: kernel.ReadSessions, Namespace: a.Namespace, Device: a.Device}
-		name := a.Namespace
-		h.later(2*time.Millisecond, func() {
-			r, err := h.kernel.Run(op)
-			h.core.SessionsSeen(now(), name, r.Sessions, err)
-		})
+		var poll func(gap time.Duration)
+		poll = func(gap time.Duration) {
+			h.later(gap, func() {
+				r, err := h.kernel.Run(op)
+				missing := slices.ContainsFunc(a.Keys, func(k model.Key) bool { return !slices.Contains(r.Sessions, k) })
+				if err == nil && missing && now().Add(2*gap).Before(a.Until) {
+					poll(min(2*gap, agentcore.SessionPollMax))
+					return
+				}
+				h.core.SessionsSeen(now(), a.Namespace, r.Sessions, err)
+			})
+		}
+		poll(agentcore.SessionPoll)
 	case agentcore.Scan:
 		h.later(0, func() {
 			snap, err := h.kernel.Snapshot(h.cfg.Prefix, h.cfg.AliasPrefix())

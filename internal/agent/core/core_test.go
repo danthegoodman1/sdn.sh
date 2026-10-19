@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -566,13 +567,12 @@ func TestAnAcknowledgedDirectionIsNotResentAndANewPeerResendsAlone(t *testing.T)
 	}
 }
 
-// TestEveryServiceTheNamespaceHasKnownIsRejected gives a client db, then
-// takes db away as a deny does, which drops it from the host's state: the
-// namespace keeps rejecting db's address, so a connection to the address
-// the workload learned leaves no conntrack entry to outlast the deny. An
-// address a peer comes to hold, as a reused IPv4 address can, is left
-// alone.
-func TestEveryServiceTheNamespaceHasKnownIsRejected(t *testing.T) {
+// TestEveryServiceTheNamespaceDoesNotTranslateIsRejected gives a client
+// db, then takes db away as a deny does, which moves it from the host's
+// services to its unreached addresses: the namespace rejects db's address
+// throughout, so a connection to the address the workload learned leaves
+// no conntrack entry to outlast the deny.
+func TestEveryServiceTheNamespaceDoesNotTranslateIsRejected(t *testing.T) {
 	c, now := adopted(t)
 	update := func(rev uint64, n api.NetworkState) {
 		t.Helper()
@@ -585,24 +585,18 @@ func TestEveryServiceTheNamespaceHasKnownIsRejected(t *testing.T) {
 		drive(c, now, succeed)
 	}
 	rejects := func() []netip.Addr { return c.ns["wirenet-a"].rules.Rules.Reject }
-	db := netip.MustParseAddr("fd00::100")
-	update(3, client(3, "if-a", self, backend("if-b", peer, "fd00::6")))
-	if !slotted(c, "wirenet-a") || !slices.Equal(rejects(), []netip.Addr{db}) {
+	db, other := netip.MustParseAddr("fd00::100"), netip.MustParseAddr("fd00::200")
+	reaching := client(3, "if-a", self, backend("if-b", peer, "fd00::6"))
+	reaching.Unreached = []netip.Addr{other}
+	update(3, reaching)
+	if !slotted(c, "wirenet-a") || !slices.Equal(rejects(), []netip.Addr{db, other}) {
 		t.Fatalf("reaching db: slotted %v, rejecting %v", slotted(c, "wirenet-a"), rejects())
 	}
 	denied := client(4, "if-a", self)
-	denied.Services, denied.Interfaces[0].Reach = nil, nil
+	denied.Services, denied.Interfaces[0].Reach, denied.Unreached = nil, nil, []netip.Addr{db, other}
 	update(4, denied)
-	if rs := c.ns["wirenet-a"].rules; len(rs.Rules.Translate) != 0 || !slices.Equal(rejects(), []netip.Addr{db}) {
-		t.Fatalf("denied db: translating %v, rejecting %v; want db's address", rs.Rules.Translate, rejects())
-	}
-	reused := client(5, "if-a", self)
-	reused.Services, reused.Interfaces[0].Reach = nil, nil
-	holder := backend("if-c", model.Key{12}, "fd00::100")
-	reused.Interfaces[0].Peers = []api.Peer{holder}
-	update(5, reused)
-	if got := rejects(); len(got) != 0 {
-		t.Fatalf("rejecting %v, which a peer holds", got)
+	if rs := c.ns["wirenet-a"].rules; len(rs.Rules.Translate) != 0 || !slices.Equal(rejects(), []netip.Addr{db, other}) {
+		t.Fatalf("denied db: translating %v, rejecting %v; want db's address and the other service's", rs.Rules.Translate, rejects())
 	}
 }
 
@@ -662,8 +656,9 @@ func runPair(c *Core, now time.Time) []CheckSessions {
 // TestAPeerWhoseNamespaceLostItsNameStopsTakingSlots forms a loopback pair,
 // then has a scan find if-b's device in a namespace only a process holds,
 // as when an operator deletes the name while the workload keeps it: the
-// reap takes if-b's device, so if-b detaches and if-a takes its slots for
-// if-b away at once, before the agent observes the name gone.
+// reap takes if-b's device, so if-a takes its slots for if-b away at once,
+// and if-b detaches, deleting its namespace's name in case it still
+// stands.
 func TestAPeerWhoseNamespaceLostItsNameStopsTakingSlots(t *testing.T) {
 	c, now, u := pairOnOneHost(t)
 	if err := c.State(now, u); err != nil {
@@ -675,9 +670,19 @@ func TestAPeerWhoseNamespaceLostItsNameStopsTakingSlots(t *testing.T) {
 	}
 	c.Scanned(now, kernel.Snapshot{Namespaces: []kernel.Namespace{{Ref: "ns-1",
 		Devices: []kernel.Device{{Name: c.cfg.Device, HasKey: true, PublicKey: model.Key{9}, ListenPort: 40001, Alias: kernel.Alias(c.cfg.AliasPrefix(), "if-b")}}}}}, nil)
-	runPair(c, now)
-	if slotted(c, "wirenet-a") || c.ifaces["if-b"].phase != detaching {
-		t.Fatalf("after the scan: a slotted %v, b %v", slotted(c, "wirenet-a"), c.ifaces["if-b"].phase)
+	var deleted bool
+	for acts := c.Actions(now); len(acts) > 0; acts = c.Actions(now) {
+		for _, a := range acts {
+			if b, ok := a.(RunBatch); ok {
+				for _, op := range b.Ops {
+					deleted = deleted || op.Kind == kernel.DeleteNamespace && op.Namespace == "wirenet-b"
+				}
+				c.BatchDone(now, b.Namespace, b.ID, len(b.Ops), nil)
+			}
+		}
+	}
+	if slotted(c, "wirenet-a") || !deleted {
+		t.Fatalf("after the scan: a slotted %v, b's name deleted %v", slotted(c, "wirenet-a"), deleted)
 	}
 }
 
@@ -725,6 +730,55 @@ func TestASessionWaitEndsAtAckWait(t *testing.T) {
 	runPair(c, at)
 	if !slotted(c, "wirenet-b") || c.Stats.SessionTimeouts != 1 {
 		t.Fatalf("after AckWait: slotted %v, %d session timeouts", slotted(c, "wirenet-b"), c.Stats.SessionTimeouts)
+	}
+}
+
+// TestASessionWaitStartsOnceTheReverseIsHeld holds if-a's batches past
+// AckWait, so if-a's device lacks if-b all that time: if-b's slot still
+// waits for a session once if-a's batch lands, with a deadline counted
+// from then.
+func TestASessionWaitStartsOnceTheReverseIsHeld(t *testing.T) {
+	c, now, u := pairOnOneHost(t)
+	if err := c.State(now, u); err != nil {
+		t.Fatal(err)
+	}
+	var held []RunBatch
+	for acts := c.Actions(now); len(acts) > 0; acts = c.Actions(now) {
+		for _, a := range acts {
+			if b, ok := a.(RunBatch); ok {
+				if b.Namespace == "wirenet-a" {
+					held = append(held, b)
+					continue
+				}
+				c.BatchDone(now, b.Namespace, b.ID, len(b.Ops), nil)
+			}
+		}
+	}
+	later := now.Add(2 * c.cfg.AckWait)
+	c.Tick(later)
+	for _, b := range held {
+		c.BatchDone(later, b.Namespace, b.ID, len(b.Ops), nil)
+	}
+	checks := runPair(c, later)
+	if slotted(c, "wirenet-b") {
+		t.Fatal("b slotted a with no session, its wait spent before a's device held it")
+	}
+	if len(checks) != 1 || !checks[0].Until.Equal(later.Add(c.cfg.AckWait)) {
+		t.Fatalf("session checks %+v, want one until %v", checks, later.Add(c.cfg.AckWait))
+	}
+}
+
+// TestASessionCheckThatFailsEndsTheWait answers if-b's session check with
+// an error: its slot goes in at once and no further check runs.
+func TestASessionCheckThatFailsEndsTheWait(t *testing.T) {
+	c, now, u := pairOnOneHost(t)
+	if err := c.State(now, u); err != nil {
+		t.Fatal(err)
+	}
+	runPair(c, now)
+	c.SessionsSeen(now, "wirenet-b", nil, errors.New("read failed"))
+	if checks := runPair(c, now); !slotted(c, "wirenet-b") || len(checks) != 0 {
+		t.Fatalf("after a failed check: slotted %v, checks %+v", slotted(c, "wirenet-b"), checks)
 	}
 }
 

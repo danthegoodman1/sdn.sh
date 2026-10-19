@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"slices"
 	"testing"
 
@@ -193,6 +194,43 @@ func TestEachScopeListsThePairsItCovers(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestAHostLearnsTheAddressesOfServicesNoneOfItsInterfacesReach checks
+// that each host's state names every service its interfaces reach and
+// lists every other service's addresses, and that a deny moves db from
+// one to the other on the sandboxes' host.
+func TestAHostLearnsTheAddressesOfServicesNoneOfItsInterfacesReach(t *testing.T) {
+	eachStore(t, func(t *testing.T, f *fixture) {
+		f.network(api.CreateNetwork{Name: "n", Prefix4: netip.MustParsePrefix("10.42.0.0/16")})
+		db := f.service("n", "db", true)
+		box := f.service("n", "box", false)
+		other := f.service("n", "other", false)
+		f.rule("n", "*", "db", model.TCP, 5432)
+		f.attach("h1", "n", "box")
+		f.attach("h2", "n", "db")
+		split := func(host string) (services []model.ServiceID, unreached []netip.Addr) {
+			t.Helper()
+			for _, n := range f.state(host).Networks {
+				for _, s := range n.Services {
+					services = append(services, s.ID)
+				}
+				unreached = append(unreached, n.Unreached...)
+			}
+			return services, unreached
+		}
+		sorted := func(as ...netip.Addr) []netip.Addr { slices.SortFunc(as, netip.Addr.Compare); return as }
+		if svcs, un := split("h1"); !slices.Equal(svcs, []model.ServiceID{db.ID}) || !slices.Equal(un, sorted(box.Addr6, other.Addr6)) {
+			t.Fatalf("h1 holds services %v and unreached %v", svcs, un)
+		}
+		if svcs, un := split("h2"); len(svcs) != 0 || !slices.Equal(un, sorted(db.Addr6, db.Addr4, box.Addr6, other.Addr6)) {
+			t.Fatalf("h2 holds services %v and unreached %v", svcs, un)
+		}
+		f.createRule("n", api.CreateRule{From: "box", To: "db", Action: api.Deny, Proto: model.AnyProto})
+		if svcs, un := split("h1"); len(svcs) != 0 || !slices.Equal(un, sorted(db.Addr6, db.Addr4, box.Addr6, other.Addr6)) {
+			t.Fatalf("after the deny h1 holds services %v and unreached %v", svcs, un)
+		}
+	})
 }
 
 // TestTheSideThatReachesKeepsALoopbackPairAlive puts sandboxes on db's host

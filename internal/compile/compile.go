@@ -100,19 +100,29 @@ func NewLinks(adj Adjacency, ifaces []store.Interface) Links {
 // need each other as peers.
 func (l Links) Connects(x, y store.Interface) bool { return l.Reaches(x, y) || l.Reaches(y, x) }
 
-// Reaches reports whether x, or a development machine it fronts, may open
-// flows to y or to one y fronts.
+// Reaches reports whether policy lets x, or a development machine it
+// fronts, open flows to y or to one y fronts.
 func (l Links) Reaches(x, y store.Interface) bool {
+	if l.Opens(x, y) {
+		return true
+	}
+	for _, d := range l.devices[y.ID] {
+		if l.adj.Reaches(x.Service, d.Service) {
+			return true
+		}
+	}
+	return false
+}
+
+// Opens reports whether x, or a development machine it fronts, opens flows
+// to y itself. A gateway's development machines take no new flow, whatever
+// policy says, so flows to them start nothing.
+func (l Links) Opens(x, y store.Interface) bool {
 	if l.adj.Reaches(x.Service, y.Service) {
 		return true
 	}
 	for _, d := range l.devices[x.ID] {
 		if l.adj.Reaches(d.Service, y.Service) {
-			return true
-		}
-	}
-	for _, d := range l.devices[y.ID] {
-		if l.adj.Reaches(x.Service, d.Service) {
 			return true
 		}
 	}
@@ -282,6 +292,17 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 	}
 	for _, host := range slices.Sorted(maps.Keys(out)) {
 		ns := out[host]
+		for _, svc := range s.Services {
+			if reached[host][svc.ID] {
+				continue
+			}
+			for _, a := range []netip.Addr{svc.Addr6, svc.Addr4} {
+				if a.IsValid() {
+					ns.Unreached = append(ns.Unreached, a)
+				}
+			}
+		}
+		slices.SortFunc(ns.Unreached, netip.Addr.Compare)
 		for _, id := range slices.Sorted(maps.Keys(reached[host])) {
 			svc := services[id]
 			ns.Services = append(ns.Services, api.Service{
@@ -300,11 +321,11 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 
 // keepsAlive reports whether x keeps a session up with a co-located y.
 // Exactly one side does, so the two never initiate at the same instant:
-// the side that reaches the other, counting the development machines a
-// gateway fronts, whose keepalive and first connection then start from one
-// device, or the lower ID when each reaches the other.
+// the side that opens flows to the other, counting the development
+// machines a gateway fronts, whose keepalive and first connection then
+// start from one device, or the lower ID when both or neither do.
 func keepsAlive(x, y store.Interface, links Links) bool {
-	xy, yx := links.Reaches(x, y), links.Reaches(y, x)
+	xy, yx := links.Opens(x, y), links.Opens(y, x)
 	if xy != yx {
 		return xy
 	}

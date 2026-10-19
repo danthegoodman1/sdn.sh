@@ -160,29 +160,31 @@ func (c *Core) registerFresh(now time.Time, st *nsState) {
 	}
 }
 
-// rekey registers at once each installed relay peer whose registration
-// secret changed. The control plane gives an edge fresh secrets as it goes
-// dormant, which resets every relay's endpoints for it, and an agent that
-// kept the peer through that would otherwise wait out the periodic
-// registration.
-func (c *Core) rekey(now time.Time, st *nsState, x *api.Interface) {
+// registration is what a relay peer's registrations depend on.
+type registration struct {
+	secret model.Secret
+	epoch  uint64
+}
+
+// reregister registers at once each installed relay peer whose secret or
+// epoch changed. Every relay forgets an edge's endpoints as it goes
+// dormant, and an agent that kept the peer through that would otherwise
+// wait out the periodic registration.
+func (c *Core) reregister(now time.Time, st *nsState, x *api.Interface) {
 	seen := map[model.Key]bool{}
 	for _, p := range x.Peers {
 		if len(p.Relays) == 0 {
 			continue
 		}
 		seen[p.PublicKey] = true
-		old, known := st.secrets[p.PublicKey]
-		st.secrets[p.PublicKey] = p.Registration
-		if _, installed := st.peers[p.PublicKey]; known && installed && old != p.Registration {
+		next := registration{p.Registration, p.Epoch}
+		old, known := st.registered[p.PublicKey]
+		st.registered[p.PublicKey] = next
+		if _, installed := st.peers[p.PublicKey]; known && installed && old != next {
 			st.fresh[p.PublicKey] = true
 		}
 	}
-	for _, key := range slices.SortedFunc(maps.Keys(st.secrets), compareKey) {
-		if !seen[key] {
-			delete(st.secrets, key)
-		}
-	}
+	maps.DeleteFunc(st.registered, func(key model.Key, _ registration) bool { return !seen[key] })
 	c.registerFresh(now, st)
 }
 

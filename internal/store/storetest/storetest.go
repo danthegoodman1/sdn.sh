@@ -231,7 +231,7 @@ func fullEdge(net model.NetworkID, a, b model.InterfaceID) store.Edge {
 			{Relay: "relay-b", Addr: addr("10.0.0.2"), AB: 20001, BA: 20002},
 			{Relay: "relay-a", Addr: addr("2001:db8::2"), AB: 65534, BA: 1024},
 		},
-		Created: fine, Dormant: fine.Add(time.Hour),
+		Created: fine, Dormant: fine.Add(time.Hour), Epoch: 1<<63 + 5,
 	}
 }
 

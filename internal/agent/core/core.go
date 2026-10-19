@@ -66,8 +66,9 @@ type Config struct {
 	ResyncEvery time.Duration
 	// AckWait bounds how long a relay peer new to a namespace waits for
 	// its edge's relay to acknowledge the namespace's registration before
-	// a slot names it, and how long an attach waits on that, or on a
-	// co-located device, before its namespace is handed over.
+	// a slot names it, how long a co-located one waits for its device to
+	// hold a session with it, and how long an attach waits on either, or on
+	// a co-located device, before its namespace is handed over.
 	AckWait time.Duration
 }
 
@@ -171,6 +172,13 @@ type SendProbe struct {
 // Observed.
 type Observe struct{ Namespace string }
 
+// CheckSessions asks which of Keys a namespace's device holds a session
+// with, which comes back through SessionsSeen. It may poll briefly.
+type CheckSessions struct {
+	Namespace, Device string
+	Keys              []model.Key
+}
+
 // Scan asks for a snapshot of the kernel, which comes back through Scanned,
 // to find devices the agent made in namespaces only a process holds.
 type Scan struct{}
@@ -185,6 +193,7 @@ func (SendRegistration) isAction() {}
 func (SendProbe) isAction()        {}
 func (Observe) isAction()          {}
 func (Scan) isAction()             {}
+func (CheckSessions) isAction()    {}
 
 type phase int
 
@@ -266,8 +275,12 @@ type nsState struct {
 	chosen      map[model.Key]netip.AddrPort
 	drain       map[model.Key]time.Time
 	fresh       map[model.Key]bool
-	// secrets holds the registration secret each relay peer last had.
-	secrets map[model.Key]model.Secret
+	// registered holds what each relay peer's registrations last depended
+	// on.
+	registered map[model.Key]registration
+	// services holds every service address the namespace has known, which
+	// it rejects while it holds no translation for one.
+	services map[netip.Addr]bool
 	// unflushed holds addresses of removed peers whose flows have yet to
 	// be flushed; sweep asks for a sweep of every flow no installed peer
 	// accounts for, after a restart lost track.
@@ -282,13 +295,17 @@ type nsState struct {
 	awaiting []model.InterfaceID
 	reverse  []model.InterfaceID
 	// acks holds each relay peer new to the namespace until its edge's
-	// relay acknowledges it or AckWait passes; ackBy is the earliest
-	// deadline among those still waiting.
-	acks    map[model.Key]*ackWait
-	ackBy   time.Time
-	busy    bool
-	dirty   bool
-	observe bool
+	// relay acknowledges it or AckWait passes, and sessions each
+	// co-located one whose slots wait for a session; ackBy is the earliest
+	// deadline among those still waiting. checking is a session check in
+	// flight.
+	acks     map[model.Key]*ackWait
+	sessions map[model.Key]*sessionWait
+	ackBy    time.Time
+	checking bool
+	busy     bool
+	dirty    bool
+	observe  bool
 	// revision is the network revision last reconciled against.
 	revision uint64
 	// nextDrain is when the earliest draining peer's grace ends.
@@ -301,12 +318,14 @@ type nsState struct {
 func newNS(name string, id model.InterfaceID) *nsState {
 	return &nsState{
 		name: name, iface: id, dirty: true, egressClear: true,
-		peers:   map[model.Key]kernel.Peer{},
-		chosen:  map[model.Key]netip.AddrPort{},
-		drain:   map[model.Key]time.Time{},
-		fresh:   map[model.Key]bool{},
-		secrets: map[model.Key]model.Secret{},
-		acks:    map[model.Key]*ackWait{},
+		peers:      map[model.Key]kernel.Peer{},
+		chosen:     map[model.Key]netip.AddrPort{},
+		drain:      map[model.Key]time.Time{},
+		fresh:      map[model.Key]bool{},
+		registered: map[model.Key]registration{},
+		services:   map[netip.Addr]bool{},
+		acks:       map[model.Key]*ackWait{},
+		sessions:   map[model.Key]*sessionWait{},
 	}
 }
 
@@ -316,6 +335,13 @@ type ackWait struct {
 	path  netip.AddrPort
 	until time.Time
 	acked bool
+}
+
+// sessionWait is a co-located peer whose slots wait for this namespace's
+// device to hold a session with it.
+type sessionWait struct {
+	until time.Time
+	up    bool
 }
 
 // ackKey names a registration's direction from the host's side: the
@@ -382,8 +408,9 @@ type Stats struct {
 	// it carried to their next relays.
 	Failovers uint64
 	// Acked counts acknowledgments that released a new peer's wait, and
-	// AckTimeouts waits that ended at AckWait instead.
-	Acked, AckTimeouts uint64
+	// AckTimeouts waits that ended at AckWait instead; SessionTimeouts
+	// counts co-located peers whose session wait ended there.
+	Acked, AckTimeouts, SessionTimeouts uint64
 	// Idle counts plans that found a namespace with nothing to do, after
 	// which it may count as settled.
 	Idle uint64

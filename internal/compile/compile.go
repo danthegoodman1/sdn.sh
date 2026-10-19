@@ -41,25 +41,27 @@ func Connected(i store.Interface) bool {
 // gateway's peer table carries it, so that host builds nothing for it.
 func Built(i store.Interface) bool { return i.Kind != api.Device }
 
-// Adjacency says which pairs of services policy connects, in either
-// direction, since a WireGuard session needs a peer at both ends.
+// Adjacency says which services reach which, by resolved grants.
 type Adjacency map[[2]model.ServiceID]bool
 
 // NewAdjacency builds the adjacency of resolved grants.
 func NewAdjacency(grants []Grant) Adjacency {
 	adj := Adjacency{}
 	for _, g := range grants {
-		if g.To == "" {
-			continue
+		if g.To != "" {
+			adj[[2]model.ServiceID{g.From, g.To}] = true
 		}
-		adj[[2]model.ServiceID{g.From, g.To}] = true
-		adj[[2]model.ServiceID{g.To, g.From}] = true
 	}
 	return adj
 }
 
-// Connects reports whether policy connects interfaces of a and b.
-func (a Adjacency) Connects(x, y model.ServiceID) bool { return a[[2]model.ServiceID{x, y}] }
+// Reaches reports whether policy lets interfaces of x open flows to those
+// of y.
+func (a Adjacency) Reaches(x, y model.ServiceID) bool { return a[[2]model.ServiceID{x, y}] }
+
+// Connects reports whether policy connects interfaces of x and y in either
+// direction, since a WireGuard session needs a peer at both ends.
+func (a Adjacency) Connects(x, y model.ServiceID) bool { return a.Reaches(x, y) || a.Reaches(y, x) }
 
 // Links decides which interfaces peer: those whose services policy
 // connects, and a gateway with every interface one of its live development
@@ -96,17 +98,21 @@ func NewLinks(adj Adjacency, ifaces []store.Interface) Links {
 
 // Connects reports whether two interfaces, neither a development machine,
 // need each other as peers.
-func (l Links) Connects(x, y store.Interface) bool {
-	if l.adj.Connects(x.Service, y.Service) {
+func (l Links) Connects(x, y store.Interface) bool { return l.Reaches(x, y) || l.Reaches(y, x) }
+
+// Reaches reports whether x, or a development machine it fronts, may open
+// flows to y or to one y fronts.
+func (l Links) Reaches(x, y store.Interface) bool {
+	if l.adj.Reaches(x.Service, y.Service) {
 		return true
 	}
 	for _, d := range l.devices[x.ID] {
-		if l.adj.Connects(d.Service, y.Service) {
+		if l.adj.Reaches(d.Service, y.Service) {
 			return true
 		}
 	}
 	for _, d := range l.devices[y.ID] {
-		if l.adj.Connects(x.Service, d.Service) {
+		if l.adj.Reaches(x.Service, d.Service) {
 			return true
 		}
 	}
@@ -155,12 +161,10 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 	// Each interface reads only the grants from and to its own service and
 	// the services it fronts.
 	from, to := map[model.ServiceID][]Grant{}, map[model.ServiceID][]Grant{}
-	reaches := map[[2]model.ServiceID]bool{}
 	for _, g := range grants {
 		from[g.From] = append(from[g.From], g)
 		if g.To != "" {
 			to[g.To] = append(to[g.To], g)
-			reaches[[2]model.ServiceID{g.From, g.To}] = true
 		}
 	}
 	edges := map[[2]model.InterfaceID]store.Edge{}
@@ -222,7 +226,7 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 				if y.ID == x.ID || y.Kind == api.Device || !links.Connects(x, y) {
 					continue
 				}
-				if p, ok := peer(x, y, reaches, edges, relays, s.Network.Relays); ok {
+				if p, ok := peer(x, y, links, edges, relays, s.Network.Relays); ok {
 					p.Fronts = links.fronts(x, y)
 					iface.Peers = append(iface.Peers, p)
 				}
@@ -296,11 +300,11 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 
 // keepsAlive reports whether x keeps a session up with a co-located y.
 // Exactly one side does, so the two never initiate at the same instant:
-// the side that reaches the other, whose keepalive and first connection
-// then start from one device, or the lower ID when each reaches the other
-// or neither does.
-func keepsAlive(x, y store.Interface, reaches map[[2]model.ServiceID]bool) bool {
-	xy, yx := reaches[[2]model.ServiceID{x.Service, y.Service}], reaches[[2]model.ServiceID{y.Service, x.Service}]
+// the side that reaches the other, counting the development machines a
+// gateway fronts, whose keepalive and first connection then start from one
+// device, or the lower ID when each reaches the other.
+func keepsAlive(x, y store.Interface, links Links) bool {
+	xy, yx := links.Reaches(x, y), links.Reaches(y, x)
 	if xy != yx {
 		return xy
 	}
@@ -309,7 +313,7 @@ func keepsAlive(x, y store.Interface, reaches map[[2]model.ServiceID]bool) bool 
 
 // peer builds x's peer entry for y, or reports false when the edge a relay
 // path needs has yet to exist.
-func peer(x, y store.Interface, reaches map[[2]model.ServiceID]bool, edges map[[2]model.InterfaceID]store.Edge, relays map[model.RelayID]store.Relay, order []model.RelayID) (api.Peer, bool) {
+func peer(x, y store.Interface, links Links, edges map[[2]model.InterfaceID]store.Edge, relays map[model.RelayID]store.Relay, order []model.RelayID) (api.Peer, bool) {
 	p := api.Peer{
 		Interface: y.ID,
 		Service:   y.Service,
@@ -322,7 +326,7 @@ func peer(x, y store.Interface, reaches map[[2]model.ServiceID]bool, edges map[[
 	}
 	if x.Host == y.Host {
 		p.Loopback = y.ListenPort
-		p.Keepalive = keepsAlive(x, y, reaches)
+		p.Keepalive = keepsAlive(x, y, links)
 		return p, true
 	}
 	a, b := Pair(x.ID, y.ID)
@@ -330,7 +334,7 @@ func peer(x, y store.Interface, reaches map[[2]model.ServiceID]bool, edges map[[
 	if !ok || !e.Dormant.IsZero() {
 		return api.Peer{}, false
 	}
-	p.Registration = e.SecretAB
+	p.Registration, p.Epoch = e.SecretAB, e.Epoch
 	if x.ID == e.B {
 		p.Registration = e.SecretBA
 	}
@@ -390,12 +394,14 @@ func Relay(r store.Relay, edges []store.Edge, generation uint64) api.RelayState 
 					Peer:       ports.BA,
 					Advertised: netip.AddrPortFrom(adv, ports.AB),
 					Key:        regproto.RelayKey(e.SecretAB, r.ID),
+					Epoch:      e.Epoch,
 				},
 				api.RelayPort{
 					Local:      netip.AddrPortFrom(ports.Addr, ports.BA),
 					Peer:       ports.AB,
 					Advertised: netip.AddrPortFrom(adv, ports.BA),
 					Key:        regproto.RelayKey(e.SecretBA, r.ID),
+					Epoch:      e.Epoch,
 				})
 		}
 	}

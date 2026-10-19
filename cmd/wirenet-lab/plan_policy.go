@@ -74,8 +74,8 @@ func planPolicy(r *run) error {
 // measureRule makes a rule change a second into every client's dial loop,
 // then times each client from the change's commit to the first of 20
 // connections in a row that reach want, or with refused that fail. The
-// network's revision must advance by exactly one across the change, so its
-// commit time is the change's own.
+// network's revision must move across the change, and the plan alone
+// changes the network, so its commit time is the change's own.
 func (r *run) measureRule(s convergeSetup, name, want string, refused bool, apply func() error) (policyChange, error) {
 	c := policyChange{Name: name, Dials: make([]bench.Dials, len(s.hosts))}
 	var extra []string
@@ -95,8 +95,8 @@ func (r *run) measureRule(s convergeSetup, name, want string, refused bool, appl
 		if err := r.ctl(r.env.CP(), &after, "network", "get", "policy"); err != nil {
 			return err
 		}
-		if after.Revision != before.Revision+1 && !r.env.DryRun() {
-			return fmt.Errorf("%s: the network moved from revision %d to %d across one change", name, before.Revision, after.Revision)
+		if after.Revision <= before.Revision && !r.env.DryRun() {
+			return fmt.Errorf("%s: the network stayed at revision %d across the change", name, before.Revision)
 		}
 		c.Commit = after.Changed
 		return nil
@@ -114,9 +114,10 @@ func (r *run) measureRule(s convergeSetup, name, want string, refused bool, appl
 			// A connection in flight at the commit can fail because of the
 			// change, since removing a peer destroys its flows' sockets; it
 			// counts as settling at the commit. One begun longer before
-			// had timed out by then.
+			// had timed out by then. Nothing reaches before the change that
+			// lets it, so a reaching settle must follow the commit.
 			took := time.Duration(res.Converged - c.Commit.UnixNano())
-			if r.check(took > -dialTimeout, "%s: sandbox %s settled %v before the commit", name, res.Namespace, -took) {
+			if r.check(took >= 0 || refused && took > -dialTimeout, "%s: sandbox %s settled %v before the commit", name, res.Namespace, -took) {
 				settled = append(settled, max(took, 0))
 			}
 		}

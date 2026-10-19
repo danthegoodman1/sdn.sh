@@ -132,6 +132,35 @@ func TestADeviceReachesWhatPolicyGrantsThroughItsGateway(t *testing.T) {
 	})
 }
 
+// TestAGatewayWhoseDevicesReachKeepsALoopbackPairAlive puts db beside a
+// gateway whose development machines reach it under `dev -> db`, though
+// nothing grants the gateway's own service anything: the gateway's peer
+// for each db carries keepalive and db's for the gateway does not,
+// whichever has the lower ID, since the machines' first connections leave
+// from the gateway's device.
+func TestAGatewayWhoseDevicesReachKeepsALoopbackPairAlive(t *testing.T) {
+	eachStore(t, func(t *testing.T, f *fixture) {
+		gw, _, _ := shopWithDevices(f)
+		if _, err := f.device("shop", "dev", gw.ID, 24*time.Hour); err != nil {
+			t.Fatal(err)
+		}
+		lower := false
+		for range 6 {
+			db, _ := f.attach("edge", "shop", "db")
+			lower = lower || db.ID < gw.ID
+			st := f.state("edge")
+			toDB, ok := peerOf(st, gw.ID, db.ID)
+			toGW, ok2 := peerOf(st, db.ID, gw.ID)
+			if !ok || !ok2 || !toDB.Keepalive || toGW.Keepalive {
+				t.Errorf("gateway toward %s %+v, it toward the gateway %+v: want the gateway alone keeping alive", db.ID, toDB, toGW)
+			}
+		}
+		if !lower {
+			t.Fatal("no db drew an identifier below the gateway's, where the lower ID alone would arm db, so the test proves nothing")
+		}
+	})
+}
+
 func TestARevokedDeviceLeavesItsGatewayAndBackendsAtOnce(t *testing.T) {
 	eachStore(t, func(t *testing.T, f *fixture) {
 		gw, db, _ := shopWithDevices(f)

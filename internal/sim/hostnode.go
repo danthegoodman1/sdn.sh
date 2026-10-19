@@ -281,6 +281,13 @@ func (h *hostNode) carry(a agentcore.Action) {
 			ns.Name = name
 			h.core.Observed(now(), ns, err)
 		})
+	case agentcore.CheckSessions:
+		op := kernel.Op{Kind: kernel.ReadSessions, Namespace: a.Namespace, Device: a.Device}
+		name := a.Namespace
+		h.later(2*time.Millisecond, func() {
+			r, err := h.kernel.Run(op)
+			h.core.SessionsSeen(now(), name, r.Sessions, err)
+		})
 	case agentcore.Scan:
 		h.later(0, func() {
 			snap, err := h.kernel.Snapshot(h.cfg.Prefix, h.cfg.AliasPrefix())

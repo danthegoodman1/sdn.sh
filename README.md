@@ -40,10 +40,10 @@ Nine c6i.xlarge instances (4 vCPU, up to 12.5 Gb/s) in one placement group in us
 | Event | Result |
 |---|---|
 | A new workload's first connection to a peer on another host, 20 peers | 44 ms p50, 54 ms max |
-| A backend replaced, until every client reaches the new one | 27–48 ms p50, 46–59 ms p99 |
-| One of two backends removed, rewriting half of each client's slots | 91–106 ms p50, 121–124 ms p99 |
-| A deny closing a wildcard to 30 sandboxes, from its commit | 8–10 ms p50, 14 ms max |
-| The deny lifted, until every sandbox reaches db again | 20–25 ms p50; 55 ms max in 5 runs of 6, 1 s in the sixth |
+| A backend replaced, until every client reaches the new one | 26–31 ms p50, 46–61 ms p99 |
+| One of two backends removed, rewriting half of each client's slots | 96–126 ms p50, 136–166 ms p99 |
+| A deny closing a wildcard to 30 sandboxes, from its commit | 4–9 ms p50, 17 ms max |
+| The deny lifted, until every sandbox reaches db again | 19–20 ms p50, 46 ms max |
 | A relay killed: an open TCP connection stalls | 0.82 s, then carries on |
 | A relay killed: the next new connection | 0.22–0.26 s |
 | Attaches and detaches across four hosts, 4 workers each | 47 pairs a second, no failures |

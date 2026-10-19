@@ -155,6 +155,19 @@ func (f *fixture) state(host string) api.StateUpdate {
 	return u
 }
 
+func (f *fixture) relayState(r model.RelayID) api.RelayState {
+	f.t.Helper()
+	var st api.RelayState
+	if err := f.s.View(context.Background(), func(tx store.ReadTx) error {
+		var err error
+		st, err = RelayState(tx, r)
+		return err
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+	return st
+}
+
 func peerIDs(u api.StateUpdate, iface model.InterfaceID) []model.InterfaceID {
 	for _, n := range u.Networks {
 		if i, ok := n.Interface(iface); ok {
@@ -537,9 +550,10 @@ func TestFullyConnectedPolicyPeersEveryPair(t *testing.T) {
 
 // TestADisconnectedPairKeepsItsEdgeForTheQuarantine covers a rule that goes
 // away and comes back: the pair gets its edge back with the same ports, so
-// endpoints peers roamed to stay valid, under secrets minted as it went
-// dormant, which its relay is told of; only once the quarantine passes does
-// the edge go and its ports free up.
+// endpoints peers roamed to stay valid, and the same secrets, so an agent
+// that kept the peer through an outage still registers. Going dormant moves
+// its epoch, which its relay is told of; only once the quarantine passes
+// does the edge go and its ports free up.
 func TestADisconnectedPairKeepsItsEdgeForTheQuarantine(t *testing.T) {
 	eachStore(t, func(t *testing.T, f *fixture) {
 		f.p.Config.LeaseTTL = time.Hour
@@ -575,8 +589,16 @@ func TestADisconnectedPairKeepsItsEdgeForTheQuarantine(t *testing.T) {
 		if len(dormant) != 1 || dormant[0].Dormant.IsZero() {
 			t.Fatalf("edges after the rule went: %+v", dormant)
 		}
-		if dormant[0].SecretAB == before[0].SecretAB || dormant[0].SecretBA == before[0].SecretBA || relayRev() == revBefore {
-			t.Fatal("a dormant edge kept its secrets, or its relay was not told")
+		if dormant[0].SecretAB != before[0].SecretAB || dormant[0].SecretBA != before[0].SecretBA {
+			t.Fatal("a dormant edge changed its secrets")
+		}
+		if dormant[0].Epoch != before[0].Epoch+1 || relayRev() == revBefore {
+			t.Fatalf("epoch %d after %d, relay revision %d after %d: the relay was not told of a new epoch",
+				dormant[0].Epoch, before[0].Epoch, relayRev(), revBefore)
+		}
+		rs := f.relayState(relay)
+		if len(rs.Ports) != 2 || rs.Ports[0].Epoch != dormant[0].Epoch || rs.Ports[1].Epoch != dormant[0].Epoch {
+			t.Fatalf("the relay holds %+v, not epoch %d", rs.Ports, dormant[0].Epoch)
 		}
 		if peers := peerIDs(f.state("h1"), before[0].A); len(peers) != 0 {
 			peers = peerIDs(f.state("h1"), before[0].B)
@@ -588,6 +610,17 @@ func TestADisconnectedPairKeepsItsEdgeForTheQuarantine(t *testing.T) {
 		after := edges()
 		if len(after) != 1 || !after[0].Dormant.IsZero() || after[0].Ports[0] != before[0].Ports[0] || after[0].SecretAB != dormant[0].SecretAB {
 			t.Fatalf("the restored edge differs: %+v vs %+v", after, before)
+		}
+		for _, x := range []model.InterfaceID{after[0].A, after[0].B} {
+			host := "h1"
+			if x == after[0].B {
+				host = "h2"
+			}
+			for _, n := range f.state(host).Networks {
+				if i, ok := n.Interface(x); ok && (len(i.Peers) != 1 || i.Peers[0].Epoch != after[0].Epoch) {
+					t.Fatalf("%s's peers %+v, want one at epoch %d", x, i.Peers, after[0].Epoch)
+				}
+			}
 		}
 		r2 := after[0]
 		var rules []store.Rule

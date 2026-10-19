@@ -14,12 +14,16 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/nftables"
+	"github.com/google/nftables/expr"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+	"golang.org/x/sys/unix"
 
 	"github.com/danthegoodman1/wirenet/internal/kernel"
 	"github.com/danthegoodman1/wirenet/internal/kernel/kmodel"
@@ -494,6 +498,152 @@ func TestOtherProtocolsPassWhereTCPAndUDPStop(t *testing.T) {
 	}
 }
 
+// TestARejectedServiceLeavesNoEntryToRefuseItsReturn dials a service from
+// fixed source ports while policy keeps the namespace from it, then
+// restores the service. Under a reject the dial is refused at once and
+// leaves conntrack nothing, so the restored service's first connection
+// from the same port reaches it. Under no rule at all, as a namespace
+// once had for a service it could not reach, the dial leaves an entry
+// with no translation, and the same port stays refused once the service
+// translates, since NAT runs once per entry.
+func TestARejectedServiceLeavesNoEntryToRefuseItsReturn(t *testing.T) {
+	k := newKernel(t)
+	a, b := pair(t, k, prng.New(4))
+	svc6, svc4 := netip.MustParseAddr("fd00::7"), netip.MustParseAddr("10.99.0.7")
+	serve(t, b.ns, netip.AddrPortFrom(b.addr, 5432), "db")
+	target := netip.AddrPortFrom(svc6, 5432)
+	from := func(port int) (net.Conn, error) {
+		var c net.Conn
+		var err error
+		inNamespace(t, a.ns, func() {
+			d := net.Dialer{Timeout: 300 * time.Millisecond, LocalAddr: &net.TCPAddr{IP: a.addr.AsSlice(), Port: port}}
+			c, err = d.Dial("tcp", target.String())
+		})
+		return c, err
+	}
+	entries := func(port int) string {
+		out, err := exec.Command("ip", "netns", "exec", a.ns, "conntrack", "-L", "-p", "tcp", "--sport", strconv.Itoa(port)).Output()
+		if err != nil {
+			t.Fatalf("conntrack: %v", err)
+		}
+		return string(bytes.TrimSpace(out))
+	}
+	reach := serviceRules(svc6, svc4, []netip.Addr{b.addr}, nil, 5432, nil)
+	rejected := &nft.Ruleset{Rules: nft.Rules{Reject: []netip.Addr{svc6, svc4}}}
+	rejected.Normalize()
+	none := &nft.Ruleset{}
+	none.Normalize()
+	for _, c := range []struct {
+		name   string
+		denied *nft.Ruleset
+		port   int
+		reach  bool
+	}{{"rejected", rejected, 40711, true}, {"without a rule", none, 40712, false}} {
+		run(t, k, kernel.Op{Kind: kernel.ApplyRules, Namespace: a.ns, Rules: &nft.Transaction{Replace: c.denied}})
+		conn, err := from(c.port)
+		if err == nil {
+			conn.Close()
+			t.Fatalf("%s: reached a service policy keeps the namespace from", c.name)
+		}
+		if refused := errors.Is(err, unix.ECONNREFUSED); refused != c.reach {
+			t.Fatalf("%s: dial failed with %v", c.name, err)
+		}
+		if left := entries(c.port); (left == "") != c.reach {
+			t.Fatalf("%s: conntrack holds %q", c.name, left)
+		}
+		tx := nft.Diff(c.denied, reach)
+		run(t, k, kernel.Op{Kind: kernel.ApplyRules, Namespace: a.ns, Rules: &tx})
+		conn, err = from(c.port)
+		if (err == nil) != c.reach {
+			t.Fatalf("%s: the restored service's first connection from port %d: %v", c.name, c.port, err)
+		}
+		if err == nil {
+			if got := readReply(t, conn); got != "db" {
+				t.Fatalf("%s: reached %q", c.name, got)
+			}
+			conn.Close()
+		}
+	}
+}
+
+// TestASessionShowsOnceAHandshakeCompletes reads b's sessions after a's
+// keepalive handshake, which lists a, then gives b a fresh peer for a,
+// which lists nothing until traffic shakes hands again.
+func TestASessionShowsOnceAHandshakeCompletes(t *testing.T) {
+	k := newKernel(t)
+	a, b := pair(t, k, prng.New(12))
+	read := func() []model.Key {
+		t.Helper()
+		r, err := k.Run(kernel.Op{Kind: kernel.ReadSessions, Namespace: b.ns, Device: "wirenet0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.Sessions
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !slices.Equal(read(), []model.Key{a.pub()}) {
+		if time.Now().After(deadline) {
+			t.Fatalf("b reads sessions %v after a's keepalive, want a's key", read())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	update := kernel.PeerUpdate{PublicKey: a.pub(), Allowed: []netip.Prefix{netip.PrefixFrom(a.addr, 128), netip.PrefixFrom(a.a4, 32)},
+		Endpoint: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), a.port)}
+	remove := update
+	remove.Remove = true
+	run(t, k, kernel.Op{Kind: kernel.SetPeers, Namespace: b.ns, Device: "wirenet0", Peers: []kernel.PeerUpdate{remove}})
+	run(t, k, kernel.Op{Kind: kernel.SetPeers, Namespace: b.ns, Device: "wirenet0", Peers: []kernel.PeerUpdate{update}})
+	if got := read(); len(got) != 0 {
+		t.Fatalf("a fresh peer reads sessions %v before any handshake", got)
+	}
+}
+
+// TestASideThatWaitsForItsSessionConnectsAtOnce re-forms a loopback pair
+// twenty times, arming a's keepalive while b, the side without it, waits
+// for its device to read a session with a before dialing. Dialing as a
+// arms instead crossed the two initiations and waited out WireGuard's
+// 5-second retry in 29 of 40 rounds.
+func TestASideThatWaitsForItsSessionConnectsAtOnce(t *testing.T) {
+	k := newKernel(t)
+	a, b := pair(t, k, prng.New(11))
+	serve(t, a.ns, netip.AddrPortFrom(a.addr, 5432), "a")
+	set := func(from, to end, keepalive time.Duration, remove bool) kernel.Op {
+		u := kernel.PeerUpdate{PublicKey: to.pub(), Remove: remove}
+		if !remove {
+			u.Allowed = []netip.Prefix{netip.PrefixFrom(to.addr, 128), netip.PrefixFrom(to.a4, 32)}
+			u.Endpoint = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), to.port)
+			u.Keepalive = keepalive
+		}
+		return kernel.Op{Kind: kernel.SetPeers, Namespace: from.ns, Device: "wirenet0", Peers: []kernel.PeerUpdate{u}}
+	}
+	for round := range 20 {
+		run(t, k, set(a, b, 0, true), set(b, a, 0, true), set(a, b, 0, false), set(b, a, 0, false))
+		armed := make(chan error, 1)
+		go func() { _, err := k.Run(set(a, b, 25*time.Second, false)); armed <- err }()
+		for end := time.Now().Add(time.Second); time.Now().Before(end); time.Sleep(200 * time.Microsecond) {
+			r, err := k.Run(kernel.Op{Kind: kernel.ReadSessions, Namespace: b.ns, Device: "wirenet0"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if slices.Contains(r.Sessions, a.pub()) {
+				break
+			}
+		}
+		start := time.Now()
+		c, err := dial(t, b.ns, netip.AddrPortFrom(a.addr, 5432), 7*time.Second)
+		if err := <-armed; err != nil {
+			t.Fatal(err)
+		}
+		if err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		c.Close()
+		if took := time.Since(start); took > time.Second {
+			t.Fatalf("round %d: the first connection took %v", round, took)
+		}
+	}
+}
+
 // TestAnElementUpdateMovesNewConnectionsOnly replaces a service's backend
 // through element updates: a connection open before stays where it was.
 func TestAnElementUpdateMovesNewConnectionsOnly(t *testing.T) {
@@ -872,6 +1022,57 @@ func TestAGrantSplitByManyDeniesReadsBack(t *testing.T) {
 	ns, err := k.Namespace(name, "")
 	if err != nil || !ns.Egress.Equal(cfg) {
 		t.Fatalf("observed %+v (%v), want %d flows", ns.Egress, err, len(cfg.Rules))
+	}
+}
+
+// TestAGrantChainThatRecordsNothingIsRewritten writes a link's chain as an
+// agent that kept grants in the link's alias did, with rules that record
+// no flow, and a blocked prefix tagged in bare text. The namespace still
+// reads, its grant as empty, and the rewrite reads back whole; the blocked
+// prefix reads too, and nft shows what the agent records as comments.
+func TestAGrantChainThatRecordsNothingIsRewritten(t *testing.T) {
+	k := newKernel(t)
+	if err := k.EnsureEgress(nil); err != nil {
+		t.Fatal(err)
+	}
+	name := namespace(t, k, prefix(t)+"x")
+	cfg := &kernel.EgressConfig{Index: 41001, Rules: []kernel.EgressRule{{Proto: model.TCP, Ports: model.PortRange{Lo: 443, Hi: 443}}}}
+	run(t, k, kernel.Op{Kind: kernel.SetEgress, Namespace: name, Egress: cfg})
+	c, err := nftables.New(nftables.WithNetNSFd(int(k.root)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseLasting()
+	tb := &nftables.Table{Name: egressTable, Family: nftables.TableFamilyINet}
+	ch := &nftables.Chain{Name: egressLink(cfg.Index), Table: tb}
+	c.FlushChain(ch)
+	c.AddRule(&nftables.Rule{Table: tb, Chain: ch, Exprs: append(protoMatch(model.TCP, cfg.Rules[0].Ports), accept())})
+	bare := netip.MustParsePrefix("198.18.0.0/15")
+	c.AddRule(&nftables.Rule{Table: tb, Chain: &nftables.Chain{Name: "forward", Table: tb},
+		Exprs:    concat(ifnamePrefix(expr.MetaKeyIIFNAME, egressPrefix), prefixMatch(bare), []expr.Any{drop()}),
+		UserData: []byte(blockedTag + bare.String())})
+	if err := c.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	ns, err := k.Namespace(name, "")
+	if err != nil || ns.Egress == nil || ns.Egress.Index != cfg.Index || len(ns.Egress.Rules) != 0 {
+		t.Fatalf("an unrecorded chain observed as %+v (%v), want link %d with an empty grant", ns.Egress, err, cfg.Index)
+	}
+	if blocked, err := k.EgressBlocked(); err != nil || !slices.Contains(blocked, bare) {
+		t.Fatalf("blocked %v (%v), want %v among them", blocked, err, bare)
+	}
+	run(t, k, kernel.Op{Kind: kernel.SetEgress, Namespace: name, Egress: cfg})
+	if ns, err = k.Namespace(name, ""); err != nil || !ns.Egress.Equal(cfg) {
+		t.Fatalf("after the rewrite observed %+v (%v), want %+v", ns.Egress, err, cfg)
+	}
+	out, err := exec.Command("nft", "list", "table", "inet", egressTable).CombinedOutput()
+	if err != nil {
+		t.Fatalf("nft: %v: %s", err, out)
+	}
+	for _, want := range []string{`comment "grant tcp/443-443"`, `comment "blocked 10.0.0.0/8"`} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("nft shows no %s:\n%s", want, out)
+		}
 	}
 }
 

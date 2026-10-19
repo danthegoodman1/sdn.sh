@@ -166,6 +166,44 @@ func TestAReloadKeepsRegistrationsOfUnchangedPorts(t *testing.T) {
 	}
 }
 
+// TestANewEpochForgetsEndpointsAndKeepsCounters reloads a table whose
+// edge went dormant: both directions forget their endpoints, so a returning
+// sender's data goes nowhere until it registers again, and a replay from
+// before the epoch cannot do that. The state that survives a restart says
+// the same.
+func TestANewEpochForgetsEndpointsAndKeepsCounters(t *testing.T) {
+	tb := table()
+	register(t, tb, portAB, keyAB, advAB, senderA, 10)
+	register(t, tb, portBA, keyBA, advBA, senderB, 10)
+	old := regproto.Encode(keyAB, advAB, 10)
+	tb.Load(api.RelayState{Generation: 2, Ports: []api.RelayPort{
+		{Local: portAB, Peer: 7002, Advertised: advAB, Key: keyAB, Epoch: 1},
+		{Local: portBA, Peer: 7001, Advertised: advBA, Key: keyBA, Epoch: 1},
+	}})
+	for _, port := range []netip.AddrPort{portAB, portBA} {
+		if dir, _ := tb.Dir(port); dir.Endpoint.IsValid() || dir.Counter != 10 {
+			t.Fatalf("%v after a new epoch: endpoint %v, counter %d", port, dir.Endpoint, dir.Counter)
+		}
+	}
+	if d := tb.Packet(t0, portAB, senderA, old[:]); d.Verdict == Register {
+		t.Fatal("a registration from before the epoch was accepted")
+	}
+	if d := tb.Packet(t0, portBA, senderB, wg); d.Verdict == Forward {
+		t.Fatalf("data on a forgotten direction went: %+v", d)
+	}
+	restored := New(Config{})
+	restored.Restore(tb.Persisted(), nil)
+	if dir, _ := restored.Dir(portAB); dir.Endpoint.IsValid() || dir.Counter != 10 || dir.Epoch != 1 {
+		t.Fatalf("after a restart: endpoint %v, counter %d, epoch %d", dir.Endpoint, dir.Counter, dir.Epoch)
+	}
+	if !register(t, tb, portAB, keyAB, advAB, senderA, 11) || !register(t, tb, portBA, keyBA, advBA, senderB, 11) {
+		t.Fatal("a fresh registration failed")
+	}
+	if d := tb.Packet(t0, portAB, senderA, wg); d.Verdict != Forward || d.To != senderB {
+		t.Fatalf("after both registered again: %+v", d)
+	}
+}
+
 func TestRestoreReplaysTheLog(t *testing.T) {
 	tb := table()
 	register(t, tb, portAB, keyAB, advAB, senderA, 10)

@@ -369,6 +369,16 @@ func tally(d *bench.Dial, attempts []*dialAttempt) {
 				d.Other = max(d.Other, launched)
 			}
 		}
+		if d.Reached && launched < d.Converged && !a.wanted(d.Want, d.Refused) {
+			outcome := "answered by " + a.name
+			if a.err != nil {
+				outcome = a.err.Error()
+			}
+			d.Missed = append(d.Missed, bench.Missed{Launched: launched, MS: float64(done-launched) / 1e6, Outcome: outcome})
+			if len(d.Missed) > bench.MissedKept {
+				d.Missed = d.Missed[1:]
+			}
+		}
 	}
 	if d.Reached {
 		d.Error = ""

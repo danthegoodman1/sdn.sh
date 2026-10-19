@@ -240,18 +240,21 @@ func (w *World) expect(net model.NetworkID, rev uint64, id model.InterfaceID) (e
 	}
 	e.live = true
 	pts := points(rules)
-	adj := map[model.ServiceID]bool{}
-	adjacent := func(s model.ServiceID) bool {
-		v, ok := adj[s]
+	// reach holds, for each service, whether x's service reaches it and
+	// whether it reaches x's.
+	reach := map[model.ServiceID][2]bool{}
+	between := func(s model.ServiceID) (to, from bool) {
+		v, ok := reach[s]
 		if !ok {
-			v = reaches(rules, pts, x.Service, s) || reaches(rules, pts, s, x.Service)
-			adj[s] = v
+			v = [2]bool{reaches(rules, pts, x.Service, s), reaches(rules, pts, s, x.Service)}
+			reach[s] = v
 		}
-		return v
+		return v[0], v[1]
 	}
 	for _, y := range snap {
 		connected := y.State == api.Live || y.State == api.Released && !y.Drained
-		if y.ID == x.ID || y.Kind == api.Device || !connected || !adjacent(y.Service) {
+		xy, yx := between(y.Service)
+		if y.ID == x.ID || y.Kind == api.Device || !connected || !xy && !yx {
 			continue
 		}
 		allowed := []netip.Prefix{netip.PrefixFrom(y.Addr6, 128)}
@@ -263,8 +266,7 @@ func (w *World) expect(net model.NetworkID, rev uint64, id model.InterfaceID) (e
 			continue
 		}
 		// The side that reaches the other keeps alive, or the lower ID
-		// when each reaches the other or neither does.
-		xy, yx := reaches(rules, pts, x.Service, y.Service), reaches(rules, pts, y.Service, x.Service)
+		// when each reaches the other.
 		keeps := x.ID < y.ID
 		if xy != yx {
 			keeps = xy
@@ -279,7 +281,7 @@ func (w *World) expect(net model.NetworkID, rev uint64, id model.InterfaceID) (e
 		families = append(families, nft.IPv4)
 	}
 	for _, to := range n.services {
-		if !reaches(rules, pts, x.Service, to.id) {
+		if xto, _ := between(to.id); !xto {
 			continue
 		}
 		var backends []store.Interface
@@ -314,7 +316,7 @@ func (w *World) expect(net model.NetworkID, rev uint64, id model.InterfaceID) (e
 		}
 	}
 	for _, from := range n.services {
-		if !reaches(rules, pts, from.id, x.Service) {
+		if _, fromx := between(from.id); !fromx {
 			continue
 		}
 		for _, f := range families {

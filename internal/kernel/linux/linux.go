@@ -248,6 +248,18 @@ func (k *Kernel) Run(op kernel.Op) (kernel.Result, error) {
 			inside := slices.ContainsFunc(op.Prefixes, func(p netip.Prefix) bool { return p.Contains(a) })
 			return inside && !slices.Contains(op.Addrs, a)
 		}, true)
+	case kernel.ReadSessions:
+		d, err := h.wg.Device(op.Device)
+		if err != nil {
+			return kernel.Result{}, fmt.Errorf("read %s: %w", op.Device, err)
+		}
+		var r kernel.Result
+		for _, p := range d.Peers {
+			if !p.LastHandshakeTime.IsZero() {
+				r.Sessions = append(r.Sessions, model.Key(p.PublicKey))
+			}
+		}
+		return r, nil
 	}
 	return kernel.Result{}, fmt.Errorf("unknown operation %q", op.Kind)
 }

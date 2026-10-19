@@ -152,7 +152,7 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 	}
 	var tgt target
 	if ok {
-		c.rekey(now, st, x)
+		c.reregister(now, st, x)
 		tgt = c.target(now, st, n, x)
 		if c.Debug != nil {
 			var ids []string
@@ -509,15 +509,7 @@ func (c *Core) Observed(now time.Time, ns kernel.Namespace, err error) {
 	st.observe = false
 	st.dirty = true
 	if errors.Is(err, kernel.ErrNoNamespace) {
-		st.exists, st.device, st.egress = false, false, nil
-		st.peers = map[model.Key]kernel.Peer{}
-		st.link, st.rules = nil, nil
-		if i, ok := c.ifaces[st.iface]; ok && (i.phase == ready || i.phase == configuring) {
-			// The namespace went behind the agent's back, and its device
-			// with it or into a namespace only a process holds: the key is
-			// gone either way, and so is the interface.
-			i.phase = detaching
-			c.emit(WriteJournal{Entry: c.entry(i)})
+		if c.lost(st) {
 			c.scan()
 		}
 		return

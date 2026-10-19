@@ -136,7 +136,21 @@ type Dial struct {
 	Failures  int            `json:"failures"`
 	Answers   map[string]int `json:"answers"`
 	Error     string         `json:"error,omitempty"`
+	// Missed holds the last attempts launched before Converged that got
+	// another outcome, the latest last, so a late settle shows what held
+	// it up.
+	Missed []Missed `json:"missed,omitempty"`
 }
+
+// Missed is one attempt that got an outcome its loop was not waiting for.
+type Missed struct {
+	Launched int64   `json:"launched_unix_ns"`
+	MS       float64 `json:"ms"`
+	Outcome  string  `json:"outcome"`
+}
+
+// MissedKept is how many missed attempts a Dial keeps.
+const MissedKept = 8
 
 // Elapsed is the time from the loop's start to convergence.
 func (d Dial) Elapsed() time.Duration { return time.Duration(d.Converged - d.Start) }

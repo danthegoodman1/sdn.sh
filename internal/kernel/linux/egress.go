@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
+	"github.com/google/nftables/userdata"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
@@ -106,8 +107,20 @@ func IsEgressAddr(a netip.Addr) bool {
 }
 
 // blockedTag marks a rule that drops one blocked prefix; the prefix follows
-// it in the rule's user data, so the filter records what it blocks.
+// it in the rule's comment, so the filter records what it blocks.
 const blockedTag = "blocked "
+
+// comment is a rule's user data holding s as the comment nft shows.
+func comment(s string) []byte { return userdata.AppendString(nil, userdata.TypeComment, s) }
+
+// ruleComment reads the text a rule records: its comment, or the whole
+// user data for a rule an earlier agent tagged with bare text.
+func ruleComment(udata []byte) string {
+	if len(udata) >= 2 && userdata.Type(udata[0]) == userdata.TypeComment && 2+int(udata[1]) <= len(udata) {
+		return strings.TrimSuffix(string(udata[2:2+int(udata[1])]), "\x00")
+	}
+	return string(udata)
+}
 
 // EnsureEgress installs the host's egress table, or refreshes the
 // prefixes it blocks, in one transaction that leaves every link's grant in
@@ -142,7 +155,7 @@ func (k *Kernel) EnsureEgress(blocked []netip.Prefix) error {
 	toLink := ifnamePrefix(expr.MetaKeyOIFNAME, egressPrefix)
 	for _, p := range blockedSet(blocked) {
 		c.AddRule(&nftables.Rule{Table: t, Chain: fwd, Exprs: concat(fromLink, prefixMatch(p), []expr.Any{drop()}),
-			UserData: []byte(blockedTag + p.String())})
+			UserData: comment(blockedTag + p.String())})
 	}
 	add(fwd, concat(fromLink, []expr.Any{
 		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
@@ -183,7 +196,7 @@ func (k *Kernel) EgressBlocked() ([]netip.Prefix, error) {
 	}
 	var out []netip.Prefix
 	for _, r := range rules {
-		tag, ok := strings.CutPrefix(string(r.UserData), blockedTag)
+		tag, ok := strings.CutPrefix(ruleComment(r.UserData), blockedTag)
 		if !ok {
 			continue
 		}
@@ -329,7 +342,7 @@ func (k *Kernel) createEgressLink(h *nsHandles, idx uint16) error {
 }
 
 // grantTag marks a rule of a link's grant; the flow it admits follows in
-// the rule's user data, so the chain records its own grant.
+// the rule's comment, so the chain records its own grant.
 const grantTag = "grant "
 
 // grantEgress writes the link's grant chain and its map entry.
@@ -344,7 +357,7 @@ func (k *Kernel) grantEgress(cfg *kernel.EgressConfig) error {
 	c.FlushChain(ch)
 	for _, r := range cfg.Rules {
 		c.AddRule(&nftables.Rule{Table: t, Chain: ch, Exprs: append(protoMatch(r.Proto, r.Ports), accept()),
-			UserData: []byte(grantTag + formatRule(r))})
+			UserData: comment(grantTag + formatRule(r))})
 	}
 	if err := c.SetAddElements(egressMap(t), []nftables.SetElement{{
 		Key: padIfname(egressLink(cfg.Index)), VerdictData: &expr.Verdict{Kind: expr.VerdictJump, Chain: ch.Name},
@@ -358,7 +371,10 @@ func (k *Kernel) grantEgress(cfg *kernel.EgressConfig) error {
 }
 
 // egressGrant reads a link's grant back from its chain. A chain that is
-// missing holds no rules, so it reads as an empty grant.
+// missing holds no rules, so it reads as an empty grant. So does a chain
+// holding a rule that records no flow, as an agent that kept the grant in
+// the link's alias wrote: no desired grant is empty, so the agent rewrites
+// the chain.
 func (k *Kernel) egressGrant(idx uint16) ([]kernel.EgressRule, error) {
 	c, err := nftables.New(nftables.WithNetNSFd(int(k.root)))
 	if err != nil {
@@ -372,10 +388,10 @@ func (k *Kernel) egressGrant(idx uint16) ([]kernel.EgressRule, error) {
 	}
 	var out []kernel.EgressRule
 	for _, r := range rules {
-		tag, ok := strings.CutPrefix(string(r.UserData), grantTag)
+		tag, ok := strings.CutPrefix(ruleComment(r.UserData), grantTag)
 		g, err := parseRule(tag)
 		if !ok || err != nil {
-			return nil, fmt.Errorf("egress grant %d: rule %d records %q", idx, r.Handle, r.UserData)
+			return nil, nil
 		}
 		out = append(out, g)
 	}

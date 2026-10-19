@@ -566,11 +566,173 @@ func TestAnAcknowledgedDirectionIsNotResentAndANewPeerResendsAlone(t *testing.T)
 	}
 }
 
-// TestARelayPeerWhoseSecretChangesRegistersAtOnce keeps a relay peer
-// installed while its edge's secret changes, as for an agent that held the
-// peer while its edge went dormant: the direction registers under the new
-// key at once, rather than at the periodic registration.
-func TestARelayPeerWhoseSecretChangesRegistersAtOnce(t *testing.T) {
+// TestEveryServiceTheNamespaceHasKnownIsRejected gives a client db, then
+// takes db away as a deny does, which drops it from the host's state: the
+// namespace keeps rejecting db's address, so a connection to the address
+// the workload learned leaves no conntrack entry to outlast the deny. An
+// address a peer comes to hold, as a reused IPv4 address can, is left
+// alone.
+func TestEveryServiceTheNamespaceHasKnownIsRejected(t *testing.T) {
+	c, now := adopted(t)
+	update := func(rev uint64, n api.NetworkState) {
+		t.Helper()
+		if err := c.State(now, api.StateUpdate{Host: "h1", Generation: rev, Networks: []api.NetworkState{n},
+			Present: []api.NetworkRef{{Network: "net-1", Revision: rev}}}); err != nil {
+			t.Fatal(err)
+		}
+		drive(c, now, succeed)
+		c.RegistrationAcked(now, 40000, relayAt)
+		drive(c, now, succeed)
+	}
+	rejects := func() []netip.Addr { return c.ns["wirenet-a"].rules.Rules.Reject }
+	db := netip.MustParseAddr("fd00::100")
+	update(3, client(3, "if-a", self, backend("if-b", peer, "fd00::6")))
+	if !slotted(c, "wirenet-a") || !slices.Equal(rejects(), []netip.Addr{db}) {
+		t.Fatalf("reaching db: slotted %v, rejecting %v", slotted(c, "wirenet-a"), rejects())
+	}
+	denied := client(4, "if-a", self)
+	denied.Services, denied.Interfaces[0].Reach = nil, nil
+	update(4, denied)
+	if rs := c.ns["wirenet-a"].rules; len(rs.Rules.Translate) != 0 || !slices.Equal(rejects(), []netip.Addr{db}) {
+		t.Fatalf("denied db: translating %v, rejecting %v; want db's address", rs.Rules.Translate, rejects())
+	}
+	reused := client(5, "if-a", self)
+	reused.Services, reused.Interfaces[0].Reach = nil, nil
+	holder := backend("if-c", model.Key{12}, "fd00::100")
+	reused.Interfaces[0].Peers = []api.Peer{holder}
+	update(5, reused)
+	if got := rejects(); len(got) != 0 {
+		t.Fatalf("rejecting %v, which a peer holds", got)
+	}
+}
+
+// pairOnOneHost is a core holding if-a in wirenet-a and if-b in wirenet-b,
+// whose services reach each other, and a network state for them as the
+// control plane compiles it: if-a, the lower ID, keeps the pair alive.
+func pairOnOneHost(t *testing.T) (*Core, time.Time, api.StateUpdate) {
+	t.Helper()
+	c, now := New(DefaultConfig("h1"), prng.New(1)), time.Unix(1000, 0)
+	keyB := model.Key{9}
+	var journal []JournalEntry
+	var snap kernel.Snapshot
+	for _, e := range []JournalEntry{
+		{Interface: "if-a", Name: "a", Network: "net-1", Service: "svc-1", Kind: api.Workload, Namespace: "wirenet-a", ListenPort: 40000, PublicKey: self},
+		{Interface: "if-b", Name: "b", Network: "net-1", Service: "svc-2", Kind: api.Workload, Namespace: "wirenet-b", ListenPort: 40001, PublicKey: keyB},
+	} {
+		journal = append(journal, e)
+		snap.Namespaces = append(snap.Namespaces, kernel.Namespace{Name: e.Namespace,
+			Devices: []kernel.Device{{Name: c.cfg.Device, HasKey: true, PublicKey: e.PublicKey, ListenPort: e.ListenPort}}})
+	}
+	c.Start(now, journal, snap)
+	a6, b6 := netip.MustParseAddr("fd00::5"), netip.MustParseAddr("fd00::6")
+	svc1 := api.Service{ID: "svc-1", Name: "one", Addr6: netip.MustParseAddr("fd00::101"), Backends: []api.Backend{{Interface: "if-a", Addr6: a6}}}
+	svc2 := api.Service{ID: "svc-2", Name: "two", Addr6: netip.MustParseAddr("fd00::102"), Backends: []api.Backend{{Interface: "if-b", Addr6: b6}}}
+	tcp := model.PortRange{Lo: 80, Hi: 80}
+	n := api.NetworkState{Network: "net-1", Name: "n", Revision: 3, Prefix6: pfx("fd00::/64"), MTU: 1380, Services: []api.Service{svc1, svc2},
+		Interfaces: []api.Interface{
+			{ID: "if-a", Service: "svc-1", Kind: api.Workload, PublicKey: self, Addr6: a6, ListenPort: 40000, State: api.Live,
+				Peers:   []api.Peer{{Interface: "if-b", Service: "svc-2", PublicKey: keyB, Allowed: []netip.Prefix{pfx("fd00::6/128")}, Loopback: 40001, Keepalive: true}},
+				Reach:   []api.Reach{{Service: "svc-2", Proto: model.TCP, Ports: tcp}},
+				Inbound: []api.Inbound{{From: "svc-2", Proto: model.TCP, Ports: tcp}}},
+			{ID: "if-b", Service: "svc-2", Kind: api.Workload, PublicKey: keyB, Addr6: b6, ListenPort: 40001, State: api.Live,
+				Peers:   []api.Peer{{Interface: "if-a", Service: "svc-1", PublicKey: self, Allowed: []netip.Prefix{pfx("fd00::5/128")}, Loopback: 40000}},
+				Reach:   []api.Reach{{Service: "svc-1", Proto: model.TCP, Ports: tcp}},
+				Inbound: []api.Inbound{{From: "svc-1", Proto: model.TCP, Ports: tcp}}},
+		}}
+	return c, now, api.StateUpdate{Host: "h1", Generation: 3, Networks: []api.NetworkState{n}, Present: []api.NetworkRef{{Network: "net-1", Revision: 3}}}
+}
+
+// runPair carries out the core's batches and returns the session checks it
+// asks for, unanswered.
+func runPair(c *Core, now time.Time) []CheckSessions {
+	var checks []CheckSessions
+	for acts := c.Actions(now); len(acts) > 0; acts = c.Actions(now) {
+		for _, a := range acts {
+			switch a := a.(type) {
+			case RunBatch:
+				c.BatchDone(now, a.Namespace, a.ID, len(a.Ops), nil)
+			case CheckSessions:
+				checks = append(checks, a)
+			}
+		}
+	}
+	return checks
+}
+
+// TestAPeerWhoseNamespaceLostItsNameStopsTakingSlots forms a loopback pair,
+// then has a scan find if-b's device in a namespace only a process holds,
+// as when an operator deletes the name while the workload keeps it: the
+// reap takes if-b's device, so if-b detaches and if-a takes its slots for
+// if-b away at once, before the agent observes the name gone.
+func TestAPeerWhoseNamespaceLostItsNameStopsTakingSlots(t *testing.T) {
+	c, now, u := pairOnOneHost(t)
+	if err := c.State(now, u); err != nil {
+		t.Fatal(err)
+	}
+	runPair(c, now)
+	if !slotted(c, "wirenet-a") {
+		t.Fatal("a never slotted b")
+	}
+	c.Scanned(now, kernel.Snapshot{Namespaces: []kernel.Namespace{{Ref: "ns-1",
+		Devices: []kernel.Device{{Name: c.cfg.Device, HasKey: true, PublicKey: model.Key{9}, ListenPort: 40001, Alias: kernel.Alias(c.cfg.AliasPrefix(), "if-b")}}}}}, nil)
+	runPair(c, now)
+	if slotted(c, "wirenet-a") || c.ifaces["if-b"].phase != detaching {
+		t.Fatalf("after the scan: a slotted %v, b %v", slotted(c, "wirenet-a"), c.ifaces["if-b"].phase)
+	}
+}
+
+// TestTheSideWithoutKeepaliveSlotsAPeerOnceItHoldsASession forms a loopback
+// pair whose ends each reach the other: if-a keeps the pair alive and gets
+// its slot at once, while if-b's slot waits for its device to hold a
+// session with if-a, asked of the kernel, and goes in when one shows.
+func TestTheSideWithoutKeepaliveSlotsAPeerOnceItHoldsASession(t *testing.T) {
+	c, now, u := pairOnOneHost(t)
+	if err := c.State(now, u); err != nil {
+		t.Fatal(err)
+	}
+	checks := runPair(c, now)
+	if !slotted(c, "wirenet-a") || slotted(c, "wirenet-b") {
+		t.Fatalf("slotted: a %v, b %v; want a alone before b's session", slotted(c, "wirenet-a"), slotted(c, "wirenet-b"))
+	}
+	if len(checks) != 1 || checks[0].Namespace != "wirenet-b" || !slices.Equal(checks[0].Keys, []model.Key{self}) {
+		t.Fatalf("session checks %+v, want one in wirenet-b for if-a's key", checks)
+	}
+	c.SessionsSeen(now, "wirenet-b", nil, nil)
+	if again := runPair(c, now); slotted(c, "wirenet-b") || len(again) != 1 {
+		t.Fatalf("with no session yet: slotted %v, checks %+v", slotted(c, "wirenet-b"), again)
+	}
+	c.SessionsSeen(now, "wirenet-b", []model.Key{self}, nil)
+	runPair(c, now)
+	if !slotted(c, "wirenet-b") {
+		t.Fatal("b's slot never went in once its session showed")
+	}
+}
+
+// TestASessionWaitEndsAtAckWait never answers if-b's session checks, and
+// checks its slot goes in once AckWait passes.
+func TestASessionWaitEndsAtAckWait(t *testing.T) {
+	c, now, u := pairOnOneHost(t)
+	if err := c.State(now, u); err != nil {
+		t.Fatal(err)
+	}
+	runPair(c, now)
+	c.SessionsSeen(now, "wirenet-b", nil, nil)
+	at := now.Add(c.cfg.AckWait)
+	if wake := c.NextWake(now); wake.After(at) {
+		t.Fatalf("next wake %v, after the wait ends at %v", wake, at)
+	}
+	c.Tick(at)
+	runPair(c, at)
+	if !slotted(c, "wirenet-b") || c.Stats.SessionTimeouts != 1 {
+		t.Fatalf("after AckWait: slotted %v, %d session timeouts", slotted(c, "wirenet-b"), c.Stats.SessionTimeouts)
+	}
+}
+
+// TestARelayPeerWhoseEpochOrSecretChangesRegistersAtOnce keeps a relay
+// peer installed while its edge goes dormant and back, and then while its
+// secret changes: each time the direction registers at once, rather than
+// at the periodic registration.
+func TestARelayPeerWhoseEpochOrSecretChangesRegistersAtOnce(t *testing.T) {
 	c, now := adopted(t)
 	c.cfg.RegisterEvery = time.Hour
 	update := func(rev uint64, peers ...api.Peer) {
@@ -603,8 +765,18 @@ func TestARelayPeerWhoseSecretChangesRegistersAtOnce(t *testing.T) {
 		t.Fatalf("registered %d times on install, want once", n)
 	}
 	c.RegistrationAcked(now, 40000, relayAt)
-	b.Registration = model.Secret{2}
+	b.Epoch = 1
 	update(4, b)
+	if n := len(sends()); n != 1 {
+		t.Fatalf("registered %d times after the epoch moved, want once", n)
+	}
+	c.RegistrationAcked(now, 40000, relayAt)
+	update(5, b)
+	if n := len(sends()); n != 0 {
+		t.Fatalf("registered %d times with nothing changed, want none", n)
+	}
+	b.Registration = model.Secret{2}
+	update(6, b)
 	got := sends()
 	if len(got) != 1 {
 		t.Fatalf("registered %d times after the secret changed, want once", len(got))

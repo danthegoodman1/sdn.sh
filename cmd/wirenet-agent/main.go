@@ -55,7 +55,7 @@ func run() error {
 	var blocked prefixList
 	flag.Var(&blocked, "egress-block", "a prefix egress links never reach, beyond the defaults and the host's own; repeatable")
 	upstream := flag.String("upstream-resolver", "", "resolver for names outside every network (default: the first nameserver in /etc/resolv.conf)")
-	logLevel := flag.String("log-level", "info", "debug, info, warn or error")
+	logLevel := flag.String("log-level", "info", "trace, debug, info, warn or error; trace adds the core's account of each plan")
 	logFormat := flag.String("log-format", "", "json or console (default: console on a terminal)")
 	portLo := flag.Uint("port-lo", uint(cfg.Core.PortLo), "lowest listen port a device binds")
 	portHi := flag.Uint("port-hi", uint(cfg.Core.PortHi), "highest listen port a device binds")

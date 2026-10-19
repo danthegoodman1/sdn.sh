@@ -12,7 +12,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"strconv"
@@ -29,6 +31,8 @@ type Client struct {
 	token   string
 	http    *http.Client
 	timeout time.Duration
+	// dialTimeout bounds one TCP connect.
+	dialTimeout time.Duration
 }
 
 // Options configure a client.
@@ -37,6 +41,11 @@ type Options struct {
 	CAFile string
 	// Timeout bounds a call that is not a long poll.
 	Timeout time.Duration
+	// DialTimeout bounds one TCP connect. A call whose connect gets no
+	// answer dials again within its own timeout, since nothing was sent.
+	DialTimeout time.Duration
+	// Dial, when set, replaces the TCP dialer, for tests.
+	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // New returns a client for the control plane at base, authenticating with
@@ -45,8 +54,24 @@ func New(base, token string, opts Options) (*Client, error) {
 	if _, err := url.Parse(base); err != nil {
 		return nil, err
 	}
+	if opts.DialTimeout == 0 {
+		opts.DialTimeout = 3 * time.Second
+	}
+	dial := opts.Dial
+	if dial == nil {
+		dial = (&net.Dialer{KeepAlive: 30 * time.Second}).DialContext
+	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.MaxIdleConnsPerHost = 16
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		ctx, cancel := context.WithTimeoutCause(ctx, opts.DialTimeout, errDialTimeout)
+		defer cancel()
+		c, err := dial(ctx, network, addr)
+		if err != nil && errors.Is(context.Cause(ctx), errDialTimeout) {
+			return nil, errDialTimeout
+		}
+		return c, err
+	}
 	if opts.CAFile != "" {
 		pem, err := os.ReadFile(opts.CAFile)
 		if err != nil {
@@ -61,35 +86,53 @@ func New(base, token string, opts Options) (*Client, error) {
 	if opts.Timeout == 0 {
 		opts.Timeout = 10 * time.Second
 	}
-	return &Client{base: strings.TrimRight(base, "/"), token: token, http: &http.Client{Transport: tr}, timeout: opts.Timeout}, nil
+	return &Client{base: strings.TrimRight(base, "/"), token: token, http: &http.Client{Transport: tr}, timeout: opts.Timeout, dialTimeout: opts.DialTimeout}, nil
 }
 
 // ErrUnavailable wraps a failure to reach the control plane at all, as
 // against an answer refusing the call.
 var ErrUnavailable = errors.New("control plane unavailable")
 
+// errDialTimeout is a TCP connect that got no answer in DialTimeout.
+var errDialTimeout = errors.New("connect timed out")
+
 func (c *Client) do(ctx context.Context, method, path string, in, out any, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	var body io.Reader
+	var b []byte
 	if in != nil {
-		b, err := json.Marshal(in)
+		var err error
+		if b, err = json.Marshal(in); err != nil {
+			return err
+		}
+	}
+	var resp *http.Response
+	for unanswered := 0; ; unanswered++ {
+		var body io.Reader
+		if in != nil {
+			body = bytes.NewReader(b)
+		}
+		var t attemptTrace
+		req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, t.trace()), method, c.base+path, body)
 		if err != nil {
 			return err
 		}
-		body = bytes.NewReader(b)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	if in != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("%w: %s %s: %v", ErrUnavailable, method, path, err)
+		req.Header.Set("Authorization", "Bearer "+c.token)
+		if in != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err = c.http.Do(req)
+		if err == nil {
+			break
+		}
+		// A connect that got no answer sent nothing, so another may.
+		if errors.Is(err, errDialTimeout) && ctx.Err() == nil {
+			continue
+		}
+		if unanswered > 0 {
+			return fmt.Errorf("%w: %s %s: %v (%s, after %d connects unanswered in %v)", ErrUnavailable, method, path, err, t, unanswered, c.dialTimeout)
+		}
+		return fmt.Errorf("%w: %s %s: %v (%s)", ErrUnavailable, method, path, err, t)
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
@@ -115,6 +158,45 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any, timeo
 		return fmt.Errorf("%s %s: decoding answer: %w", method, path, err)
 	}
 	return nil
+}
+
+// attemptTrace records how far one request got, so a failure says whether
+// it ever had a connection and whether the server could have seen it.
+type attemptTrace struct {
+	start      time.Time
+	got, wrote time.Duration
+	connected  bool
+	reused     bool
+	idle       time.Duration
+	written    bool
+}
+
+func (t *attemptTrace) trace() *httptrace.ClientTrace {
+	t.start = time.Now()
+	return &httptrace.ClientTrace{
+		GotConn: func(i httptrace.GotConnInfo) {
+			t.connected, t.got, t.reused, t.idle = true, time.Since(t.start), i.Reused, i.IdleTime
+		},
+		WroteRequest: func(i httptrace.WroteRequestInfo) {
+			if i.Err == nil {
+				t.written, t.wrote = true, time.Since(t.start)
+			}
+		},
+	}
+}
+
+func (t attemptTrace) String() string {
+	if !t.connected {
+		return "no connection"
+	}
+	conn := fmt.Sprintf("a new connection after %v", t.got.Round(time.Millisecond))
+	if t.reused {
+		conn = fmt.Sprintf("a connection idle %v", t.idle.Round(time.Millisecond))
+	}
+	if !t.written {
+		return conn + ", request unwritten"
+	}
+	return fmt.Sprintf("%s, request written after %v", conn, t.wrote.Round(time.Millisecond))
 }
 
 func call[T any](c *Client, ctx context.Context, method, path string, in any) (T, error) {

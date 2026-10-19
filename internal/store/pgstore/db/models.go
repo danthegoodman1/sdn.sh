@@ -18,6 +18,7 @@ type Edge struct {
 	Ports    []byte
 	Created  time.Time
 	Dormant  *time.Time
+	Epoch    int64
 }
 
 type Host struct {

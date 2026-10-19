@@ -208,16 +208,21 @@ func (t *Table) Dir(local netip.AddrPort) (*Dir, bool) {
 }
 
 // Load replaces the pushed table. A direction whose key is unchanged keeps
-// its endpoint and counter; one whose key changed starts over, since its
-// port was reallocated. Packets waiting on a port the table keeps go on
-// waiting, and those on a port it drops end.
+// its counter, and its endpoint too unless its epoch moved, as when its
+// edge went dormant: both ends then register afresh before it forwards,
+// while a registration replayed from before still fails. One whose key
+// changed starts over, since its port was reallocated. Packets waiting on
+// a port the table keeps go on waiting, and those on a port it drops end.
 func (t *Table) Load(st api.RelayState) {
 	next := map[netip.AddrPort]*Dir{}
 	for _, p := range st.Ports {
 		d := t.newDir(p)
 		if old, ok := t.ports[p.Local]; ok {
 			if old.Key == p.Key && old.Advertised == p.Advertised {
-				d.Endpoint, d.Counter, d.Stats = old.Endpoint, old.Counter, old.Stats
+				d.Counter, d.Stats = old.Counter, old.Stats
+				if old.Epoch == p.Epoch {
+					d.Endpoint = old.Endpoint
+				}
 			}
 			d.waits = old.waits
 			t.touch(d)

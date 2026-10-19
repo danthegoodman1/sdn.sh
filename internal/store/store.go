@@ -250,9 +250,12 @@ type Edge struct {
 	Created  time.Time    `json:"created"`
 	// Dormant is when policy stopped connecting a pair that is still
 	// attached. A dormant edge keeps its ports and secrets for the port
-	// quarantine, so a pair that reconnects gets the same edge back and its
-	// peers' endpoints stay valid.
+	// quarantine, so a pair that reconnects gets the same edge back.
 	Dormant time.Time `json:"dormant,omitzero"`
+	// Epoch counts the times the edge has gone dormant. A relay forgets the
+	// endpoints of a port whose epoch moves, so a reconnecting pair
+	// registers afresh before the relay forwards between them.
+	Epoch uint64 `json:"epoch,omitempty"`
 }
 
 // EdgePorts are an edge's two ports on one relay address.

@@ -72,6 +72,29 @@ func (k *Kernel) flush(ns *Netns, match func(netip.Addr) bool, sweep bool) kerne
 	return r
 }
 
+// sessions lists the peers of d a handshake would have completed with: a
+// co-located device that holds d's key, where either side keeps the pair
+// alive, since the model sends nothing else on its own.
+func (k *Kernel) sessions(d *Device) []model.Key {
+	var out []model.Key
+	pub := d.Private.Public()
+	for _, key := range slices.SortedFunc(maps.Keys(d.Peers), compareKey) {
+		p := d.Peers[key]
+		if !p.Endpoint.IsValid() || !p.Endpoint.Addr().IsLoopback() {
+			continue
+		}
+		other, ok := k.PortOwner(p.Endpoint.Port())
+		if !ok {
+			continue
+		}
+		back := other.Peers[pub]
+		if back != nil && (p.Keepalive > 0 || back.Keepalive > 0) {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
 // Move is an allowed IP that changed peers on one device.
 type Move struct {
 	Namespace string
@@ -423,6 +446,12 @@ func (k *Kernel) Run(op kernel.Op) (kernel.Result, error) {
 			inside := slices.ContainsFunc(op.Prefixes, func(p netip.Prefix) bool { return p.Contains(a) })
 			return inside && !slices.Contains(op.Addrs, a)
 		}, true), nil
+	case kernel.ReadSessions:
+		d, ok := ns.Devices[op.Device]
+		if !ok {
+			return kernel.Result{}, kernel.ErrNoDevice
+		}
+		return kernel.Result{Sessions: k.sessions(d)}, nil
 	}
 	d, ok := ns.Devices[op.Device]
 	if !ok {

@@ -164,6 +164,10 @@ type probe struct {
 
 // New returns a daemon. rand mints the private keys the kernel keeps.
 func New(cfg Config, core *agentcore.Core, kern kernel.Kernel, cp ControlPlane, j Journal, raw Sender, prober Prober, m *Metrics, log zerolog.Logger) *Daemon {
+	if log.GetLevel() <= zerolog.TraceLevel {
+		// The core's own account of each plan and wait.
+		core.Debug = func(s string) { log.Trace().Msg(s) }
+	}
 	return &Daemon{
 		cfg: cfg, log: log, core: core, kern: kern, cp: cp, journal: j, raw: raw, prober: prober, m: m,
 		now:           time.Now,
@@ -470,6 +474,8 @@ func (d *Daemon) carry(a agentcore.Action) {
 		d.runBatch(a)
 	case agentcore.Observe:
 		d.observe(a.Namespace)
+	case agentcore.CheckSessions:
+		d.checkSessions(a)
 	case agentcore.Scan:
 		go func() {
 			snap, err := d.kern.Snapshot(d.cfg.Core.Prefix, d.cfg.Core.AliasPrefix())
@@ -566,8 +572,25 @@ func (d *Daemon) runOp(op kernel.Op) error {
 	if err != nil {
 		ev = d.log.Warn().Err(err)
 	}
-	ev.Str("namespace", op.Namespace).Str("op", kind).Int("peers", len(op.Peers)).Dur("took", took).Msg("kernel operation")
+	ev.Str("namespace", op.Namespace).Str("op", kind).Int("peers", len(op.Peers)).Int("conntrack", res.Conntrack).Dur("took", took).Msg("kernel operation")
 	return err
+}
+
+// checkSessions reads a device's sessions every 2ms, for up to 50ms or
+// until it holds one with every peer asked about, and tells the core.
+func (d *Daemon) checkSessions(a agentcore.CheckSessions) {
+	go func() {
+		var r kernel.Result
+		var err error
+		for range 25 {
+			r, err = d.kern.Run(kernel.Op{Kind: kernel.ReadSessions, Namespace: a.Namespace, Device: a.Device})
+			if err != nil || !slices.ContainsFunc(a.Keys, func(k model.Key) bool { return !slices.Contains(r.Sessions, k) }) {
+				break
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		d.post(func() { d.core.SessionsSeen(d.now(), a.Namespace, r.Sessions, err) })
+	}()
 }
 
 func (d *Daemon) observe(name string) {
@@ -818,6 +841,7 @@ func (d *Daemon) noteStats() {
 	d.m.coreStat("failures", s.Failures-d.stats.Failures)
 	d.m.coreStat("acked", s.Acked-d.stats.Acked)
 	d.m.coreStat("ack_timeouts", s.AckTimeouts-d.stats.AckTimeouts)
+	d.m.coreStat("session_timeouts", s.SessionTimeouts-d.stats.SessionTimeouts)
 	d.stats = s
 }
 

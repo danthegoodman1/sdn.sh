@@ -77,7 +77,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "keepalive-both-sides",
 		Breaks: "exactly one side of a co-located pair arms persistent-keepalive",
-		Edits:  []Edit{{compileGo, "p.Keepalive = keepsAlive(x, y, reaches)", "p.Keepalive = true"}},
+		Edits:  []Edit{{compileGo, "p.Keepalive = keepsAlive(x, y, links)", "p.Keepalive = true"}},
 		Catch:  []string{"cp", "sim"},
 	},
 	{
@@ -95,7 +95,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "keepalive-on-relay-peers",
 		Breaks: "relay peers carry no persistent-keepalive; the registration datagram holds the NAT mapping",
-		Edits:  []Edit{{compileGo, "p.Registration = e.SecretAB", "p.Registration, p.Keepalive = e.SecretAB, true"}},
+		Edits:  []Edit{{compileGo, "p.Registration, p.Epoch = e.SecretAB, e.Epoch", "p.Registration, p.Epoch, p.Keepalive = e.SecretAB, e.Epoch, true"}},
 		Catch:  []string{"cp", "sim"},
 	},
 	{
@@ -291,7 +291,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "vanished-namespace-stays-ready",
 		Breaks: "an interface whose namespace vanishes behind the agent is torn down, since its key went with the device",
-		Edits:  []Edit{{agentPlan, "\t\t\ti.phase = detaching\n\t\t\tc.emit(WriteJournal{Entry: c.entry(i)})\n\t\t\tc.scan()\n", "\t\t\tc.scan()\n"}},
+		Edits:  []Edit{{agentLife, "\ti.phase = detaching\n\tc.emit(WriteJournal{Entry: c.entry(i)})\n\tfor _, name := range slices.Sorted(maps.Keys(c.ns)) {", "\tfor _, name := range slices.Sorted(maps.Keys(c.ns)) {"}},
 		Catch:  []string{"agent-core", "sim"},
 	},
 	{
@@ -501,7 +501,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "egress-filter-forgets-blocked",
 		Breaks: "the egress filter records what it blocks, so a restarted agent keeps blocking every relay it knew of",
-		Edits:  []Edit{{linuxEgress, "\t\t\tUserData: []byte(blockedTag + p.String())})", "\t\t})"}},
+		Edits:  []Edit{{linuxEgress, "\t\t\tUserData: comment(blockedTag + p.String())})", "\t\t})"}},
 		Catch:  []string{"kernel"},
 	},
 	{
@@ -561,7 +561,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "failover-holds-slots-back",
 		Breaks: "a peer installed before never waits for an acknowledgment, so a failover holds back no slot",
-		Edits:  []Edit{{agentTarget, "\t\tif _, installed := st.peers[p.PublicKey]; installed {\n\t\t\treturn false\n\t\t}\n", ""}},
+		Edits:  []Edit{{agentTarget, "\tif !ok {\n\t\tif _, installed := st.peers[p.PublicKey]; installed {\n\t\t\treturn false\n\t\t}\n\t\tw = &ackWait{", "\tif !ok {\n\t\tw = &ackWait{"}},
 		Catch:  []string{"agent-core"},
 	},
 	{
@@ -784,28 +784,99 @@ var Mutants = []Mutant{
 		Catch:  []string{"cp", "sim"},
 	},
 	{
-		ID:     "dormant-edge-keeps-secrets",
-		Breaks: "an edge going dormant gets fresh secrets, so its relays forget both endpoints",
-		Edits: []Edit{{cpEdges, "\t\t\t\te.Dormant = now\n\t\t\t\tif e.SecretAB, err = model.NewSecret(p.Rand); err != nil {\n\t\t\t\t\treturn err\n\t\t\t\t}\n\t\t\t\tif e.SecretBA, err = model.NewSecret(p.Rand); err != nil {\n\t\t\t\t\treturn err\n\t\t\t\t}\n",
-			"\t\t\t\te.Dormant = now\n"}},
-		Catch: []string{"cp"},
+		ID:     "keepalive-ignores-fronted",
+		Breaks: "a gateway whose development machines reach a co-located peer keeps the pair alive",
+		Edits:  []Edit{{compileGo, "xy, yx := links.Reaches(x, y), links.Reaches(y, x)", "xy, yx := links.adj.Reaches(x.Service, y.Service), links.adj.Reaches(y.Service, x.Service)"}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "denied-service-unrejected",
+		Breaks: "a namespace keeps rejecting a service a deny takes from the host's state, so the deny leaves no untranslated flow",
+		Edits:  []Edit{{agentTarget, "t.rules = c.rules(n, x, t.peers, st.services)", "t.rules = c.rules(n, x, t.peers, nil)"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "reused-address-rejected",
+		Breaks: "an address a peer holds stays out of the reject, though a service once had it",
+		Edits:  []Edit{{agentTarget, "if !held[a] && (a.Is6() || x.Addr4.IsValid()) {", "if a.Is6() || x.Addr4.IsValid() {"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "scan-keeps-unnamed-peer",
+		Breaks: "a scan that finds a held interface's device where only a process holds it drops that namespace's peers, so co-located clients stop slotting it",
+		Edits:  []Edit{{agentLife, "\t\t\tif named, ok := c.ns[i.ns]; ok {\n\t\t\t\tc.lost(named)\n", "\t\t\tif named, ok := c.ns[i.ns]; ok && false {\n\t\t\t\tc.lost(named)\n"}},
+		Catch:  []string{"agent-core", "sim"},
+	},
+	{
+		ID:     "lost-peer-leaves-clients-planned",
+		Breaks: "a namespace whose co-located peer is lost replans at once",
+		Edits:  []Edit{{agentLife, "\t\t\tc.ns[name].dirty = true\n", ""}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "session-wait-skipped",
+		Breaks: "the side of a co-located pair without keepalive slots its peer once it holds a session",
+		Edits:  []Edit{{agentTarget, "\tif p.Keepalive || !slices.ContainsFunc(x.Reach,", "\tif true || p.Keepalive || !slices.ContainsFunc(x.Reach,"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "sessions-read-without-handshake",
+		Breaks: "a device reads as holding a session only once a handshake completes",
+		Edits:  []Edit{{linuxKernel, "\t\t\tif !p.LastHandshakeTime.IsZero() {\n\t\t\t\tr.Sessions", "\t\t\tif true {\n\t\t\t\tr.Sessions"}},
+		Catch:  []string{"kernel"},
+	},
+	{
+		ID:     "dormant-edge-keeps-epoch",
+		Breaks: "an edge going dormant moves its epoch, so its relays forget both endpoints",
+		Edits:  []Edit{{cpEdges, "\t\t\t\te.Epoch++\n", ""}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "peer-epoch-unsent",
+		Breaks: "an agent learns its relay peer's epoch",
+		Edits:  []Edit{{compileGo, "p.Registration, p.Epoch = e.SecretAB, e.Epoch", "p.Registration = e.SecretAB"}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "relay-keeps-endpoint-across-epoch",
+		Breaks: "a relay forgets a direction's endpoint when its epoch moves",
+		Edits:  []Edit{{relayCore, "\t\t\t\tif old.Epoch == p.Epoch {\n", "\t\t\t\tif true {\n"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "relay-epoch-resets-counter",
+		Breaks: "a registration from before an epoch stays a replay after it",
+		Edits:  []Edit{{relayCore, "\t\t\t\td.Counter, d.Stats = old.Counter, old.Stats\n", "\t\t\t\td.Stats = old.Stats\n"}},
+		Catch:  []string{"relay-core"},
 	},
 	{
 		ID:     "dormant-edge-relays-untold",
-		Breaks: "the relays of an edge going dormant load its fresh keys",
+		Breaks: "the relays of an edge going dormant load its new epoch",
 		Edits:  []Edit{{cpEdges, "\t\t\t\ttouched = append(touched, relayIDs(e)...)\n", ""}},
 		Catch:  []string{"cp"},
 	},
 	{
-		ID:     "rekey-skipped",
-		Breaks: "a relay peer whose secret changes registers under the new key at once",
-		Edits:  []Edit{{agentPlan, "\t\tc.rekey(now, st, x)\n", ""}},
+		ID:     "reregister-skipped",
+		Breaks: "a relay peer whose secret or epoch changes registers at once",
+		Edits:  []Edit{{agentPlan, "\t\tc.reregister(now, st, x)\n", ""}},
 		Catch:  []string{"agent-core"},
 	},
 	{
 		ID:     "egress-grant-unrecorded",
 		Breaks: "an egress grant reads back whole from its chain, however many flows it holds",
-		Edits:  []Edit{{linuxEgress, ",\n\t\t\tUserData: []byte(grantTag + formatRule(r))})", "})"}},
+		Edits:  []Edit{{linuxEgress, ",\n\t\t\tUserData: comment(grantTag + formatRule(r))})", "})"}},
+		Catch:  []string{"kernel"},
+	},
+	{
+		ID:     "unrecorded-grant-fails-observation",
+		Breaks: "a grant chain that records no flow reads as an empty grant, which the agent rewrites",
+		Edits:  []Edit{{linuxEgress, "\t\tif !ok || err != nil {\n\t\t\treturn nil, nil\n", "\t\tif !ok || err != nil {\n\t\t\treturn nil, fmt.Errorf(\"rule %d records %q\", r.Handle, r.UserData)\n"}},
+		Catch:  []string{"kernel"},
+	},
+	{
+		ID:     "egress-records-bare-text",
+		Breaks: "nft shows what an egress rule records as its comment",
+		Edits:  []Edit{{linuxEgress, "func comment(s string) []byte { return userdata.AppendString(nil, userdata.TypeComment, s) }", "func comment(s string) []byte { _ = userdata.TypeComment; return []byte(s) }"}},
 		Catch:  []string{"kernel"},
 	},
 	{

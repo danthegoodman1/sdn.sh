@@ -87,9 +87,12 @@ const (
 	ApplyRules      OpKind = "apply_rules"
 	Flush           OpKind = "flush"
 	Sweep           OpKind = "sweep"
-	DeleteDevice    OpKind = "delete_device"
-	SetEgress       OpKind = "set_egress"
-	Reap            OpKind = "reap"
+	// ReadSessions reports which of a device's peers it holds a session
+	// with, and changes nothing.
+	ReadSessions OpKind = "read_sessions"
+	DeleteDevice OpKind = "delete_device"
+	SetEgress    OpKind = "set_egress"
+	Reap         OpKind = "reap"
 )
 
 // Op is one kernel operation. Every operation is idempotent where the
@@ -146,6 +149,9 @@ type Result struct {
 	// Conntrack and Sockets count what a Flush removed.
 	Conntrack int `json:"conntrack,omitempty"`
 	Sockets   int `json:"sockets,omitempty"`
+	// Sessions lists, for ReadSessions, the peers a handshake has
+	// completed with.
+	Sessions []model.Key `json:"sessions,omitempty"`
 }
 
 // DeviceConfig creates a device.

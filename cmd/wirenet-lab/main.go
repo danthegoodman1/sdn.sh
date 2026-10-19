@@ -166,6 +166,7 @@ func runCmd(ctx context.Context, fs *flag.FlagSet, ef *envFlags, args []string) 
 	fs.IntVar(&o.Concurrency, "concurrency", 4, "churn: workers per host")
 	fs.IntVar(&o.MaxIfaces, "max-interfaces", 1000, "density: the cap")
 	fs.IntVar(&o.Edges, "edges", 12, "spread: edges streaming at once")
+	fs.IntVar(&o.MTU, "mtu", 1380, "overlay MTU of every network a plan creates, and of the paths plan's gateway")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

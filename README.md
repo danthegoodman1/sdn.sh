@@ -51,23 +51,28 @@ Nine c6i.xlarge instances (4 vCPU, up to 12.5 Gb/s) in one placement group in us
 
 Service changes ran under attach churn, with 30 clients over the four hosts. Ranges span two runs, and six for the rule changes.
 
+Throughput runs at an 8,941-byte overlay MTU, the most a VPC's 9,001-byte path carries under WireGuard. WireGuard's cost is per packet, so at the 1,380-byte default, which a path across the internet needs, throughput drops substantially: to a third on one edge, and to half across relays.
+
 | One edge, 8 streams | Throughput | Middle box busy | Traffic per CPU-second | Round trip p50, idle / loaded |
 |---|--:|--:|--:|--:|
-| Plain TCP | 12,410 Mb/s | | | 0.07 / 0.20 ms |
-| Through a relay | 2,394 Mb/s | 1.2 cores | 2.09 Gb | 0.22 / 4.8 ms |
-| Through a WireGuard gateway | 2,805 Mb/s | 3.0 cores | 0.94 Gb | 0.26 / 3.3 ms |
+| Plain TCP | 12,410 Mb/s | | | 0.07 / 0.15–0.21 ms |
+| Through a relay | 7,858–7,861 Mb/s | 1.6 cores | 5.00 Gb | 0.22 / 2.5–3.5 ms |
+| Through a WireGuard gateway | 6,678–7,308 Mb/s | 3.5–3.7 cores | 1.90–1.96 Gb | 0.25 / 11.3 ms |
+| Through a relay, 1,380-byte MTU | 2,535 Mb/s | 1.4 cores | 1.88 Gb | 0.22 / 4.1 ms |
 
-| Relays | 24 edges at once | Relay CPU busy | Receiving hosts' CPU busy |
+| Relays | 24 edges at once | Relay CPU busy, of 4 vCPUs | Receiving hosts' CPU busy, of 4 vCPUs |
 |--:|--:|--:|--:|
-| 1 | 6.2 Gb/s | 94% | 58–67% |
-| 2 | 14.1 Gb/s | 86–94% | 93–94% |
-| 3 | 14.5 Gb/s | 58–72% | 99% |
+| none, plain TCP | 24.8 Gb/s | | 46–56% |
+| 1 | 12.2 Gb/s | 85% | 84–91% |
+| 2 | 23.9–24.3 Gb/s | 67–83% | 99–100% |
+| 3 | 23.9–24.2 Gb/s | 33–71% | 100% |
+| 3, 1,380-byte MTU | 13.0 Gb/s | 54–91% | 96–100% |
 
-Each edge streams one TCP connection, from two sending hosts to two receiving hosts.
+Each edge streams one TCP connection, from two sending hosts to two receiving hosts; plain TCP runs the same pairs without the overlay. Ranges span three runs at 8,941 bytes, and one at 1,380.
 
 - **A dead relay costs an open connection 0.82 s.** Keys, sessions and conntrack live at the ends, so TCP retransmits across the switch and the connection carries on. Each edge the relay carried moves to its own next relay, so the survivors share its load.
-- **Relays add throughput until the hosts run out of CPU.** One relay fills its CPU at 6.2 Gb/s. Two carry 14.1 Gb/s, more than plain TCP between one pair of hosts. With three, the receiving hosts spend every core decrypting and the relays have CPU to spare.
-- **A relay costs less than half a gateway's CPU.** It forwards ciphertext, where a gateway decrypts and re-encrypts every byte. On one edge the gateway carries 17% more by using three cores; the relay reads each edge on one.
+- **Two relays carry what plain TCP does.** One relay fills its CPU at 12.2 Gb/s. Two carry 23.9–24.3 Gb/s, plain TCP's figure between the same hosts, and the receiving hosts spend every core on it, where plain TCP needs about half.
+- **A relay costs less than half a gateway's CPU.** It forwards ciphertext, where a gateway decrypts and re-encrypts every byte: 5.0 Gb per CPU-second against 2.0.
 - **A detach tells the control plane first.** Deleting a WireGuard device waits a grace period for each peer it holds: about a second under churn for a backend with 30 peers. Clients leave a departing backend while its device is deleted, which took a replacement from 1,037 ms to 27–48 ms.
 - **Short windows.** A c6i.xlarge's network bursts to 12.5 Gb/s above a lower baseline, so each throughput test runs 10 seconds.
 

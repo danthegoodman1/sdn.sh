@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"maps"
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -12,8 +13,10 @@ import (
 	"github.com/danthegoodman1/wirenet/internal/model"
 )
 
-// spreadRound is one relay set's run: every edge streaming at once.
+// spreadRound is one relay set's run: every edge streaming at once. The
+// plain round streams the same pairs over the hosts' own addresses.
 type spreadRound struct {
+	Plain  bool     `json:"plain,omitempty"`
 	Relays []string `json:"relays"`
 	// Edges counts the edges each relay carries by the edges' weights, with
 	// every relay up.
@@ -37,6 +40,8 @@ type spreadEdge struct {
 // then three, so a network's throughput can be read against its relay count.
 // Clients run on the first half of the hosts and servers on the rest, each
 // client streaming to its own server's address, so each stream is one edge.
+// The same streams first run as plain TCP between the hosts, which gives
+// the hosts' CPU per bit without the overlay.
 func planSpread(r *run) error {
 	if err := r.quickCeiling(); err != nil {
 		return err
@@ -60,6 +65,11 @@ func planSpread(r *run) error {
 		r.data("spread", rounds)
 		r.spreadTable(rounds)
 	}()
+	plain, err := r.plainSpread(senders, receivers)
+	if err != nil {
+		return err
+	}
+	rounds = append(rounds, plain)
 	for k := 1; k <= min(3, len(relays)); k++ {
 		set := relays[:k]
 		name := fmt.Sprintf("spread%d", k)
@@ -109,19 +119,20 @@ func planSpread(r *run) error {
 		}
 		round.Streams = make([]bench.Stream, len(edges))
 		cpus := make([]bench.CPU, len(set))
+		at := startAt()
 		var fns []func() error
 		for i, e := range edges {
 			fns = append(fns, func() error {
 				return r.bench(e.from, &round.Streams[i], "stream", "--target", port(e.srv.Addr6).String(), "--netns="+e.cli.Namespace,
-					"--duration", r.o.Duration.String(), "--parallel", "1")
+					"--duration", r.o.Duration.String(), "--parallel", "1", "--at", at)
 			})
 		}
 		for i, n := range set {
-			fns = append(fns, func() error { return r.bench(n, &cpus[i], "cpu", "--duration", r.o.Duration.String()) })
+			fns = append(fns, func() error { return r.bench(n, &cpus[i], "cpu", "--duration", r.o.Duration.String(), "--at", at) })
 		}
 		hcpus := make([]bench.CPU, len(hs))
 		for i, n := range hs {
-			fns = append(fns, func() error { return r.bench(n, &hcpus[i], "cpu", "--duration", r.o.Duration.String()) })
+			fns = append(fns, func() error { return r.bench(n, &hcpus[i], "cpu", "--duration", r.o.Duration.String(), "--at", at) })
 		}
 		if err := together(fns...); err != nil {
 			return err
@@ -149,6 +160,51 @@ func planSpread(r *run) error {
 		rounds = append(rounds, round)
 	}
 	return nil
+}
+
+// plainSpread streams the plan's edges as plain TCP between the hosts' own
+// addresses, each sender to the receiver the overlay rounds pair it with,
+// and reads every host's CPU over the same window.
+func (r *run) plainSpread(senders, receivers []Node) (spreadRound, error) {
+	round := spreadRound{Plain: true, Edges: map[string]int{}, Forwarded: map[string]float64{}, CPU: map[string]bench.CPU{}, HostCPU: map[string]bench.CPU{}}
+	r.logf("spread: plain TCP, %d streams", r.o.Edges)
+	for _, b := range receivers {
+		srv, err := r.serve(b, "", netip.AddrPortFrom(b.Addr, bench.Port), b.Name)
+		if err != nil {
+			return round, err
+		}
+		defer srv.Stop(r.ctx)
+		for _, a := range senders {
+			if _, err := r.reach(a, "", netip.AddrPortFrom(b.Addr, bench.Port), 10*time.Second); err != nil {
+				return round, err
+			}
+		}
+	}
+	hs := r.env.Hosts()
+	round.Streams = make([]bench.Stream, r.o.Edges)
+	hcpus := make([]bench.CPU, len(hs))
+	at := startAt()
+	var fns []func() error
+	for i := range r.o.Edges {
+		from, to := senders[i%len(senders)], receivers[i%len(receivers)]
+		fns = append(fns, func() error {
+			return r.bench(from, &round.Streams[i], "stream", "--target", netip.AddrPortFrom(to.Addr, bench.Port).String(), "--netns=",
+				"--duration", r.o.Duration.String(), "--parallel", "1", "--at", at)
+		})
+	}
+	for i, n := range hs {
+		fns = append(fns, func() error { return r.bench(n, &hcpus[i], "cpu", "--duration", r.o.Duration.String(), "--at", at) })
+	}
+	if err := together(fns...); err != nil {
+		return round, err
+	}
+	for _, s := range round.Streams {
+		round.BitsPerSecond += s.BitsPerSecond
+	}
+	for i, n := range hs {
+		round.HostCPU[n.Name] = hcpus[i]
+	}
+	return round, nil
 }
 
 func (r *run) spreadTable(rounds []spreadRound) {
@@ -180,9 +236,14 @@ func (r *run) spreadTable(rounds []spreadRound) {
 		for _, name := range slices.Sorted(maps.Keys(rd.HostCPU)) {
 			hosts = append(hosts, fmt.Sprintf("%s %ss", name, num(rd.HostCPU[name].Busy, 1)))
 		}
-		t.Rows = append(t.Rows, []string{itoa(len(rd.Relays)), strings.Join(edges, ", "), mbit(rd.BitsPerSecond), perCPU, strings.Join(cpu, ", "), strings.Join(hosts, ", ")})
+		relays, perRelay, relayCPU := itoa(len(rd.Relays)), strings.Join(edges, ", "), strings.Join(cpu, ", ")
+		if rd.Plain {
+			relays, perRelay, relayCPU = "none, plain TCP", "—", "—"
+		}
+		t.Rows = append(t.Rows, []string{relays, perRelay, mbit(rd.BitsPerSecond), perCPU, relayCPU, strings.Join(hosts, ", ")})
 	}
-	t.Caption = fmt.Sprintf("Every edge streams one TCP connection for %v at once, clients on the first half of the hosts and servers on the rest. "+
+	t.Caption = fmt.Sprintf("Every edge streams one TCP connection for %v, every stream and CPU sample starting at one wall-clock time, clients on the first half of the hosts and servers on the rest; "+
+		"the plain-TCP row runs the same pairs between the hosts' own addresses, with no overlay. "+
 		"Aggregate is the sum of what every server received. Edges per relay come from the edges' weights with every relay up; "+
 		"relay and host CPU is busy time from /proc/stat over the same window, so a machine with every CPU busy reads its CPU count times the window, and bits per relay CPU-second divide what the relays forwarded by the relays' busy time.", r.o.Duration)
 	r.rep.table(t)

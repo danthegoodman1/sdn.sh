@@ -56,7 +56,7 @@ func dryAWS(t *testing.T) (*awsEnv, *bytes.Buffer) {
 	return e, &out
 }
 
-var dryOptions = Options{Duration: 10 * time.Second, Streams: 8, RRSize: 1, Degree: 20, ChurnDegree: 4, Rounds: 10, Clients: 30, Concurrency: 4, MaxIfaces: 1000, Edges: 12}
+var dryOptions = Options{Duration: 10 * time.Second, Streams: 8, RRSize: 1, Degree: 20, ChurnDegree: 4, Rounds: 10, Clients: 30, Concurrency: 4, MaxIfaces: 1000, Edges: 12, MTU: 1380}
 
 func TestEveryPlanRunsDryAgainstAWS(t *testing.T) {
 	e, out := dryAWS(t)

@@ -21,7 +21,7 @@
 | `converge` | A service change under churn: a cold replacement of a backend, then removal of one of two warm backends, timed until every client's new connections reach the backend that stays. |
 | `failover` | Killing the relay an edge sends through, mid-flow: the established flow's stall and a new connection's wait. |
 | `density` | Interfaces on one host until an attach fails, attach latency degrades tenfold, or `--max-interfaces`. |
-| `spread` | `--edges` edges streaming at once through one relay, then two, then three: aggregate throughput, edges and CPU per relay, and each host's CPU, which shows when the endpoints rather than the relays bound the aggregate. Run it with `relay_count = 3` and an even `agent_count`, so clients and servers split the hosts evenly. |
+| `spread` | `--edges` edges streaming at once, first as plain TCP between the hosts, then through one relay, then two, then three: aggregate throughput, edges and CPU per relay, and each host's CPU, which shows when the endpoints rather than the relays bound the aggregate. Run it with `relay_count = 3` and an even `agent_count`, so clients and servers split the hosts evenly. |
 | `policy` | `--clients` sandboxes spread over the hosts dial a db that `* -> db` opens to every other service; times a `box -> db` deny from its commit until every sandbox's new connections fail, and its removal until they reach db again. |
 
 Every plan starts from a fresh fleet, measures the plain-TCP underlay ceiling in the same run, and purges the fleet afterwards. `wirenet-lab plans` lists them.
@@ -74,9 +74,11 @@ Each machine gets its role's binaries in `/usr/local/bin`, `hostprep.sh` and `pu
 ## Run a plan
 
 ```console
-bin/wirenet-lab run --env aws --tf-output fleet.json --ssh-key ~/.ssh/wirenet-bench --plan paths
+bin/wirenet-lab run --env aws --tf-output fleet.json --ssh-key ~/.ssh/wirenet-bench --plan paths --mtu 8941
 bin/wirenet-lab run --env aws --tf-output fleet.json --ssh-key ~/.ssh/wirenet-bench --plan all --deploy
 ```
+
+`--mtu` sets the overlay MTU of every network a plan creates and of the paths plan's gateway; it defaults to 1380. Within a VPC, whose path carries 9001 bytes, 8941 is the most WireGuard's 60 bytes over IPv4 leave. The throughput plans start every stream and CPU sample of a window at one wall-clock time, a few seconds ahead, so their figures cover the same interval on every machine.
 
 Before each plan `wirenet-lab` purges every machine, empties the control plane's database, registers the relays and hosts, writes their credentials and flags, and starts the daemons; after it, it purges again. `bin/wirenet-lab purge` does the purge alone.
 

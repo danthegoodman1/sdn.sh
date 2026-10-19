@@ -21,7 +21,11 @@ const userHZ = 100
 func cpu(args []string) error {
 	fs := flag.NewFlagSet("cpu", flag.ContinueOnError)
 	duration := fs.Duration("duration", 10*time.Second, "how long to sample")
+	at := fs.String("at", "", "start sampling at this RFC 3339 time")
 	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if err := startAt(*at); err != nil {
 		return err
 	}
 	before, cpus, err := readStat()

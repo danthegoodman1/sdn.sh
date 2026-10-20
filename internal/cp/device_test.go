@@ -30,7 +30,7 @@ func (f *fixture) gateway(host, net, svc string) store.Interface {
 	var i store.Interface
 	f.update(func(tx store.Tx) error {
 		var err error
-		i, err = f.p.Attach(tx, f.now, f.hosts[host], api.AttachRequest{
+		i, _, err = f.p.Attach(tx, f.now, f.hosts[host], api.AttachRequest{
 			Interface: model.InterfaceID(id), Network: net, Service: svc, Kind: api.Gateway,
 			PublicKey: priv.Public(), ListenPort: 51820,
 		})
@@ -310,7 +310,7 @@ func TestADeviceEndsWithItsGateway(t *testing.T) {
 				// becomes no machine's gateway.
 				priv, _ := model.NewPrivateKey(f.rng)
 				f.update(func(tx store.Tx) error {
-					_, err := f.p.Attach(tx, f.now, f.host("other"), api.AttachRequest{
+					_, _, err := f.p.Attach(tx, f.now, f.host("other"), api.AttachRequest{
 						Interface: gw.ID, Network: "shop", Service: "edge", Kind: api.Gateway, PublicKey: priv.Public(), ListenPort: 1,
 					})
 					return err

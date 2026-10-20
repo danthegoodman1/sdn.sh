@@ -92,6 +92,8 @@ var plans = []plan{
 		true, []string{"duration", "edges", "mtu"}, planSpread},
 	{"policy", "open a service to every other with a wildcard, then time a deny closing it to one service's clients, and the deny's removal",
 		true, []string{"clients"}, planPolicy},
+	{"members", "a three-member etcd cluster in one service, each member holding its name; move one member to another host each round, timing its name, health and catching up, and checking the replaced holder reaches no peer",
+		true, []string{"rounds"}, planMembers},
 }
 
 func findPlans(spec string) ([]plan, error) {

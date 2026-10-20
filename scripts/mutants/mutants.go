@@ -36,6 +36,9 @@ const (
 	modelGo      = "internal/model/model.go"
 	policyGo     = "internal/compile/policy.go"
 	agentFDStore = "internal/agent/resolver/fdstore.go"
+	dnsGo        = "internal/dns/dns.go"
+	memStore     = "internal/store/mem/mem.go"
+	pgQueries    = "internal/store/pgstore/db/interfaces.sql.go"
 )
 
 // Code that more than one edit moves or matches.
@@ -133,7 +136,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "relay-core-commits-on-verify",
 		Breaks: "a verified registration moves no endpoint until the shell has made it durable and calls Commit",
-		Edits:  []Edit{{relayCore, "return Decision{Verdict: Register, Registration: r}", "t.Commit(r)\n\t\treturn Decision{Verdict: Register, Registration: r}"}},
+		Edits:  []Edit{{relayCore, "return Decision{Verdict: Register, Registration: r}", "t.Commit(now, r)\n\t\treturn Decision{Verdict: Register, Registration: r}"}},
 		Catch:  []string{"relay-core", "relay-server"},
 	},
 	{
@@ -579,7 +582,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "relay-drops-what-races-the-peer",
 		Breaks: "a packet that reaches a bound port before the peer direction registers waits for that registration instead of dropping",
-		Edits:  []Edit{{relayCore, "if ok && t.wait(now, d, src, len(b)) {", "if false && t.wait(now, d, src, len(b)) {"}},
+		Edits:  []Edit{{relayCore, "if ok && t.wait(now, d, src, b) {", "if false && t.wait(now, d, src, b) {"}},
 		Catch:  []string{"relay-core"},
 	},
 	{
@@ -980,5 +983,143 @@ var Mutants = []Mutant{
 		Breaks: "a wildcard rule's scope lists each pair within its service once",
 		Edits:  []Edit{{cpEdges, "case j == i || j < i && y.Service == s.service:", "case j == i:"}},
 		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "member-conflict-unchecked",
+		Breaks: "an attach naming a held member fails with a conflict unless it replaces the holder",
+		Edits:  []Edit{{cpPlane, "case !req.Replace:", "case false:"}},
+		Catch:  []string{"cp", "e2e"},
+	},
+	{
+		ID:     "replace-leaves-holder-live",
+		Breaks: "a replacing attach revokes the member's holder in its own transaction",
+		Edits:  []Edit{{cpPlane, "if err := p.Revoke(tx, now, holder.ID); err != nil {", "if err := error(nil); err != nil {"}},
+		Catch:  []string{"cp", "e2e"},
+	},
+	{
+		ID:     "replace-drains-holder",
+		Breaks: "a replaced holder is revoked, so it reaches no peer once hosts converge, rather than draining",
+		Edits:  []Edit{{cpPlane, "if err := p.Revoke(tx, now, holder.ID); err != nil {", "if err := p.Release(tx, now, holder.Host, []model.InterfaceID{holder.ID}); err != nil {"}},
+		Catch:  []string{"cp", "e2e"},
+	},
+	{
+		ID:     "member-label-unchecked",
+		Breaks: "a member name is a DNS label",
+		Edits:  []Edit{{cpPlane, `req.Member != "" && (kind != api.Workload || !ValidName(req.Member))`, `req.Member != "" && kind != api.Workload`}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "gateway-holds-member",
+		Breaks: "only workloads hold member names",
+		Edits:  []Edit{{cpPlane, `req.Member != "" && (kind != api.Workload || !ValidName(req.Member))`, `req.Member != "" && !ValidName(req.Member)`}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "store-holder-counts-ended",
+		Breaks: "an ended interface holds no member name, in the memory store",
+		Edits:  []Edit{{memStore, `return member != "" && i.State == api.Live && i.Service == svc && i.Member == member`, `return member != "" && i.Service == svc && i.Member == member`}},
+		Catch:  []string{"store", "cp"},
+	},
+	{
+		ID:     "pg-holder-counts-ended",
+		Breaks: "an ended interface holds no member name, in Postgres",
+		Edits:  []Edit{{pgQueries, "WHERE service = $1 AND member = $2 AND state = 'live' AND member <> ''", "WHERE service = $1 AND member = $2 AND member <> ''"}},
+		Catch:  []string{"pgstore"},
+	},
+	{
+		ID:     "backend-name-unset",
+		Breaks: "a client's state names each member it reaches",
+		Edits:  []Edit{{compileGo, "Interface: i.ID, Addr6: i.Addr6, Addr4: i.Addr4, Name: memberName(i, services),", "Interface: i.ID, Addr6: i.Addr6, Addr4: i.Addr4,"}},
+		Catch:  []string{"cp", "sim", "e2e"},
+	},
+	{
+		ID:     "own-name-unset",
+		Breaks: "a member's own state carries its name",
+		Edits:  []Edit{{compileGo, "Name:       memberName(x, services),", ""}},
+		Catch:  []string{"cp", "sim", "e2e"},
+	},
+	{
+		ID:     "ended-holder-keeps-name",
+		Breaks: "an interface names itself only while it holds its name",
+		Edits:  []Edit{{compileGo, `if i.Member == "" || i.State != api.Live || !ok {`, `if i.Member == "" || !ok {`}},
+		Catch:  []string{"cp", "sim"},
+	},
+	{
+		ID:     "zone-skips-members",
+		Breaks: "a resolver answers the members of every service its interface reaches",
+		Edits:  []Edit{{dnsGo, "\t\t\t\tadd(b.Name, b.Addr6, b.Addr4)\n", ""}},
+		Catch:  []string{"dns", "sim", "e2e"},
+	},
+	{
+		ID:     "zone-skips-own-name",
+		Breaks: "a member's resolver answers its own name, whatever it reaches",
+		Edits:  []Edit{{dnsGo, "\tif x.Name != \"\" {\n", "\tif false {\n"}},
+		Catch:  []string{"dns", "sim", "e2e"},
+	},
+	{
+		ID:     "zone-a-for-ipv6-client",
+		Breaks: "a client without IPv4 receives no A record, for a service or a member",
+		Edits:  []Edit{{dnsGo, "if x.Addr4.IsValid() && addr4.IsValid() {", "if addr4.IsValid() {"}},
+		Catch:  []string{"dns", "sim"},
+	},
+	{
+		ID:     "name-above-member-missing",
+		Breaks: "a name above a member's exists, with no records",
+		Edits:  []Edit{{dnsGo, "if z.above(name) {", "if false {"}},
+		Catch:  []string{"dns"},
+	},
+	{
+		ID:     "agent-drops-member",
+		Breaks: "the agent asks the control plane for the member and replacement its caller named",
+		Edits:  []Edit{{agentLife, "PublicKey: i.pub, ListenPort: i.port, Member: i.member, Replace: i.replace,", "PublicKey: i.pub, ListenPort: i.port,"}},
+		Catch:  []string{"agent-core", "e2e"},
+	},
+	{
+		ID:     "agent-ignores-member-change",
+		Breaks: "a workload attached again keeps the member it holds",
+		Edits:  []Edit{{agentLife, `if i.netRef != "" && i.member != a.Member {`, `if false {`}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "answer-omits-member-name",
+		Breaks: "an attach answer names the member's full name",
+		Edits:  []Edit{{agentLife, "\t\tif x.Name != \"\" {\n", "\t\tif false {\n"}},
+		Catch:  []string{"agent-core", "e2e"},
+	},
+	{
+		ID:     "crossed-initiation-forwarded",
+		Breaks: "an initiation that crosses its peer's as the edge forms is dropped, so the two ends handshake once",
+		Edits:  []Edit{{relayCore, "if kind == wgInitiation && t.crossed(now, d, peer) {", "if false {"}},
+		Catch:  []string{"relay-core", "e2e"},
+	},
+	{
+		ID:     "held-initiations-released-together",
+		Breaks: "of two directions' initiations one registration releases, only one goes",
+		Edits:  []Edit{{relayCore, "if w.kind == wgInitiation && t.crossed(now, b.d, b.peer) {", "if false {"}},
+		Catch:  []string{"relay-core", "e2e"},
+	},
+	{
+		ID:     "held-initiations-unordered",
+		Breaks: "of two directions' held initiations, the one that waited longer goes",
+		Edits:  []Edit{{relayCore, "slices.SortStableFunc(batches, func(a, b batch) int {", "slices.SortStableFunc(batches[:0], func(a, b batch) int {"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "crossing-judged-always",
+		Breaks: "the relay judges crossings only as a direction gains an endpoint, so a forged initiation suppresses the other end's that long at most",
+		Edits:  []Edit{{relayCore, "(within(d.opened) || within(peer.opened)) && within(peer.initiated) &&", "within(peer.initiated) &&"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "answered-end-crosses",
+		Breaks: "an initiation from an end that answered the peer's crosses nothing",
+		Edits:  []Edit{{relayCore, "!d.answered.After(peer.initiated)", "true"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "response-unrecorded",
+		Breaks: "the relay records a handshake response as its end answering",
+		Edits:  []Edit{{relayCore, "k == wgInitiation && len(b) == 148 || k == wgResponse && len(b) == 92", "k == wgInitiation && len(b) == 148"}},
+		Catch:  []string{"relay-core"},
 	},
 }

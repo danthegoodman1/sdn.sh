@@ -123,7 +123,7 @@ func (c *portCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(portBytes, prometheus.CounterValue, float64(d.Stats.Bytes), port)
 		for reason, n := range map[string]uint64{
 			"unregistered_sender": d.Stats.Unregistered, "peer_unregistered": d.Stats.PeerAbsent,
-			"rate_limited": d.Stats.Limited, "bad_mac": d.Stats.BadMAC, "replay": d.Stats.Replayed,
+			"rate_limited": d.Stats.Limited, "bad_mac": d.Stats.BadMAC, "replay": d.Stats.Replayed, "crossed_initiation": d.Stats.Crossed,
 		} {
 			ch <- prometheus.MustNewConstMetric(portDropped, prometheus.CounterValue, float64(n), port, reason)
 		}

@@ -642,3 +642,49 @@ Status ledger:
 | Complete | Work | 12E: Review 1's findings | A withdrawal follows state rather than a batch's operations, so a removal that failed partway is withdrawn (12A); an installed relay peer whose secret or relay ports change claims at once (`TestAnInstalledRelayPeerWhoseSecretOrRelaysChangeClaimsAtOnce`); relays acknowledge resent withdrawals they hold (12C); withdrawal resends wake by the earliest due, their acknowledgments ask for no pass over the namespaces, and tracking copies a peer's relay ports only when they change. Recorded: an agent down across a dormancy learns no secret to withdraw with, and pays at most one handshake retry (SPEC.md "The relay"). Mutants `named-peer-withdrawn`, `changed-secret-unclaimed`, `withdrawal-resend-unscheduled`, `withdrawal-ack-replans`, `resent-withdrawal-unanswered`, `resent-withdrawal-spends-rejects`. |
 | Complete | Gate | High-effort code review, findings fixed or recorded | Review 1 of 583f0c9: ten findings, nine fixed in be6cf34 and one recorded (12E). |
 | Complete | Gate | CI passes on the pull request | [#2](https://github.com/danthegoodman1/wirenet/pull/2): `kernel`, `simulate`, `terraform` and `test` passed at 2c8e35b (run 39284279205). |
+
+## Phase 13: Named members
+
+Goal:
+A service's members can hold stable names, so software whose members address each other one by one, such as etcd or a database's replicas, runs as one service and keeps its configuration when a member moves to another host.
+
+Scope:
+- An attach may name a member of its service: a DNS label. `<member>.<service>.<network>.internal` resolves to the holder's own interface addresses wherever the service's name resolves, and in the holder's own namespace.
+- At most one live interface holds a member name. An attach naming a held member fails with a conflict; `replace` revokes the holder and hands over the name in the same transaction. Only workloads hold names.
+- A name frees when its holder's lease ends, by release, revocation or expiry, so a draining interface holds none.
+- Members inherit their service's policy. Rules keep naming services, and the service address keeps spreading connections over every backend.
+- The API, CLI, local agent API, memory and Postgres stores carry the member; Postgres takes a migration with a partial unique index over live holders.
+- Listing interfaces shows each one's member, and an attach answer names the member's full name.
+
+Out of scope:
+- A stable address per member that outlives its holder, for software that caches a resolved address past its TTL.
+- Rules naming a single member.
+- SRV records listing a service's members.
+- Members for gateways and development machines.
+
+Completion gate:
+Names resolve as SPEC.md states; the simulator draws members and replacements and its oracle checks every namespace's answers against the orchestrator's record; the 10,000-seed sweep passes; every planted bug is caught; the end-to-end suite asserts in each family that a member's name follows a replacement and that the replaced holder no longer reaches its peers; an etcd cluster keeps its data across a member moving hosts, locally and on EC2; a high-effort code review's findings are fixed or recorded; CI passes on the pull request.
+
+Testing plan:
+- Unit: label validation, the conflict, replacement in one transaction, a draining holder, an attach retried with `replace`, and the resolver's member records in each family and for the holder's own name.
+- Stores: the holder lookup and the unique index, on memory and Postgres, and the migration.
+- Simulator: the orchestrator attaches members and replaces holders on a stream of its own; the oracle checks that no two live interfaces hold one name and that each namespace's zone answers every member it reaches with its holder's addresses.
+- Planted bugs: each rule above.
+- End to end: three members resolve each other in IPv6 and IPv4; a replacement on another host moves the name; the replaced holder fails to reach a peer; a conflicting attach fails.
+- Lab: `wirenet-lab --plan members` runs a three-member etcd cluster, moves one member to another host with `replace`, and measures how long the name and the cluster take to follow, locally and on EC2.
+
+Status ledger:
+
+| Status | Type | Item | Evidence / Gap |
+| --- | --- | --- | --- |
+| Incomplete | Work | 13A: Member names in the API, CLI, agent and stores | Missing: `AttachRequest.Member` and `Replace`, `wirenetctl attach --member --replace`, the store column and migration, and tests on both stores. |
+| Incomplete | Work | 13B: One live holder per name, and replacement | Missing: the conflict, replacement in one transaction, and the holder lookup, with unit tests and planted bugs. |
+| Incomplete | Work | 13C: The resolver answers members | Missing: member records in compiled state and in each zone, per family, and the holder's own name, with unit tests and planted bugs. |
+| Incomplete | Test | 13D: The simulator draws members and checks every zone | Missing: orchestrator draws, the oracle's checks, and a sweep. |
+| Incomplete | Test | 13E: End-to-end name, replacement and fence, in each family | Missing: an end-to-end test. |
+| Incomplete | Test | 13F: An etcd member moves hosts, locally and on EC2 | Missing: `wirenet-lab --plan members` and its reports. |
+| Incomplete | Test | Planted bugs for each rule | Missing: mutants and a run catching them all. |
+| Incomplete | Test | 10,000-seed simulator sweep | Missing: a sweep at the phase's head. |
+| Incomplete | Doc | SPEC.md and README.md describe named members | Missing: both. |
+| Incomplete | Gate | High-effort code review, findings fixed or recorded | Missing: the review. |
+| Incomplete | Gate | CI passes on the pull request | Missing: the pull request. |

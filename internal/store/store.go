@@ -22,8 +22,9 @@ var (
 	// ErrNotFound reports a lookup that matched no record.
 	ErrNotFound = errors.New("not found")
 	// ErrConflict reports a put that would break a uniqueness rule: two
-	// networks, hosts or relays with one name, or two services with one
-	// name in a network.
+	// networks, hosts or relays with one name, two services with one name
+	// in a network, or two live interfaces holding one member name of a
+	// service.
 	ErrConflict = errors.New("conflict")
 )
 
@@ -83,6 +84,8 @@ type ReadTx interface {
 	Interfaces(model.NetworkID) ([]Interface, error)
 	// HostInterfaces lists a host's interfaces in every state.
 	HostInterfaces(model.HostID) ([]Interface, error)
+	// Holder finds the live interface holding a member name of a service.
+	Holder(svc model.ServiceID, member string) (Interface, error)
 	// Expired lists up to limit live interfaces whose lease expired before
 	// t, soonest expiry first.
 	Expired(t time.Time, limit int) ([]Interface, error)
@@ -218,6 +221,9 @@ type Interface struct {
 	// Drained marks an ended interface whose peers no longer hold it: a
 	// revoked one at once, a released one once its grace period ends.
 	Drained bool `json:"drained,omitempty"`
+	// Member is a name among its service's members, which the interface
+	// holds while it is live.
+	Member string `json:"member,omitempty"`
 }
 
 // Rule allows or denies flows from a service to a service or the internet.

@@ -631,39 +631,65 @@ func (p *Plane) DeleteRelay(tx store.Tx, ref string) (store.Relay, error) {
 
 // Attach issues an interface and its lease to a host. The agent chose the
 // interface's identifier, so attaching the same identifier again with the
-// same key returns the interface already issued.
-func (p *Plane) Attach(tx store.Tx, now time.Time, host model.HostID, req api.AttachRequest) (store.Interface, error) {
+// same key returns the interface already issued. An attach naming a member
+// its service's live interface holds fails, unless it replaces the holder:
+// Attach then revokes the holder and returns its identifier.
+func (p *Plane) Attach(tx store.Tx, now time.Time, host model.HostID, req api.AttachRequest) (store.Interface, model.InterfaceID, error) {
 	if !strings.HasPrefix(string(req.Interface), model.InterfacePrefix) || len(req.Interface) <= len(model.InterfacePrefix) {
-		return store.Interface{}, apiErr(api.CodeInvalid, "interface identifier %q must start with %s", req.Interface, model.InterfacePrefix)
+		return store.Interface{}, "", apiErr(api.CodeInvalid, "interface identifier %q must start with %s", req.Interface, model.InterfacePrefix)
 	}
 	if req.PublicKey.IsZero() || req.ListenPort == 0 {
-		return store.Interface{}, apiErr(api.CodeInvalid, "attach needs a public key and a listen port")
+		return store.Interface{}, "", apiErr(api.CodeInvalid, "attach needs a public key and a listen port")
 	}
 	if existing, err := tx.Interface(req.Interface); err == nil {
 		if existing.Host == host && existing.PublicKey == req.PublicKey && existing.State == api.Live {
-			return existing, nil
+			return existing, "", nil
 		}
-		return store.Interface{}, apiErr(api.CodeConflict, "interface %s already exists", req.Interface)
+		return store.Interface{}, "", apiErr(api.CodeConflict, "interface %s already exists", req.Interface)
 	} else if !errors.Is(err, store.ErrNotFound) {
-		return store.Interface{}, err
+		return store.Interface{}, "", err
 	}
 	kind := req.Kind
 	if kind == "" {
 		kind = api.Workload
 	}
 	if kind != api.Workload && kind != api.Gateway {
-		return store.Interface{}, apiErr(api.CodeInvalid, "an agent attaches workloads and gateways, not %q", kind)
+		return store.Interface{}, "", apiErr(api.CodeInvalid, "an agent attaches workloads and gateways, not %q", kind)
+	}
+	if req.Member != "" && (kind != api.Workload || !ValidName(req.Member)) {
+		return store.Interface{}, "", apiErr(api.CodeInvalid, "member %q must be a DNS label, held by a workload", req.Member)
 	}
 	n, err := ResolveNetwork(tx, req.Network)
 	if err != nil {
-		return store.Interface{}, err
+		return store.Interface{}, "", err
 	}
 	svc, err := ResolveService(tx, n.ID, req.Service)
 	if err != nil {
-		return store.Interface{}, err
+		return store.Interface{}, "", err
 	}
 	if _, err := tx.Host(host); err != nil {
-		return store.Interface{}, notFound(err, "host "+string(host))
+		return store.Interface{}, "", notFound(err, "host "+string(host))
+	}
+	var replaced model.InterfaceID
+	if req.Member != "" {
+		holder, err := tx.Holder(svc.ID, req.Member)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+		case err != nil:
+			return store.Interface{}, "", err
+		case !req.Replace:
+			return store.Interface{}, "", apiErr(api.CodeConflict, "member %s of %s is held by %s", req.Member, svc.Name, holder.ID)
+		default:
+			// Revoking removes the holder from every peer at once, so it
+			// reaches nothing once hosts converge on this revision.
+			if err := p.Revoke(tx, now, holder.ID); err != nil {
+				return store.Interface{}, "", err
+			}
+			replaced = holder.ID
+			if n, err = tx.Network(n.ID); err != nil {
+				return store.Interface{}, "", err
+			}
+		}
 	}
 	iface := store.Interface{
 		ID:         req.Interface,
@@ -676,20 +702,21 @@ func (p *Plane) Attach(tx store.Tx, now time.Time, host model.HostID, req api.At
 		State:      api.Live,
 		Expires:    now.Add(p.Config.LeaseTTL),
 		Created:    now,
+		Member:     req.Member,
 	}
 	iface.Addr6 = alloc6(&n)
 	if svc.IPv4 {
 		if iface.Addr4, err = p.alloc4(tx, &n, now); err != nil {
-			return store.Interface{}, err
+			return store.Interface{}, "", err
 		}
 	}
 	if err := tx.PutInterface(iface); err != nil {
-		return store.Interface{}, err
+		return store.Interface{}, "", err
 	}
 	if err := p.reconcileEdges(tx, now, &n, interfaceScope(iface.ID)); err != nil {
-		return store.Interface{}, err
+		return store.Interface{}, "", err
 	}
-	return iface, bump(tx, now, &n, host)
+	return iface, replaced, bump(tx, now, &n, host)
 }
 
 // MaxDeviceTTL bounds a development machine's lease term.

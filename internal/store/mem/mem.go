@@ -194,6 +194,14 @@ func (t *tx) Interfaces(net model.NetworkID) ([]store.Interface, error) {
 func (t *tx) HostInterfaces(host model.HostID) ([]store.Interface, error) {
 	return t.interfaces.scan(func(i store.Interface) bool { return i.Host == host }), nil
 }
+func (t *tx) Holder(svc model.ServiceID, member string) (store.Interface, error) {
+	return first(t.interfaces.scan(func(i store.Interface) bool { return holds(i, svc, member) }))
+}
+
+// holds reports whether i is the live holder of a service's member name.
+func holds(i store.Interface, svc model.ServiceID, member string) bool {
+	return member != "" && i.State == api.Live && i.Service == svc && i.Member == member
+}
 func (t *tx) Expired(at time.Time, limit int) ([]store.Interface, error) {
 	out := t.interfaces.scan(func(i store.Interface) bool { return i.State == api.Live && i.Expires.Before(at) })
 	slices.SortStableFunc(out, func(a, b store.Interface) int { return a.Expires.Compare(b.Expires) })
@@ -295,7 +303,15 @@ func (t *tx) PutService(s store.Service) error {
 }
 func (t *tx) DeleteService(id model.ServiceID) error { t.services.delete(id); return nil }
 
-func (t *tx) PutInterface(i store.Interface) error { t.interfaces.set(i.ID, i); return nil }
+func (t *tx) PutInterface(i store.Interface) error {
+	if holds(i, i.Service, i.Member) && dup(t.interfaces.scan(func(o store.Interface) bool {
+		return o.ID != i.ID && holds(o, i.Service, i.Member)
+	})) {
+		return store.ErrConflict
+	}
+	t.interfaces.set(i.ID, i)
+	return nil
+}
 func (t *tx) DeleteInterface(id model.InterfaceID) error {
 	t.interfaces.delete(id)
 	return nil

@@ -133,7 +133,7 @@ func (f *fixture) attach(host, net, svc string) (store.Interface, model.Key) {
 	h := f.host(host)
 	f.update(func(tx store.Tx) error {
 		var err error
-		i, err = f.p.Attach(tx, f.now, h, api.AttachRequest{
+		i, _, err = f.p.Attach(tx, f.now, h, api.AttachRequest{
 			Interface: model.InterfaceID(id), Network: net, Service: svc,
 			PublicKey: priv.Public(), ListenPort: uint16(40000 + f.rng.Below(1000)),
 		})
@@ -330,7 +330,7 @@ func TestAnIPv6OnlyServiceDrawsNothingFromTheIPv4Pool(t *testing.T) {
 		f.service("n", "four", true)
 		f.attach("h", "n", "four")
 		err := f.tryUpdate(func(tx store.Tx) error {
-			_, err := f.p.Attach(tx, f.now, f.host("h"), api.AttachRequest{
+			_, _, err := f.p.Attach(tx, f.now, f.host("h"), api.AttachRequest{
 				Interface: "if-extra", Network: "n", Service: "four", PublicKey: model.Key{1}, ListenPort: 1,
 			})
 			return err
@@ -381,7 +381,7 @@ func TestAnIPv4AddressWaitsOutItsQuarantineFromItsHoldersDrain(t *testing.T) {
 			var i store.Interface
 			err := f.tryUpdate(func(tx store.Tx) error {
 				var err error
-				i, err = f.p.Attach(tx, at, f.host("h"), api.AttachRequest{
+				i, _, err = f.p.Attach(tx, at, f.host("h"), api.AttachRequest{
 					Interface: model.InterfaceID(fmt.Sprintf("if-at%d", at.Unix())), Network: "n", Service: "a",
 					PublicKey: model.Key{9}, ListenPort: 9,
 				})
@@ -633,7 +633,7 @@ func TestReleasedPortsWaitOutTheirQuarantine(t *testing.T) {
 		}
 		f.update(func(tx store.Tx) error { return f.p.Revoke(tx, f.now, as[0].ID) })
 		err := f.tryUpdate(func(tx store.Tx) error {
-			_, err := f.p.Attach(tx, f.now.Add(time.Minute), f.host("h0"), api.AttachRequest{
+			_, _, err := f.p.Attach(tx, f.now.Add(time.Minute), f.host("h0"), api.AttachRequest{
 				Interface: "if-late", Network: "n", Service: "a", PublicKey: model.Key{3}, ListenPort: 3,
 			})
 			return err
@@ -642,7 +642,7 @@ func TestReleasedPortsWaitOutTheirQuarantine(t *testing.T) {
 			t.Fatal("reused a relay port inside its quarantine")
 		}
 		f.update(func(tx store.Tx) error {
-			_, err := f.p.Attach(tx, f.now.Add(f.p.Config.PortQuarantine+time.Second), f.host("h0"), api.AttachRequest{
+			_, _, err := f.p.Attach(tx, f.now.Add(f.p.Config.PortQuarantine+time.Second), f.host("h0"), api.AttachRequest{
 				Interface: "if-later", Network: "n", Service: "a", PublicKey: model.Key{4}, ListenPort: 4,
 			})
 			return err
@@ -658,13 +658,13 @@ func TestAttachIsIdempotentForTheSameKey(t *testing.T) {
 		h := f.host("h")
 		req := api.AttachRequest{Interface: "if-same", Network: "n", Service: "a", PublicKey: model.Key{7}, ListenPort: 7}
 		var first, second store.Interface
-		f.update(func(tx store.Tx) error { var err error; first, err = f.p.Attach(tx, f.now, h, req); return err })
-		f.update(func(tx store.Tx) error { var err error; second, err = f.p.Attach(tx, f.now, h, req); return err })
+		f.update(func(tx store.Tx) error { var err error; first, _, err = f.p.Attach(tx, f.now, h, req); return err })
+		f.update(func(tx store.Tx) error { var err error; second, _, err = f.p.Attach(tx, f.now, h, req); return err })
 		if first.Addr6 != second.Addr6 {
 			t.Fatalf("retried attach got a second address %v, then %v", first.Addr6, second.Addr6)
 		}
 		req.PublicKey = model.Key{8}
-		if err := f.tryUpdate(func(tx store.Tx) error { _, err := f.p.Attach(tx, f.now, h, req); return err }); err == nil {
+		if err := f.tryUpdate(func(tx store.Tx) error { _, _, err := f.p.Attach(tx, f.now, h, req); return err }); err == nil {
 			t.Fatal("a second key took over an interface")
 		}
 	})

@@ -45,6 +45,7 @@ type Interface struct {
 	Created    time.Time
 	Ended      time.Time
 	Drained    bool
+	Member     string
 }
 
 type Meta struct {

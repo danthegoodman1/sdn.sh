@@ -41,12 +41,17 @@ func tableWith(cfg Config) *Table {
 
 func register(t *testing.T, tb *Table, port netip.AddrPort, key model.Secret, advertised, src netip.AddrPort, counter uint64) bool {
 	t.Helper()
+	return registerAt(t, tb, t0, port, key, advertised, src, counter)
+}
+
+func registerAt(t *testing.T, tb *Table, at time.Time, port netip.AddrPort, key model.Secret, advertised, src netip.AddrPort, counter uint64) bool {
+	t.Helper()
 	b := regproto.Encode(key, advertised, counter)
-	d := tb.Packet(t0, port, src, b[:])
+	d := tb.Packet(at, port, src, b[:])
 	if d.Verdict != Register {
 		return false
 	}
-	return tb.Commit(d.Registration)
+	return tb.Commit(at, d.Registration)
 }
 
 func TestForwardingNeedsBothSidesRegistered(t *testing.T) {
@@ -144,7 +149,7 @@ func TestARaceIsWonOnce(t *testing.T) {
 	if first.Verdict != Register || second.Verdict != Register {
 		t.Fatal("both copies should verify before either commits")
 	}
-	if !tb.Commit(first.Registration) || tb.Commit(second.Registration) {
+	if !tb.Commit(t0, first.Registration) || tb.Commit(t0, second.Registration) {
 		t.Fatal("the replayed copy committed")
 	}
 	if dir, _ := tb.Dir(portAB); dir.Endpoint != senderA {
@@ -189,7 +194,7 @@ func TestAWithdrawalOutranksTheClaimSentBeforeIt(t *testing.T) {
 		}
 		for _, b := range order {
 			if d := tb.Packet(t0, portBA, senderB, b[:]); d.Verdict == Register {
-				tb.Commit(d.Registration)
+				tb.Commit(t0, d.Registration)
 			}
 		}
 		if dir, _ := tb.Dir(portBA); dir.Endpoint.IsValid() || dir.Counter != 12 {
@@ -236,7 +241,7 @@ func TestTheHighestCounterDecidesTheEndpoint(t *testing.T) {
 				b = regproto.EncodeWithdrawal(keyBA, advBA, r.counter)
 			}
 			if d := tb.Packet(t0, portBA, r.from, b[:]); d.Verdict == Register {
-				tb.Commit(d.Registration)
+				tb.Commit(t0, d.Registration)
 			}
 			if r.counter > top {
 				top, want = r.counter, r.from
@@ -268,7 +273,7 @@ func TestAResentWithdrawalIsAcknowledgedAgain(t *testing.T) {
 	tb := tableWith(Config{RejectRate: 1})
 	register(t, tb, portBA, keyBA, advBA, senderB, 10)
 	w := regproto.EncodeWithdrawal(keyBA, advBA, 11)
-	if d := tb.Packet(t0, portBA, senderB, w[:]); d.Verdict != Register || !tb.Commit(d.Registration) {
+	if d := tb.Packet(t0, portBA, senderB, w[:]); d.Verdict != Register || !tb.Commit(t0, d.Registration) {
 		t.Fatalf("the withdrawal: %+v", d)
 	}
 	for range 3 {
@@ -471,7 +476,7 @@ func TestFailedVerificationsAreCappedAcrossTheRelay(t *testing.T) {
 }
 
 func waitTable() *Table {
-	t := New(Config{WaitFor: 2 * time.Second, WaitMax: 2, WaitTotal: 16})
+	t := New(Config{WaitFor: 2 * time.Second, WaitMax: 2, WaitTotal: 16, CrossWithin: time.Second})
 	t.Load(api.RelayState{Generation: 1, Ports: []api.RelayPort{
 		{Local: portAB, Peer: 7002, Advertised: advAB, Key: keyAB},
 		{Local: portBA, Peer: 7001, Advertised: advBA, Key: keyBA},
@@ -512,6 +517,153 @@ func TestAPacketThatRacesThePeerDirectionWaitsForIt(t *testing.T) {
 	rel := tb.Release(t0)
 	if len(rel) != 1 || rel[0].Token != first.Token || rel[0].Drop || rel[0].From != portBA || rel[0].To != senderB {
 		t.Fatalf("after the peer registered: %+v", rel)
+	}
+}
+
+// handshake is a WireGuard handshake initiation's size and type, and data
+// a transport packet's.
+var (
+	handshake = append([]byte{1, 0, 0, 0}, make([]byte, 144)...)
+	data      = append([]byte{4, 0, 0, 0}, make([]byte, 60)...)
+)
+
+// TestOnlyOneOfTwoInitiationsOneRegistrationReleasesGoes: B's initiation
+// waits for A to register, and A's own initiation, sent as its agent
+// installed B, waits for A's registration, which lets both through at
+// once. Crossed, both would fail, so only the one that waited longer goes,
+// and the rest of each direction's packets go as they would.
+func TestOnlyOneOfTwoInitiationsOneRegistrationReleasesGoes(t *testing.T) {
+	for _, bFirst := range []bool{true, false} {
+		tb := waitTable()
+		register(t, tb, portBA, keyBA, advBA, senderB, 10)
+		var fromA, fromB Decision
+		if bFirst {
+			fromB = tb.Packet(t0, portBA, senderB, handshake)
+			fromA = tb.Packet(t0.Add(time.Millisecond), portAB, senderA, handshake)
+		} else {
+			fromA = tb.Packet(t0, portAB, senderA, handshake)
+			fromB = tb.Packet(t0.Add(time.Millisecond), portBA, senderB, handshake)
+		}
+		trailing := tb.Packet(t0.Add(2*time.Millisecond), portBA, senderB, data)
+		if fromA.Verdict != Wait || fromB.Verdict != Wait || trailing.Verdict != Wait {
+			t.Fatalf("before A registers: %+v %+v %+v", fromA, fromB, trailing)
+		}
+		register(t, tb, portAB, keyAB, advAB, senderA, 10)
+		older, newer := fromA, fromB
+		if bFirst {
+			older, newer = fromB, fromA
+		}
+		got := map[uint64]Release{}
+		for _, r := range tb.Release(t0.Add(3 * time.Millisecond)) {
+			got[r.Token] = r
+		}
+		if r, ok := got[older.Token]; !ok || r.Drop {
+			t.Errorf("B first %v: the older initiation: %+v", bFirst, r)
+		}
+		if r, ok := got[newer.Token]; !ok || !r.Drop || !r.Crossed {
+			t.Errorf("B first %v: the newer initiation: %+v, want dropped as crossed", bFirst, r)
+		}
+		if r, ok := got[trailing.Token]; !ok || r.Drop || r.To != senderA {
+			t.Errorf("B first %v: B's data packet: %+v", bFirst, r)
+		}
+		var crossed uint64
+		for _, d := range tb.Dirs() {
+			crossed += d.Stats.Crossed
+		}
+		if crossed != 1 {
+			t.Errorf("B first %v: %d crossed, want 1", bFirst, crossed)
+		}
+	}
+}
+
+// response is a WireGuard handshake response's size and type.
+var response = append([]byte{2, 0, 0, 0}, make([]byte, 88)...)
+
+// TestAnInitiationThatCrossesThePeersIsDropped: with both directions
+// registered, B's initiation reaches the relay just after A's went on, so
+// B sent it before A's arrived; the relay drops it, and B answers A's. An
+// initiation from an end that has answered, or one well after the peer's,
+// goes.
+func TestAnInitiationThatCrossesThePeersIsDropped(t *testing.T) {
+	tb := waitTable()
+	register(t, tb, portAB, keyAB, advAB, senderA, 10)
+	register(t, tb, portBA, keyBA, advBA, senderB, 10)
+	step := func(at time.Duration, port, src netip.AddrPort, b []byte) Decision {
+		return tb.Packet(t0.Add(at), port, src, b)
+	}
+	if d := step(0, portAB, senderA, handshake); d.Verdict != Forward {
+		t.Fatalf("A's initiation: %+v", d)
+	}
+	if d := step(time.Millisecond, portBA, senderB, handshake); d.Verdict != Drop || d.Reason != Crossed {
+		t.Fatalf("B's initiation, crossing A's: %+v", d)
+	}
+	if d := step(2*time.Millisecond, portBA, senderB, response); d.Verdict != Forward {
+		t.Fatalf("B's answer: %+v", d)
+	}
+	if d := step(3*time.Millisecond, portBA, senderB, handshake); d.Verdict != Forward {
+		t.Fatalf("an initiation from B once it answered: %+v", d)
+	}
+	// A has not answered B's, so A's next initiation crosses it.
+	if d := step(4*time.Millisecond, portAB, senderA, handshake); d.Verdict != Drop || d.Reason != Crossed {
+		t.Fatalf("A's initiation just after B's went on: %+v", d)
+	}
+	if d := step(2*time.Second, portAB, senderA, handshake); d.Verdict != Forward {
+		t.Fatalf("A's initiation a while after B's: %+v", d)
+	}
+	if d := step(2*time.Second+time.Millisecond, portAB, senderA, data); d.Verdict != Forward {
+		t.Fatalf("A's transport packet: %+v", d)
+	}
+	var crossed uint64
+	for _, d := range tb.Dirs() {
+		crossed += d.Stats.Crossed
+	}
+	if crossed != 2 {
+		t.Fatalf("%d crossed, want 2", crossed)
+	}
+	// Long after either end gained its endpoint the relay judges nothing,
+	// so a forged initiation cannot hold the other end's back.
+	if d := step(10*time.Second, portAB, senderA, handshake); d.Verdict != Forward {
+		t.Fatalf("A's initiation, long after the registrations: %+v", d)
+	}
+	if d := step(10*time.Second+time.Millisecond, portBA, senderB, handshake); d.Verdict != Forward {
+		t.Fatalf("B's initiation, long after the registrations: %+v", d)
+	}
+	// B's new endpoint opens the window again, and A has not answered B's
+	// initiation.
+	moved := netip.MustParseAddrPort("203.0.113.20:42001")
+	if !registerAt(t, tb, t0.Add(10*time.Second+2*time.Millisecond), portBA, keyBA, advBA, moved, 11) {
+		t.Fatal("B's registration from its new endpoint failed")
+	}
+	if d := step(10*time.Second+3*time.Millisecond, portAB, senderA, handshake); d.Verdict != Drop || d.Reason != Crossed {
+		t.Fatalf("A's initiation after B moved: %+v", d)
+	}
+}
+
+// TestAnInitiationGoesWhenNoneWaitsTheOtherWay: A's initiation and B's
+// transport packet wait for the same registration, and both go, as does
+// an initiation that waited alone.
+func TestAnInitiationGoesWhenNoneWaitsTheOtherWay(t *testing.T) {
+	tb := waitTable()
+	register(t, tb, portBA, keyBA, advBA, senderB, 10)
+	fromA := tb.Packet(t0, portAB, senderA, handshake)
+	fromB := tb.Packet(t0, portBA, senderB, data)
+	register(t, tb, portAB, keyAB, advAB, senderA, 10)
+	rel := tb.Release(t0)
+	if len(rel) != 2 || rel[0].Drop || rel[1].Drop {
+		t.Fatalf("A's initiation and B's data: %+v", rel)
+	}
+	tokens := []uint64{rel[0].Token, rel[1].Token}
+	slices.Sort(tokens)
+	if tokens[0] != fromA.Token || tokens[1] != fromB.Token {
+		t.Fatalf("released %v, want %d and %d", tokens, fromA.Token, fromB.Token)
+	}
+
+	tb = waitTable()
+	alone := tb.Packet(t0, portAB, senderA, handshake)
+	register(t, tb, portAB, keyAB, advAB, senderA, 10)
+	register(t, tb, portBA, keyBA, advBA, senderB, 10)
+	if rel := tb.Release(t0); len(rel) != 1 || rel[0].Token != alone.Token || rel[0].Drop {
+		t.Fatalf("an initiation waiting alone: %+v", rel)
 	}
 }
 

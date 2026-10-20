@@ -142,6 +142,25 @@ type Dial struct {
 	Missed []Missed `json:"missed,omitempty"`
 }
 
+// Lookup is one namespace's lookup loop: ask its resolver for a name until
+// the answer holds the wanted address, or holds addresses and not Unlike.
+type Lookup struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Want      string `json:"want,omitempty"`
+	Unlike    string `json:"unlike,omitempty"`
+	Found     bool   `json:"found"`
+	Start     int64  `json:"start_unix_ns"`
+	// First is when the first attempt with the answer sought launched, and
+	// Got is that answer.
+	First    int64    `json:"first_unix_ns"`
+	Got      []string `json:"got,omitempty"`
+	Attempts int      `json:"attempts"`
+	// Last is the answer, or the error, of the last attempt before it.
+	Last  string `json:"last,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
 // Missed is one attempt that got an outcome its loop was not waiting for.
 type Missed struct {
 	Launched int64   `json:"launched_unix_ns"`

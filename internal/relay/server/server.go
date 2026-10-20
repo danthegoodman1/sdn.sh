@@ -489,6 +489,10 @@ func (s *Server) release() {
 	for _, r := range rel {
 		b := s.waiting[r.Token]
 		delete(s.waiting, r.Token)
+		if r.Crossed {
+			s.m.waits.WithLabelValues("crossed").Inc()
+			continue
+		}
 		if r.Drop {
 			s.m.waits.WithLabelValues("expired").Inc()
 			continue
@@ -542,8 +546,9 @@ func (s *Server) committer(ctx context.Context) error {
 			s.m.fsync.Observe(time.Since(start).Seconds())
 			var acked []relaycore.Registration
 			s.mu.Lock()
+			now := time.Now()
 			for _, r := range batch {
-				if s.table.Commit(r) {
+				if s.table.Commit(now, r) {
 					acked = append(acked, r)
 					result := "accepted"
 					if r.Withdraw {

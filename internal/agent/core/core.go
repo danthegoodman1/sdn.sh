@@ -235,16 +235,20 @@ func (p phase) tearingDown() bool { return p == detaching || p == aborting || p 
 
 // iface is one interface the agent manages.
 type iface struct {
-	id      model.InterfaceID
-	name    string
-	phase   phase
-	ns      string
-	port    uint16
-	pub     model.Key
-	priv    model.Key
-	netRef  string
-	svcRef  string
-	kind    api.Kind
+	id     model.InterfaceID
+	name   string
+	phase  phase
+	ns     string
+	port   uint16
+	pub    model.Key
+	priv   model.Key
+	netRef string
+	svcRef string
+	kind   api.Kind
+	// member is the name the attach asks to hold, replacing its holder if
+	// replace is set.
+	member  string
+	replace bool
 	network model.NetworkID
 	service model.ServiceID
 	// deadline is when an attach gives up waiting on the control plane;

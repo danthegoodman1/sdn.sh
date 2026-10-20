@@ -138,6 +138,7 @@ type InterfaceInfo struct {
 	ListenPort uint16            `json:"listen_port"`
 	State      LeaseState        `json:"state"`
 	Expires    time.Time         `json:"expires"`
+	Member     string            `json:"member,omitempty"`
 }
 
 // CreateHost registers a host and returns its token once.
@@ -216,6 +217,13 @@ type AttachRequest struct {
 	Kind       Kind              `json:"kind,omitempty"`
 	PublicKey  model.Key         `json:"public_key"`
 	ListenPort uint16            `json:"listen_port"`
+	// Member is a name, a DNS label, the interface holds among its
+	// service's members. At most one live interface holds a name.
+	Member string `json:"member,omitempty"`
+	// Replace revokes the member's current holder, so the name passes to
+	// this interface in the same transaction. Without it, attaching a held
+	// name fails with a conflict.
+	Replace bool `json:"replace,omitempty"`
 }
 
 // AttachResponse carries the new interface's network as it stands for the
@@ -275,6 +283,9 @@ type LocalAttach struct {
 	Network string `json:"network"`
 	Service string `json:"service"`
 	Kind    Kind   `json:"kind,omitempty"`
+	// Member and Replace pass to the control plane's attach.
+	Member  string `json:"member,omitempty"`
+	Replace bool   `json:"replace,omitempty"`
 }
 
 // LocalInterface describes an interface the agent built: the namespace to
@@ -294,6 +305,9 @@ type LocalInterface struct {
 	// names both.
 	Resolver netip.Addr `json:"resolver,omitzero"`
 	Search   string     `json:"search,omitempty"`
+	// Member is the interface's own DNS name when it holds a member name,
+	// such as etcd-1.etcd.shop.internal.
+	Member string `json:"member,omitempty"`
 }
 
 // LocalDetach asks the agent to tear an interface down.

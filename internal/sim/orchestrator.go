@@ -60,6 +60,8 @@ type ifIntent struct {
 	state        ifState
 	held         *kmodel.Netns
 	flows        []*flow
+	// member is the name it asked to hold among its service's members.
+	member string
 }
 
 type orchestrator struct {
@@ -67,13 +69,17 @@ type orchestrator struct {
 	rng *prng.Rand
 	// egress draws internet grants, on a stream of its own so the other
 	// draws stay as they were; policy draws wildcard and deny rules, and
-	// unnamer which namespace loses its name, likewise.
+	// unnamer which namespace loses its name, and member which workloads
+	// hold member names, likewise.
 	egress    *prng.Rand
 	policy    *prng.Rand
 	unnamer   *prng.Rand
+	member    *prng.Rand
 	networks  []*netIntent
 	ifaces    map[model.InterfaceID]*ifIntent
 	attaching map[string]*pendingAttach
+	// requested holds the member name each answered attach asked for.
+	requested map[model.InterfaceID]string
 	names     int
 	running   bool
 }
@@ -85,6 +91,10 @@ type pendingAttach struct {
 	net  *netIntent
 	svc  *svcIntent
 	host *hostNode
+	// member, if set, is the name to hold, replacing its holder if replace
+	// is set.
+	member  string
+	replace bool
 }
 
 // retryAfter is how long the orchestrator waits before retrying a call an
@@ -94,8 +104,9 @@ const retryAfter = 500 * time.Millisecond
 func newOrchestrator(w *World) *orchestrator {
 	return &orchestrator{
 		w: w, rng: prng.Stream(w.seed, "orchestrator"), egress: prng.Stream(w.seed, "egress"), policy: prng.Stream(w.seed, "policy"),
-		unnamer: prng.Stream(w.seed, "unname"),
-		ifaces:  map[model.InterfaceID]*ifIntent{}, attaching: map[string]*pendingAttach{},
+		unnamer: prng.Stream(w.seed, "unname"), member: prng.Stream(w.seed, "member"),
+		ifaces: map[model.InterfaceID]*ifIntent{}, attaching: map[string]*pendingAttach{},
+		requested: map[model.InterfaceID]string{},
 	}
 }
 
@@ -357,6 +368,7 @@ func (o *orchestrator) start() {
 		o.change()
 		o.grantEgress()
 		o.changePolicy()
+		o.attachMember()
 		o.w.loop.After(o.rng.Duration(o.w.opts.ChangeEvery/4, o.w.opts.ChangeEvery*2), next)
 	}
 	o.w.loop.After(o.w.opts.ChangeEvery, next)
@@ -418,18 +430,44 @@ func (o *orchestrator) attach() {
 	o.tryAttach(p)
 }
 
+// memberNames are the names the orchestrator draws for a service's members.
+var memberNames = []string{"m0", "m1", "m2"}
+
+// attachMember sometimes attaches a workload holding a member name, as an
+// orchestrator running a cluster would, more often than not replacing
+// whoever holds it.
+func (o *orchestrator) attachMember() {
+	if !o.member.Percent(10) || len(o.live())+len(o.attaching) >= o.w.opts.MaxAttached {
+		return
+	}
+	n := o.networks[o.member.Index(len(o.networks))]
+	o.names++
+	p := &pendingAttach{
+		name: fmt.Sprintf("w%d", o.names), net: n,
+		svc: n.services[o.member.Index(len(n.services))], host: o.w.hosts[o.member.Index(len(o.w.hosts))],
+		member: memberNames[o.member.Index(len(memberNames))], replace: o.member.Percent(60),
+	}
+	o.attaching[p.name] = p
+	o.tryAttach(p)
+}
+
 // tryAttach asks the agent for the workload's interface. An agent that
 // crashed before answering may have built it, so a retry names the same
 // workload and gets the interface already built.
 func (o *orchestrator) tryAttach(p *pendingAttach) {
 	h := p.host
 	retry := func() { o.w.loop.After(retryAfter, func() { o.tryAttach(p) }) }
-	ok := h.localAttach(api.LocalAttach{Name: p.name, Network: p.net.name, Service: p.svc.name}, func(li api.LocalInterface, err error) {
+	a := api.LocalAttach{Name: p.name, Network: p.net.name, Service: p.svc.name, Member: p.member, Replace: p.replace}
+	ok := h.localAttach(a, func(li api.LocalInterface, err error) {
 		if o.attaching[p.name] != p {
 			return
 		}
 		if errors.Is(err, agentcore.ErrAttachFailed) {
 			o.w.logf("attach of %s on %s failed: %v", p.name, h.name, err)
+			var ae *api.Error
+			if p.member != "" && errors.As(err, &ae) && ae.Code == api.CodeConflict {
+				o.w.summary.MemberConflicts++
+			}
 			delete(o.attaching, p.name)
 			return
 		}
@@ -441,9 +479,13 @@ func (o *orchestrator) tryAttach(p *pendingAttach) {
 		o.w.summary.Attaches++
 		x := &ifIntent{
 			id: li.Interface, network: li.Network, service: li.Service, host: h, ns: li.Namespace,
-			addr6: li.Addr6, addr4: li.Addr4, key: li.PublicKey, state: attached,
+			addr6: li.Addr6, addr4: li.Addr4, key: li.PublicKey, state: attached, member: p.member,
 		}
 		o.ifaces[x.id] = x
+		if p.member != "" {
+			o.requested[x.id] = p.member
+			o.w.summary.Members++
+		}
 		o.w.byKey[x.key] = x.id
 		o.w.logf("attached %s as %s on %s (%v %v)", p.name, x.id, h.name, x.addr6, x.addr4)
 		if h.kernel.Hold(x.ns) {

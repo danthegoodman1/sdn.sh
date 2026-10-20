@@ -1250,3 +1250,49 @@ func TestADetachTellsTheControlPlaneWhileItsDeviceIsDeleted(t *testing.T) {
 		t.Fatal("the interface outlived its teardown and its release")
 	}
 }
+
+func TestAnAttachAsksForItsMemberAndAnswersWithItsName(t *testing.T) {
+	c, now := New(DefaultConfig("h1"), prng.New(1)), time.Unix(1000, 0)
+	c.Start(now, nil, kernel.Snapshot{})
+	var asked []api.AttachRequest
+	run := func(req RequestID, a api.LocalAttach) []Reply {
+		c.Attach(now, req, a)
+		var replies []Reply
+		for range 8 {
+			for _, act := range c.Actions(now) {
+				switch act := act.(type) {
+				case RunBatch:
+					c.BatchDone(now, act.Namespace, act.ID, len(act.Ops), nil)
+				case CallAttach:
+					asked = append(asked, act.Request)
+					n := client(3, act.Request.Interface, act.Request.PublicKey)
+					n.Interfaces[0].Name = "etcd-1.etcd"
+					c.AttachDone(now, act.Request.Interface, &api.AttachResponse{Interface: act.Request.Interface, State: n}, nil)
+				case Reply:
+					replies = append(replies, act)
+				}
+			}
+		}
+		return replies
+	}
+	a := api.LocalAttach{Name: "etcd-a", Network: "n", Service: "etcd", Member: "etcd-1", Replace: true}
+	replies := run(1, a)
+	if len(asked) != 1 || asked[0].Member != "etcd-1" || !asked[0].Replace {
+		t.Fatalf("the control plane was asked %+v, want member etcd-1 replacing its holder", asked)
+	}
+	if len(replies) != 1 || replies[0].Err != nil || replies[0].Interface.Member != "etcd-1.etcd.n.internal" {
+		t.Fatalf("answered %+v, want the member's full name", replies)
+	}
+	// Attaching the workload again answers with the same interface, but
+	// only as the same member.
+	if again := run(2, a); len(again) != 1 || again[0].Err != nil || again[0].Interface.Interface != replies[0].Interface.Interface {
+		t.Fatalf("attaching again: %+v", again)
+	}
+	a.Member = "etcd-2"
+	if other := run(3, a); len(other) != 1 || !errors.Is(other[0].Err, ErrAttachFailed) || !strings.Contains(other[0].Err.Error(), "another member") {
+		t.Fatalf("attaching the workload as another member: %+v", other)
+	}
+	if len(asked) != 1 {
+		t.Fatalf("the control plane was asked %d times, want once", len(asked))
+	}
+}

@@ -107,3 +107,77 @@ func TestGarbageIsIgnoredOrRefusedNeverCrashes(t *testing.T) {
 		z.Answer(b)
 	}
 }
+
+// members gives db two named backends and one without a name.
+func members() *api.NetworkState {
+	n := network()
+	n.Services[1].Backends = []api.Backend{
+		{Interface: "if-1", Addr6: netip.MustParseAddr("fd00::21"), Addr4: netip.MustParseAddr("10.0.0.21"), Name: "db-1.db"},
+		{Interface: "if-2", Addr6: netip.MustParseAddr("fd00::22"), Addr4: netip.MustParseAddr("10.0.0.22"), Name: "db-2.db"},
+		{Interface: "if-3", Addr6: netip.MustParseAddr("fd00::23"), Addr4: netip.MustParseAddr("10.0.0.23")},
+	}
+	return n
+}
+
+func addrs(m dnsmessage.Message) []netip.Addr {
+	var out []netip.Addr
+	for _, a := range m.Answers {
+		switch b := a.Body.(type) {
+		case *dnsmessage.AAAAResource:
+			out = append(out, netip.AddrFrom16(b.AAAA))
+		case *dnsmessage.AResource:
+			out = append(out, netip.AddrFrom4(b.A))
+		}
+	}
+	return out
+}
+
+func TestAMemberNameAnswersItsHoldersOwnAddresses(t *testing.T) {
+	web := &api.Interface{Addr6: netip.MustParseAddr("fd00::100"), Addr4: netip.MustParseAddr("10.0.0.100"),
+		Reach: []api.Reach{{Service: "svc-db", Proto: model.TCP}}}
+	z := ZoneFor(members(), web)
+	for name, want := range map[string]string{"db-1.db.shop.internal.": "fd00::21", "DB-2.db.shop.internal.": "fd00::22", "db.shop.internal.": "fd00::20"} {
+		if _, m := ask(t, z, name, dnsmessage.TypeAAAA); len(addrs(m)) != 1 || addrs(m)[0] != netip.MustParseAddr(want) {
+			t.Errorf("AAAA %s: %v %v, want %s", name, m.RCode, addrs(m), want)
+		}
+	}
+	if _, m := ask(t, z, "db-1.db.shop.internal.", dnsmessage.TypeA); len(addrs(m)) != 1 || addrs(m)[0] != netip.MustParseAddr("10.0.0.21") {
+		t.Errorf("A db-1: %v", addrs(m))
+	}
+	// Only a member's own name answers it.
+	for _, name := range []string{"if-3.db.shop.internal.", "db-3.db.shop.internal.", "db-1.api.shop.internal.", "x.db-1.db.shop.internal."} {
+		if _, m := ask(t, z, name, dnsmessage.TypeAAAA); m.RCode != dnsmessage.RCodeNameError {
+			t.Errorf("%s: %v %v", name, m.RCode, addrs(m))
+		}
+	}
+
+	// An IPv6-only client gets no A record for a member either.
+	v6 := &api.Interface{Addr6: netip.MustParseAddr("fd00::101"), Reach: []api.Reach{{Service: "svc-db"}}}
+	if _, m := ask(t, ZoneFor(members(), v6), "db-1.db.shop.internal.", dnsmessage.TypeA); m.RCode != dnsmessage.RCodeSuccess || len(m.Answers) != 0 {
+		t.Errorf("A db-1 for an IPv6-only client: %v %v", m.RCode, addrs(m))
+	}
+
+	// A client that may not reach db learns none of its members.
+	other := &api.Interface{Addr6: netip.MustParseAddr("fd00::102"), Reach: []api.Reach{{Service: "svc-api"}}}
+	if _, m := ask(t, ZoneFor(members(), other), "db-1.db.shop.internal.", dnsmessage.TypeAAAA); m.RCode != dnsmessage.RCodeNameError {
+		t.Errorf("db-1 from a client that may not reach db: %v %v", m.RCode, addrs(m))
+	}
+}
+
+func TestAMemberAnswersItsOwnNameWhateverItReaches(t *testing.T) {
+	self := &api.Interface{Addr6: netip.MustParseAddr("fd00::21"), Addr4: netip.MustParseAddr("10.0.0.21"), Name: "db-1.db"}
+	z := ZoneFor(members(), self)
+	_, m := ask(t, z, "db-1.db.shop.internal.", dnsmessage.TypeALL)
+	if got := addrs(m); len(got) != 2 || got[0] != self.Addr6 || got[1] != self.Addr4 {
+		t.Fatalf("its own name: %v %v", m.RCode, got)
+	}
+	// Its service lies above its name, so the service's name exists with no
+	// records, though the member may not reach it.
+	if _, m := ask(t, z, "db.shop.internal.", dnsmessage.TypeAAAA); m.RCode != dnsmessage.RCodeSuccess || len(m.Answers) != 0 {
+		t.Fatalf("db from a member that may not reach it: %v %v", m.RCode, addrs(m))
+	}
+	// Its peers' names are another matter.
+	if _, m := ask(t, z, "db-2.db.shop.internal.", dnsmessage.TypeAAAA); m.RCode != dnsmessage.RCodeNameError {
+		t.Fatalf("db-2 from a member that may not reach db: %v %v", m.RCode, addrs(m))
+	}
+}

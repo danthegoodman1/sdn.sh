@@ -197,7 +197,9 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 	backends := map[model.ServiceID][]api.Backend{}
 	for _, i := range connected {
 		if i.State == api.Live && i.Kind != api.Device {
-			backends[i.Service] = append(backends[i.Service], api.Backend{Interface: i.ID, Addr6: i.Addr6, Addr4: i.Addr4})
+			backends[i.Service] = append(backends[i.Service], api.Backend{
+				Interface: i.ID, Addr6: i.Addr6, Addr4: i.Addr4, Name: memberName(i, services),
+			})
 		}
 	}
 
@@ -230,6 +232,7 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 			Addr4:      x.Addr4,
 			ListenPort: x.ListenPort,
 			State:      x.State,
+			Name:       memberName(x, services),
 		}
 		if x.State == api.Live {
 			for _, y := range connected {
@@ -317,6 +320,16 @@ func Network(s Snapshot) map[model.HostID]api.NetworkState {
 		out[host] = ns
 	}
 	return out
+}
+
+// memberName is a live interface's own DNS name under its network's domain,
+// member.service, or empty when it holds no member name.
+func memberName(i store.Interface, services map[model.ServiceID]store.Service) string {
+	svc, ok := services[i.Service]
+	if i.Member == "" || i.State != api.Live || !ok {
+		return ""
+	}
+	return i.Member + "." + svc.Name
 }
 
 // keepsAlive reports whether x keeps a session up with a co-located y.

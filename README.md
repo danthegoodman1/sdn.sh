@@ -221,6 +221,14 @@ table inet wirenet {
 
 The slot count stays fixed, so a backend change rewrites only the slots whose backend moved. Conntrack pins each connection to its backend and translates the replies, so the application sees answers from the address it dialed. IPv6 is always on; IPv4 is opt-in per service.
 
+A service's members can hold names, for software whose members address each other one by one, such as etcd. An attach with `--member etcd-1` makes `etcd-1.etcd.shop.internal` resolve to that workload's own address, while `etcd.shop.internal` still spreads connections over every member. One live workload holds a name. `--replace` revokes the holder and hands the name over in one transaction, so a member moves hosts while its peers keep their configuration, and the replaced process reaches none of them:
+
+```console
+wirenetctl rule create shop etcd etcd --proto tcp --ports 2379-2380   # members reach each other
+sudo wirenetctl attach etcd-a shop etcd --member etcd-1
+sudo wirenetctl attach etcd-d shop etcd --member etcd-2 --replace     # etcd-2's host is lost
+```
+
 ### Policy
 
 Policy names services, and denies every flow it does not name. A rule allows or denies, and either side may be `*`, every service but the one on the rule's other side:
@@ -307,7 +315,7 @@ Each daemon serves `/metrics`, `/healthz` and `/readyz` on its `--telemetry` add
 
 ### Tuning
 
-**Relays per network.** One edge uses one relay core, and a relay carries about 2 Gb/s per busy core. On 4-vCPU machines two relays carried twice what one did, and a third left the receiving hosts' encryption as the limit.
+**Relays per network.** One edge uses one relay core, and a relay forwards about 4–5 Gb per busy core at an 8,941-byte MTU, and about 2 at 1,380. On 4-vCPU machines at 8,941 bytes, two relays carried what plain TCP does between the same hosts.
 
 **Drain grace.** `--drain-grace` (30 s) is how long clients keep a departing backend's peer so established flows can finish. A `cutover` service skips it.
 
@@ -337,6 +345,7 @@ Relaying ciphertext is common: Tailscale's DERP, Nebula's relays and NetBird all
 - **The relay's socket model caps its edges.** One socket per directed port; the next step is XDP or TC.
 - **A partition keeps an island alive.** A revoked interface cut off together with some of its clients keeps serving them until the partition heals.
 - **No connection migrates.** A workload that moves breaks its connections, and clients reconnect.
+- **A member's address changes when it moves.** Its name follows within the resolver's 5-second TTL; software that caches a resolved address for longer must resolve again.
 - **Linux hosts, L3 only.** A laptop joins through a gateway interface with a stock WireGuard client.
 - **A `CAP_NET_ADMIN` workload loses sender-side policy.** It keeps its identity, since the receiver enforces it.
 - **A flat network runs out of relay ports.** Ports scale with policy edges, so segment a fully connected network.

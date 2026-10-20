@@ -210,6 +210,10 @@ func (c *Core) Attach(now time.Time, req RequestID, a api.LocalAttach) {
 			reply(fmt.Errorf("workload %q is attached to another service", a.Name))
 			return
 		}
+		if i.netRef != "" && i.member != a.Member {
+			reply(fmt.Errorf("workload %q is attached as another member", a.Name))
+			return
+		}
 		if i.phase == ready {
 			c.emit(Reply{Request: req, Interface: c.describe(i)})
 		} else {
@@ -240,6 +244,7 @@ func (c *Core) Attach(now time.Time, req RequestID, a api.LocalAttach) {
 	i := &iface{
 		id: id, name: a.Name, phase: creating, ns: c.cfg.Prefix + model.Short(idStr), port: port,
 		priv: priv, pub: priv.Public(), netRef: a.Network, svcRef: a.Service, kind: kind,
+		member: a.Member, replace: a.Replace,
 		deadline: now.Add(c.cfg.AttachTimeout), waiting: []RequestID{req},
 	}
 	c.ifaces[id] = i
@@ -352,7 +357,7 @@ func (c *Core) AttachDone(now time.Time, id model.InterfaceID, resp *api.AttachR
 func (c *Core) attachRequest(i *iface) api.AttachRequest {
 	return api.AttachRequest{
 		Interface: i.id, Network: i.netRef, Service: i.svcRef, Kind: i.kind,
-		PublicKey: i.pub, ListenPort: i.port,
+		PublicKey: i.pub, ListenPort: i.port, Member: i.member, Replace: i.replace,
 	}
 }
 
@@ -479,6 +484,9 @@ func (c *Core) describe(i *iface) api.LocalInterface {
 		li.Addr6, li.Addr4 = x.Addr6, x.Addr4
 		li.Search = n.Domain()
 		li.Resolver = dns.ListenAddr().Addr()
+		if x.Name != "" {
+			li.Member = x.Name + "." + n.Domain()
+		}
 	}
 	return li
 }

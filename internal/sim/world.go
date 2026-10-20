@@ -50,6 +50,10 @@ type Summary struct {
 	Registrations, Withdrawals            uint64
 	Acked, AckTimeouts                    uint64
 	AttackerSent                          int
+	// Members counts attaches that hold a member name, MemberConflicts
+	// those refused because another interface held it, and Replacements
+	// the holders an attach revoked.
+	Members, MemberConflicts, Replacements int
 	// RelayEdges counts the relay edges live at the end; RelaySplit those
 	// whose two ends send through different relays, and RelayDrift those
 	// whose ends agree on a relay other than the heaviest both find up.
@@ -57,10 +61,10 @@ type Summary struct {
 }
 
 func (s Summary) String() string {
-	return fmt.Sprintf("seed %d: %d events; %d attaches, %d detaches, %d revokes, %d rule changes, %d egress grants, %d wildcard and deny changes; crashes agent %d relay %d cp %d, reboots %d, rebinds %d, strays %d, unnamed %d; flows ok %d denied %d; batches %d, conflicts %d, failovers %d, registrations %d, withdrawals %d, acked %d, ack timeouts %d, attacker sent %d; relay edges %d, split %d, drifted %d",
+	return fmt.Sprintf("seed %d: %d events; %d attaches, %d detaches, %d revokes, %d rule changes, %d egress grants, %d wildcard and deny changes; crashes agent %d relay %d cp %d, reboots %d, rebinds %d, strays %d, unnamed %d; flows ok %d denied %d; batches %d, conflicts %d, failovers %d, registrations %d, withdrawals %d, acked %d, ack timeouts %d, attacker sent %d; members %d, member conflicts %d, replacements %d; relay edges %d, split %d, drifted %d",
 		s.Seed, s.Events, s.Attaches, s.Detaches, s.Revokes, s.Rules, s.EgressGrants, s.Policies, s.AgentCrashes, s.RelayCrashes, s.CPCrashes,
 		s.Reboots, s.Rebinds, s.Strays, s.Unnamed, s.FlowsOK, s.FlowsDenied, s.Batches, s.Conflicts, s.Failovers, s.Registrations, s.Withdrawals, s.Acked, s.AckTimeouts, s.AttackerSent,
-		s.RelayEdges, s.RelaySplit, s.RelayDrift)
+		s.Members, s.MemberConflicts, s.Replacements, s.RelayEdges, s.RelaySplit, s.RelayDrift)
 }
 
 // World is one simulated deployment.
@@ -84,6 +88,8 @@ type World struct {
 	// byKey names the interface each public key belongs to, as attach
 	// answers reported it.
 	byKey map[model.Key]model.InterfaceID
+	// zoned holds each interface's zone already checked at a revision.
+	zoned map[zoneAt]bool
 
 	faultsOn bool
 	failure  *Failure
@@ -112,6 +118,7 @@ func NewWith(seed uint64, opts Options) *World {
 		work:     prng.Stream(seed, "workload"),
 		byPublic: map[netip.Addr]underlayNode{},
 		byKey:    map[model.Key]model.InterfaceID{},
+		zoned:    map[zoneAt]bool{},
 		flows:    map[uint64]*flow{},
 	}
 	w.net = NewNetwork(w.loop, prng.Stream(seed, "network"), opts.CPDelayMin, opts.CPDelayMax)

@@ -155,7 +155,7 @@ func (r *relayNode) persist(reg relaycore.Registration, raw *[regproto.Size]byte
 			return
 		}
 		r.disk.log = append(r.disk.log, reg)
-		committed := r.table.Commit(reg)
+		committed := r.table.Commit(r.w.now(), reg)
 		defer r.release()
 		if committed {
 			r.w.underlay(netip.AddrPortFrom(r.advertised, reg.Local.Port()), reg.Endpoint, packet{ack: true, counter: reg.Counter})

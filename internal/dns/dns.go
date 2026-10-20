@@ -4,8 +4,10 @@
 // resolver answers the names of the services its interface may reach, in
 // its network's domain, from pushed state: AAAA for every service, and A
 // only where both the client's service and the target have IPv4, so no
-// client receives an address it cannot reach. Names outside the domain go
-// upstream when the interface may reach the internet, and are refused
+// client receives an address it cannot reach. A member name,
+// member.service, answers its holder's own addresses wherever its service's
+// name resolves, and in the holder's own namespace. Names outside the domain
+// go upstream when the interface may reach the internet, and are refused
 // otherwise.
 package dns
 
@@ -33,7 +35,8 @@ func ListenAddr() netip.AddrPort {
 type Zone struct {
 	// Domain is the network's domain, a lowercase FQDN with a trailing dot.
 	Domain string
-	// Names holds each reachable service's addresses, sorted by FQDN.
+	// Names holds each reachable service's addresses, and its members',
+	// sorted by FQDN.
 	Names []Name
 	// Forward sends names outside the domain upstream.
 	Forward bool
@@ -55,8 +58,8 @@ func ServedFor(n *api.NetworkState, x *api.Interface) Served {
 	return s
 }
 
-// Name is one service's addresses. A is zero when the client must not
-// receive one.
+// Name is one service's or member's addresses. A is zero when the client
+// must not receive one.
 type Name struct {
 	FQDN string
 	AAAA netip.Addr
@@ -68,16 +71,29 @@ func ZoneFor(n *api.NetworkState, x *api.Interface) Zone {
 	// A gateway forwards for the development machines it serves, which
 	// use it as their only resolver.
 	z := Zone{Domain: strings.ToLower(n.Domain()) + ".", Forward: len(x.Egress) > 0 || x.Kind == api.Gateway}
+	add := func(rel string, addr6, addr4 netip.Addr) {
+		name := Name{FQDN: strings.ToLower(rel) + "." + z.Domain, AAAA: addr6}
+		if x.Addr4.IsValid() && addr4.IsValid() {
+			name.A = addr4
+		}
+		z.Names = append(z.Names, name)
+	}
 	for _, r := range x.Reach {
 		s, ok := n.Service(r.Service)
 		if !ok {
 			continue
 		}
-		name := Name{FQDN: strings.ToLower(s.Name) + "." + z.Domain, AAAA: s.Addr6}
-		if x.Addr4.IsValid() && s.Addr4.IsValid() {
-			name.A = s.Addr4
+		add(s.Name, s.Addr6, s.Addr4)
+		for _, b := range s.Backends {
+			if b.Name != "" {
+				add(b.Name, b.Addr6, b.Addr4)
+			}
 		}
-		z.Names = append(z.Names, name)
+	}
+	// Clustered software often resolves its own advertised name as it
+	// starts, so a member answers its own name whatever it may reach.
+	if x.Name != "" {
+		add(x.Name, x.Addr6, x.Addr4)
 	}
 	slices.SortFunc(z.Names, func(a, b Name) int { return strings.Compare(a.FQDN, b.FQDN) })
 	z.Names = slices.CompactFunc(z.Names, func(a, b Name) bool { return a.FQDN == b.FQDN })
@@ -119,6 +135,12 @@ func (z *Zone) Answer(query []byte) (Verdict, []byte) {
 	}
 	i, found := slices.BinarySearchFunc(z.Names, name, func(n Name, s string) int { return strings.Compare(n.FQDN, s) })
 	if !found {
+		// A name above another, such as a service a member alone answers
+		// below, exists with no records. A resolver that reads NXDOMAIN as
+		// covering every name below (RFC 8020) would lose the member.
+		if z.above(name) {
+			return Reply, respond(h, &q, dnsmessage.RCodeSuccess, nil)
+		}
 		return Reply, respond(h, &q, dnsmessage.RCodeNameError, nil)
 	}
 	n := z.Names[i]
@@ -144,6 +166,16 @@ func (z *Zone) Answer(query []byte) (Verdict, []byte) {
 	// A name with no record of the asked type answers with no records,
 	// which tells the client the name exists.
 	return Reply, respond(h, &q, dnsmessage.RCodeSuccess, answers)
+}
+
+// above reports whether a name has names of the zone below it.
+func (z *Zone) above(name string) bool {
+	for _, n := range z.Names {
+		if strings.HasSuffix(n.FQDN, "."+name) {
+			return true
+		}
+	}
+	return false
 }
 
 func respond(h dnsmessage.Header, q *dnsmessage.Question, rcode dnsmessage.RCode, answers []dnsmessage.Resource) []byte {

@@ -23,6 +23,7 @@
 | `density` | Interfaces on one host until an attach fails, attach latency degrades tenfold, or `--max-interfaces`. |
 | `spread` | `--edges` edges streaming at once, first as plain TCP between the hosts, then through one relay, then two, then three: aggregate throughput, edges and CPU per relay, and each host's CPU, which shows when the endpoints rather than the relays bound the aggregate. Run it with `relay_count = 3` and an even `agent_count`, so clients and servers split the hosts evenly. |
 | `policy` | `--clients` sandboxes spread over the hosts dial a db that `* -> db` opens to every other service; times a `box -> db` deny from its commit until every sandbox's new connections fail, and its removal until they reach db again. |
+| `members` | A three-member etcd cluster in one service, each member attached with `--member` and known to the others by name; then `--rounds` moves of etcd-2 to another host, each as an orchestrator would make after losing its host: the cluster swaps the member for one at the same peer URL, and a workload elsewhere attaches with `--member etcd-2 --replace`. Times the peers' answers for the name, the first connections each way, and the new member's health and catching up, and checks the replaced holder reaches no peer. Needs `etcd` and `etcdctl` in `--bin`. |
 
 Every plan starts from a fresh fleet, measures the plain-TCP underlay ceiling in the same run, and purges the fleet afterwards. `wirenet-lab plans` lists them.
 
@@ -37,7 +38,7 @@ scripts/lab run --env local --plan converge --store postgres://user:password@127
 scripts/lab run --env local --plan attach --log-level debug --keep-logs /tmp/wirenet-logs
 ```
 
-`scripts/lab` builds every binary as you and runs `wirenet-lab` under `sudo`. `--store` gives each run a fresh schema in that database. All the hosts share one kernel, so local figures show that each plan runs end to end and what its report looks like; the figures for `SPEC.md` come from EC2.
+`scripts/lab` builds every binary as you and runs `wirenet-lab` under `sudo`. For the `members` plan, `WIRENET_LAB_ETCD` names a directory holding `etcd` and `etcdctl`, such as an unpacked etcd release, and the script copies them in with the rest. `--store` gives each run a fresh schema in that database. All the hosts share one kernel, so local figures show that each plan runs end to end and what its report looks like; the figures for `SPEC.md` come from EC2.
 
 ## Build the fleet on EC2
 
@@ -66,6 +67,8 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/ \
 go build -o bin/ ./cmd/wirenet-lab
 bin/wirenet-lab deploy --tf-output fleet.json --ssh-key ~/.ssh/wirenet-bench --bin bin
 ```
+
+For the `members` plan, copy `etcd` and `etcdctl` from an etcd release's `linux-amd64` archive into `bin/` too; `deploy` gives them to the agent hosts whenever `--bin` holds them.
 
 `--known-hosts FILE` keeps the fleet's host keys out of your own `known_hosts`, since EC2 hands the addresses to other machines once the fleet is gone.
 

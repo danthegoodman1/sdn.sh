@@ -1198,8 +1198,11 @@ func TestMembersResolveEachOtherAndANameFollowsItsReplacement(t *testing.T) {
 		t.Fatalf("a second holder of etcd-2: %+v, %v", i, err)
 	}
 
-	// etcd-2 moves to h3. Its peers follow the name, and the old holder is
-	// revoked: it reaches none of them, and none of them reaches it.
+	// etcd-2's host is lost: its agent dies, and the old holder's device
+	// keeps every peer it had. etcd-2 moves to h3. Its peers follow the
+	// name, and their hosts fence the old holder: it reaches none of them,
+	// and none of them reaches it.
+	h2.Agent.Kill()
 	start := time.Now()
 	moved := member(h3, "e2-moved", "etcd-2", true)
 	resolves(e1.Namespace, "etcd-2.etcd.shop.internal.", moved, "e2-moved")

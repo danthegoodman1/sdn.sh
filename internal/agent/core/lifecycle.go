@@ -41,7 +41,7 @@ func (c *Core) Start(now time.Time, journal []JournalEntry, snap kernel.Snapshot
 	for _, e := range journal {
 		i := &iface{
 			id: e.Interface, name: e.Name, phase: ready, ns: e.Namespace, port: e.ListenPort, pub: e.PublicKey,
-			kind: e.Kind, network: e.Network, service: e.Service, attachSent: true,
+			kind: e.Kind, network: e.Network, service: e.Service, member: e.Member, attachSent: true,
 		}
 		c.ifaces[i.id] = i
 		st := newNS(e.Namespace, i.id)
@@ -210,7 +210,9 @@ func (c *Core) Attach(now time.Time, req RequestID, a api.LocalAttach) {
 			reply(fmt.Errorf("workload %q is attached to another service", a.Name))
 			return
 		}
-		if i.netRef != "" && i.member != a.Member {
+		// The journal keeps the member, so an adopted interface is judged
+		// too.
+		if i.member != a.Member {
 			reply(fmt.Errorf("workload %q is attached as another member", a.Name))
 			return
 		}
@@ -308,7 +310,7 @@ func (c *Core) release(i *iface) {
 
 func (c *Core) entry(i *iface) JournalEntry {
 	return JournalEntry{
-		Interface: i.id, Name: i.name, Network: i.network, Service: i.service, Kind: i.kind,
+		Interface: i.id, Name: i.name, Network: i.network, Service: i.service, Kind: i.kind, Member: i.member,
 		Namespace: i.ns, ListenPort: i.port, PublicKey: i.pub, Detaching: i.phase == detaching,
 	}
 }

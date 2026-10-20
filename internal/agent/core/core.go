@@ -112,6 +112,7 @@ type JournalEntry struct {
 	Network    model.NetworkID   `json:"network"`
 	Service    model.ServiceID   `json:"service"`
 	Kind       api.Kind          `json:"kind"`
+	Member     string            `json:"member,omitempty"`
 	Namespace  string            `json:"namespace"`
 	ListenPort uint16            `json:"listen_port"`
 	PublicKey  model.Key         `json:"public_key"`

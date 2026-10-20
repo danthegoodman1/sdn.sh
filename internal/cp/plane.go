@@ -643,6 +643,9 @@ func (p *Plane) Attach(tx store.Tx, now time.Time, host model.HostID, req api.At
 	}
 	if existing, err := tx.Interface(req.Interface); err == nil {
 		if existing.Host == host && existing.PublicKey == req.PublicKey && existing.State == api.Live {
+			if existing.Member != req.Member {
+				return store.Interface{}, "", apiErr(api.CodeConflict, "interface %s holds member %q, not %q", req.Interface, existing.Member, req.Member)
+			}
 			return existing, "", nil
 		}
 		return store.Interface{}, "", apiErr(api.CodeConflict, "interface %s already exists", req.Interface)
@@ -658,6 +661,9 @@ func (p *Plane) Attach(tx store.Tx, now time.Time, host model.HostID, req api.At
 	}
 	if req.Member != "" && (kind != api.Workload || !ValidName(req.Member)) {
 		return store.Interface{}, "", apiErr(api.CodeInvalid, "member %q must be a DNS label, held by a workload", req.Member)
+	}
+	if req.Replace && req.Member == "" {
+		return store.Interface{}, "", apiErr(api.CodeInvalid, "replace names the member it takes over")
 	}
 	n, err := ResolveNetwork(tx, req.Network)
 	if err != nil {

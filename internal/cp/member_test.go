@@ -152,6 +152,9 @@ func TestAMemberNameIsALabelAWorkloadHolds(t *testing.T) {
 	if _, _, err := f.tryAttach(a); apiCode(err) != api.CodeInvalid {
 		t.Errorf("a gateway member: %v, want invalid", err)
 	}
+	if _, _, err := f.tryAttach(f.memberRequest("h1", "shop", "etcd", "", true)); apiCode(err) != api.CodeInvalid {
+		t.Errorf("a replacement naming no member: %v, want invalid", err)
+	}
 	f.member("h1", "shop", "etcd", strings.Repeat("e", 63), false)
 }
 
@@ -171,6 +174,15 @@ func TestAnAttachRetriedWithReplaceReturnsItsInterface(t *testing.T) {
 	}
 	if got := f.iface(first.ID); got.State != api.Live {
 		t.Fatalf("the retried replacement left its interface %s", got.State)
+	}
+	// A retry naming another member is another request.
+	a.req.Member, a.req.Replace = "etcd-2", false
+	if _, _, err := f.tryAttach(a); apiCode(err) != api.CodeConflict {
+		t.Fatalf("a retry naming another member: %v, want a conflict", err)
+	}
+	a.req.Member = ""
+	if _, _, err := f.tryAttach(a); apiCode(err) != api.CodeConflict {
+		t.Fatalf("a retry naming no member: %v, want a conflict", err)
 	}
 }
 
@@ -215,21 +227,26 @@ func TestMembersReachTheStateTheirPeersHold(t *testing.T) {
 			}
 		}
 
-		// The replaced holder's name leaves with it.
+		// The replaced holder's name leaves with it, for its replacement.
 		next, _ := f.member("h2", "shop", "etcd", "etcd-1", true)
 		for _, n := range f.state("h1").Networks {
 			if x, ok := n.Interface(one.ID); ok && x.Name != "" {
 				t.Errorf("the revoked holder still names itself %q", x.Name)
 			}
 		}
+		svc = nil
 		for _, n := range f.state("h2").Networks {
-			if s, ok := n.Service(etcd.ID); ok {
-				for _, b := range s.Backends {
-					if b.Name == "etcd-1.etcd" && b.Interface != next.ID {
-						t.Errorf("%s still answers etcd-1", b.Interface)
-					}
-				}
-			}
+			svc, _ = n.Service(etcd.ID)
+		}
+		if svc == nil {
+			t.Fatal("after the replacement, app's host holds no state for etcd")
+		}
+		names = map[model.InterfaceID]string{}
+		for _, b := range svc.Backends {
+			names[b.Interface] = b.Name
+		}
+		if names[next.ID] != "etcd-1.etcd" || names[plain.ID] != "" || len(names) != 2 {
+			t.Errorf("after the replacement, etcd's backends carry names %v; want etcd-1.etcd on %s", names, next.ID)
 		}
 	})
 }

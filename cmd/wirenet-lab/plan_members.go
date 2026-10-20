@@ -45,19 +45,22 @@ func (m *etcdMember) dir() string { return etcdDirs + "/" + m.li.Name }
 // Every peer began asking for the member's name, and dialing it (Inbound),
 // before the replacement attached, and Healthy and Synced are when the
 // first health check the new member passed, and the first read that found
-// every key on it, finished, by the client's clock.
+// every key on it, finished, by the client's clock. Republished is whether
+// etcd's log has the new member's first attempt to publish itself to the
+// cluster timing out.
 type memberMove struct {
-	Member  string            `json:"member"`
-	From    string            `json:"from"`
-	To      string            `json:"to"`
-	Attach  bench.AttachRound `json:"attach"`
-	Commit  time.Time         `json:"commit"`
-	Started int64             `json:"started_unix_ns"`
-	Lookups []bench.Lookup    `json:"lookups"`
-	Inbound []bench.Dial      `json:"inbound"`
-	Healthy int64             `json:"healthy_unix_ns"`
-	Synced  int64             `json:"synced_unix_ns"`
-	Fenced  bool              `json:"fenced"`
+	Member      string            `json:"member"`
+	From        string            `json:"from"`
+	To          string            `json:"to"`
+	Attach      bench.AttachRound `json:"attach"`
+	Commit      time.Time         `json:"commit"`
+	Started     int64             `json:"started_unix_ns"`
+	Lookups     []bench.Lookup    `json:"lookups"`
+	Inbound     []bench.Dial      `json:"inbound"`
+	Healthy     int64             `json:"healthy_unix_ns"`
+	Synced      int64             `json:"synced_unix_ns"`
+	Republished bool              `json:"republished"`
+	Fenced      bool              `json:"fenced"`
 }
 
 // memberURL is the URL a member is known by at one of its ports.
@@ -269,19 +272,27 @@ func (r *run) moveMember(m *etcdMember, members []*etcdMember, to Node, round in
 			return nil
 		})
 	}
-	// A failed check ends at its dial timeout, which bounds these figures'
-	// resolution.
-	at := r.etcdctlArgv("--dial-timeout", "500ms", "--endpoints", memberURL(m.name, etcdClient))
-	count := shellJoin(append(slices.Clone(at), "get", "key-", "--prefix", "--count-only", "--consistency=s", "-w", "fields"))
+	// Each check is a fresh curl, which fails at once on a refused
+	// connection, so none waits out a client library's reconnect backoff:
+	// etcdctl's first check, begun before etcd listens, retried only a
+	// second later.
+	base := memberURL(m.name, etcdClient)
+	curl := func(args ...string) string {
+		return shellJoin(append([]string{"curl", "-sf", "--connect-timeout", "0.2", "--max-time", "2"}, args...))
+	}
+	health := curl(base + "/health")
+	// A serializable count of the keys from key- up to key., over etcd's
+	// gRPC gateway.
+	count := curl("-X", "POST", base+"/v3/kv/range", "-d", `{"key":"a2V5LQ==","range_end":"a2V5Lg==","count_only":true,"serializable":true}`)
 	fns = append(fns, func() error {
 		var err error
-		if mv.Healthy, err = r.untilOK(client, 60*time.Second, append(slices.Clone(at), "endpoint", "health")...); err != nil {
+		if mv.Healthy, err = r.untilOK(client, 60*time.Second, "sh", "-c", health+` | grep -q '"health":"true"'`); err != nil {
 			return fmt.Errorf("members: round %d: the new %s never answered: %w", round, m.name, err)
 		}
 		return nil
 	}, func() error {
 		var err error
-		if mv.Synced, err = r.untilOK(client, 60*time.Second, "sh", "-c", fmt.Sprintf(`%s | grep -qx '"Count" : %d'`, count, membersKeys)); err != nil {
+		if mv.Synced, err = r.untilOK(client, 60*time.Second, "sh", "-c", fmt.Sprintf(`%s | grep -q '"count":"%d"'`, count, membersKeys)); err != nil {
 			return fmt.Errorf("members: round %d: the new %s never held every key: %w", round, m.name, err)
 		}
 		return nil
@@ -329,6 +340,12 @@ func (r *run) moveMember(m *etcdMember, members []*etcdMember, to Node, round in
 		if mv.Started, err = strconv.ParseInt(strings.TrimSpace(string(started)), 10, 64); err != nil {
 			return mv, fmt.Errorf("members: the new %s's start: %w", m.name, err)
 		}
+		log := shellQuote(m.dir() + ".log")
+		out, err := r.env.Exec(r.ctx, to, "sh", "-c", fmt.Sprintf("test -f %[1]s && { grep -q 'failed to publish local member' %[1]s && echo yes || echo no; }", log))
+		if err != nil {
+			return mv, fmt.Errorf("members: the new %s's log: %w", m.name, err)
+		}
+		mv.Republished = strings.TrimSpace(string(out)) == "yes"
 	}
 
 	// The replaced holder is revoked: it reaches no peer.
@@ -362,8 +379,8 @@ func (r *run) resolvConf(n Node, li api.LocalInterface) error {
 // startEtcd starts m's etcd in its namespace on a fresh data directory,
 // joining a new cluster or an existing one. It runs in one process with
 // the shell commands alongside, each in the background, so they start
-// together and end with it; the process writes when it started beside the
-// data directory.
+// together and end with it; the process writes when it started, and etcd
+// its log, beside the data directory.
 func (r *run) startEtcd(m *etcdMember, state string, alongside ...string) error {
 	etcd := []string{"ip", "netns", "exec", m.li.Namespace, r.env.Bin("etcd"),
 		"--name", m.name, "--data-dir", m.dir(),
@@ -372,8 +389,8 @@ func (r *run) startEtcd(m *etcdMember, state string, alongside ...string) error 
 		"--initial-advertise-peer-urls", memberURL(m.name, etcdPeer),
 		"--advertise-client-urls", memberURL(m.name, etcdClient),
 		"--initial-cluster", etcdCluster(), "--initial-cluster-token", "wirenet-lab",
-		"--initial-cluster-state", state, "--log-level", "warn"}
-	script := fmt.Sprintf("rm -rf %[1]s && mkdir -p %[1]s && date +%%s%%N > %[2]s", shellQuote(m.dir()), shellQuote(m.dir()+".started"))
+		"--initial-cluster-state", state, "--log-level", "warn", "--log-outputs", "stderr," + m.dir() + ".log"}
+	script := fmt.Sprintf("rm -rf %[1]s %[3]s && mkdir -p %[1]s && date +%%s%%N > %[2]s", shellQuote(m.dir()), shellQuote(m.dir()+".started"), shellQuote(m.dir()+".log"))
 	for _, c := range alongside {
 		script += " && { " + c + " & }"
 	}
@@ -431,7 +448,9 @@ func (r *run) membersTable(moves []memberMove) {
 		return
 	}
 	r.data("moves", moves)
-	var attach, first, names, inbound, healthy, synced []time.Duration
+	var attach, first, names, inbound []time.Duration
+	// healthy and synced split on whether the first publish timed out.
+	healthy, synced := map[bool][]time.Duration{}, map[bool][]time.Duration{}
 	fenced := 0
 	for _, mv := range moves {
 		if mv.Attach.Reached {
@@ -453,8 +472,8 @@ func (r *run) membersTable(moves []memberMove) {
 				inbound = append(inbound, fromStart(d.FirstDone))
 			}
 		}
-		healthy = append(healthy, fromStart(mv.Healthy))
-		synced = append(synced, fromStart(mv.Synced))
+		healthy[mv.Republished] = append(healthy[mv.Republished], fromStart(mv.Healthy))
+		synced[mv.Republished] = append(synced[mv.Republished], fromStart(mv.Synced))
 		if mv.Fenced {
 			fenced++
 		}
@@ -471,19 +490,29 @@ func (r *run) membersTable(moves []memberMove) {
 	row("The new member's first connection reaches etcd-1", "from the attach request", first)
 	row("A peer's namespace resolves etcd-2 to its new address", "from the commit", names)
 	row("A peer's connection by name reaches the new etcd-2", "from its start", inbound)
-	row("The new etcd-2 answers a health check at its name", "from its start", healthy)
-	row("The new etcd-2 serves every key", "from its start", synced)
+	for _, lost := range []bool{false, true} {
+		if len(healthy[lost]) == 0 {
+			continue
+		}
+		which := fmt.Sprintf("its first publish through, %d rounds", len(healthy[lost]))
+		if lost {
+			which = fmt.Sprintf("its first publish timed out, %d rounds", len(healthy[lost]))
+		}
+		row("The new etcd-2 answers a health check at its name, "+which, "from its start", healthy[lost])
+		row("The new etcd-2 serves every key, "+which, "from its start", synced[lost])
+	}
 	t.Caption = fmt.Sprintf("etcd v3.6 with three members in service `etcd`, each attached with `--member` and known to the others only as "+
 		"`http://etcd-N.etcd.members.internal:2380`; %d keys, written through the service address. Each round stops etcd-2's process "+
 		"as a lost host would, removes it from the cluster and adds a member at the same peer URL, then attaches a workload on another host "+
 		"with `--member etcd-2 --replace` and starts etcd there on an empty data directory; no other member's configuration changes. "+
 		"Before the attach, each peer starts asking for etcd-2's name every 5ms and dialing it by name every 20ms, and a client starts "+
-		"checking the new member's health and keys every 20ms. One process on the new member's host attaches and dials etcd-1 the "+
+		"checking the new member's `/health` and counting its keys with curl every 20ms. One process on the new member's host attaches and dials etcd-1 the "+
 		"moment the attach answers, as a starting workload does; etcd then starts there beside a server for the peers' dials. "+
 		"Times from the commit run from the control plane's commit of the replacing attach to the first lookup with the new address; "+
-		"times from its start run from etcd's start to the end of the first connection or check that succeeded. A new member that "+
-		"proposes itself before it hears from its leader waits out etcd's 7-second publish timeout, which the last two rows include. "+
-		"In %d of %d rounds the replaced holder's namespace reached no peer.", membersKeys, fenced, len(moves))
+		"times from its start run from etcd's start to the end of the first connection or check that succeeded. A new member applies "+
+		"the leader's snapshot by stopping and redialing every peer connection (`applySnapshot` in etcd's `server/etcdserver/server.go`), "+
+		"and its first attempt to publish itself to the cluster, begun before, can time out after 7 seconds, which etcd logs as a lost "+
+		"connection; the last rows split on that attempt. In %d of %d rounds the replaced holder's namespace reached no peer.", membersKeys, fenced, len(moves))
 	if r.env.Name() != "local" {
 		t.Caption += " Past the first two rows, each figure compares two machines' clocks, so it carries their synchronization error."
 	}

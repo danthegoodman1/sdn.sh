@@ -430,8 +430,9 @@ func (o *orchestrator) attach() {
 	o.tryAttach(p)
 }
 
-// memberNames are the names the orchestrator draws for a service's members.
-var memberNames = []string{"m0", "m1", "m2"}
+// memberNames is how many names the orchestrator draws a service's
+// members from: m0, m1 and so on.
+const memberNames = 3
 
 // attachMember sometimes attaches a workload holding a member name, as an
 // orchestrator running a cluster would, more often than not replacing
@@ -445,7 +446,7 @@ func (o *orchestrator) attachMember() {
 	p := &pendingAttach{
 		name: fmt.Sprintf("w%d", o.names), net: n,
 		svc: n.services[o.member.Index(len(n.services))], host: o.w.hosts[o.member.Index(len(o.w.hosts))],
-		member: memberNames[o.member.Index(len(memberNames))], replace: o.member.Percent(60),
+		member: fmt.Sprintf("m%d", o.member.Index(memberNames)), replace: o.member.Percent(60),
 	}
 	o.attaching[p.name] = p
 	o.tryAttach(p)

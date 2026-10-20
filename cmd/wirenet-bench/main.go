@@ -12,13 +12,15 @@
 //	wirenet-bench dial   --target ADDR:PORT [--netns NS,NS,...] [--want NAME] [--streak 1] [--until 10s]
 //	wirenet-bench lookup --name NAME --want ADDR | --unlike ADDR [--netns NS] [--until 10s]
 //	wirenet-bench cpu    [--duration 10s]
-//	wirenet-bench agent attach  --network NET --service SVC --name NAME [--rounds 1] [--dial ADDR:PORT] [--detach]
+//	wirenet-bench agent attach  --network NET --service SVC --name NAME [--rounds 1] [--dial ADDR:PORT] [--detach] [--member M [--replace]]
 //	wirenet-bench agent detach  --interface ID
 //	wirenet-bench agent churn   --network NET --service SVC --name PREFIX [--duration 10s] [--concurrency 4]
 //	wirenet-bench agent density --network NET --service SVC --name PREFIX [--max 1000] [--dial ADDR:PORT]
 //
 // --netns names a namespace under /run/netns, or a path; sockets are opened
-// inside it. The agent subcommands take --socket, the agent's local API.
+// inside it. A --target may name a host, which the namespace's resolver,
+// the agent's at 127.0.0.53, resolves for each connection. The agent
+// subcommands take --socket, the agent's local API.
 package main
 
 import (

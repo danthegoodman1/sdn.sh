@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/netip"
 	"path"
 	"slices"
 	"strconv"
@@ -37,23 +36,28 @@ type etcdMember struct {
 
 func (m *etcdMember) dir() string { return etcdDirs + "/" + m.li.Name }
 
-// memberMove is one measured move of a member to another host. Commit is
-// the control plane's commit of the replacing attach; Healthy and Synced
-// are the launches of the first health check the new member passed and of
-// the first read that found every key on it, by the client's clock.
+// memberMove is one measured move of a member to another host. Attach is
+// the replacing attach and the new member's first connection to etcd-1,
+// made at once from one process on its host, as a workload starting after
+// its attach would, and timed there from the attach request. Commit is the
+// control plane's commit of the attach, and Started when etcd and a
+// wirenet-bench server started in the new namespace, by its host's clock.
+// Every peer began asking for the member's name, and dialing it (Inbound),
+// before the replacement attached, and Healthy and Synced are when the
+// first health check the new member passed, and the first read that found
+// every key on it, finished, by the client's clock.
 type memberMove struct {
-	Member  string         `json:"member"`
-	From    string         `json:"from"`
-	To      string         `json:"to"`
-	Attach  time.Duration  `json:"attach_ns"`
-	Commit  time.Time      `json:"commit"`
-	Lookups []bench.Lookup `json:"lookups"`
-	// Dials are the first connections between the new holder and its
-	// peers, each way, launched once the attach answers.
-	Dials   []bench.Dial `json:"dials"`
-	Healthy int64        `json:"healthy_unix_ns"`
-	Synced  int64        `json:"synced_unix_ns"`
-	Fenced  bool         `json:"fenced"`
+	Member  string            `json:"member"`
+	From    string            `json:"from"`
+	To      string            `json:"to"`
+	Attach  bench.AttachRound `json:"attach"`
+	Commit  time.Time         `json:"commit"`
+	Started int64             `json:"started_unix_ns"`
+	Lookups []bench.Lookup    `json:"lookups"`
+	Inbound []bench.Dial      `json:"inbound"`
+	Healthy int64             `json:"healthy_unix_ns"`
+	Synced  int64             `json:"synced_unix_ns"`
+	Fenced  bool              `json:"fenced"`
 }
 
 // memberURL is the URL a member is known by at one of its ports.
@@ -204,8 +208,9 @@ type nsOn struct {
 }
 
 // moveMember stops m as a lost host would, swaps it for a new member at the
-// same peer URL, and attaches its replacement on to with replace, timing
-// each step from the attach's commit.
+// same peer URL, and attaches its replacement on to with replace. Every
+// measurement on the peers' side starts first, so each figure comes from
+// the hosts' clocks.
 func (r *run) moveMember(m *etcdMember, members []*etcdMember, to Node, round int, client nsOn,
 	attach func(Node, string, string, bool) (api.LocalInterface, error)) (memberMove, error) {
 	mv := memberMove{Member: m.name, From: m.host.Name, To: to.Name}
@@ -239,9 +244,8 @@ func (r *run) moveMember(m *etcdMember, members []*etcdMember, to Node, round in
 		return mv, fmt.Errorf("members: round %d: the cluster never took a new %s: %w", round, m.name, err)
 	}
 
-	// The peers ask for the name while the replacement attaches, so each
-	// sees the answer move.
 	name := m.name + ".etcd." + membersNet + ".internal."
+	workload := fmt.Sprintf("%s-r%d", m.name, round)
 	var peers []*etcdMember
 	for _, p := range members {
 		if p != m {
@@ -249,27 +253,63 @@ func (r *run) moveMember(m *etcdMember, members []*etcdMember, to Node, round in
 		}
 	}
 	mv.Lookups = make([]bench.Lookup, len(peers))
-	fns := []func() error{}
+	mv.Inbound = make([]bench.Dial, len(peers))
+	var fns []func() error
 	for i, p := range peers {
 		fns = append(fns, func() error {
 			return r.bench(p.host, &mv.Lookups[i], "lookup", "--netns="+p.li.Namespace, "--name", name, "--unlike", old.Addr6.String(), "--until", "20s")
+		}, func() error {
+			var d bench.Dials
+			if err := r.bench(p.host, &d, "dial", "--target", name+":"+itoa(bench.Port), "--netns="+p.li.Namespace, "--want", workload, "--until", "40s"); err != nil {
+				return err
+			}
+			if len(d.Results) == 1 {
+				mv.Inbound[i] = d.Results[0]
+			}
+			return nil
 		})
 	}
+	// A failed check ends at its dial timeout, which bounds these figures'
+	// resolution.
+	at := r.etcdctlArgv("--dial-timeout", "500ms", "--endpoints", memberURL(m.name, etcdClient))
+	count := shellJoin(append(slices.Clone(at), "get", "key-", "--prefix", "--count-only", "--consistency=s", "-w", "fields"))
+	fns = append(fns, func() error {
+		var err error
+		if mv.Healthy, err = r.untilOK(client, 60*time.Second, append(slices.Clone(at), "endpoint", "health")...); err != nil {
+			return fmt.Errorf("members: round %d: the new %s never answered: %w", round, m.name, err)
+		}
+		return nil
+	}, func() error {
+		var err error
+		if mv.Synced, err = r.untilOK(client, 60*time.Second, "sh", "-c", fmt.Sprintf(`%s | grep -qx '"Count" : %d'`, count, membersKeys)); err != nil {
+			return fmt.Errorf("members: round %d: the new %s never held every key: %w", round, m.name, err)
+		}
+		return nil
+	})
 	var li api.LocalInterface
 	fns = append(fns, func() error {
 		r.sleep(time.Second)
-		var after api.Network
-		start := time.Now()
-		var err error
-		if li, err = attach(to, fmt.Sprintf("%s-r%d", m.name, round), m.name, true); err != nil {
+		var a bench.Attach
+		if err := r.bench(to, &a, "agent", "attach", "--socket", r.env.AgentSocket(to), "--network", membersNet, "--service", "etcd",
+			"--name", workload, "--member", m.name, "--replace", "--dial", port(members[0].li.Addr6).String(), "--until", "20s"); err != nil {
 			return err
 		}
-		mv.Attach = time.Since(start)
+		if len(a.Rounds) == 1 {
+			mv.Attach = a.Rounds[0]
+		}
+		// Attaching the workload again answers with its interface.
+		var err error
+		if li, err = attach(to, workload, m.name, true); err != nil {
+			return err
+		}
+		var after api.Network
 		if err := r.ctl(r.env.CP(), &after, "network", "get", membersNet); err != nil {
 			return err
 		}
 		mv.Commit = after.Changed
-		return nil
+		m.host, m.li = to, li
+		return r.startEtcd(m, "existing",
+			shellJoin([]string{r.env.Bin("wirenet-bench"), "serve", "--listen", port(li.Addr6).String(), "--netns=" + li.Namespace, "--name", li.Name}))
 	})
 	if err := together(fns...); err != nil {
 		return mv, err
@@ -277,76 +317,27 @@ func (r *run) moveMember(m *etcdMember, members []*etcdMember, to Node, round in
 	for _, l := range mv.Lookups {
 		r.check(l.Found && slices.Contains(l.Got, li.Addr6.String()), "round %d: %s's lookup of %s found %v, want %v: %s", round, l.Namespace, name, l.Got, li.Addr6, l.Error)
 	}
-	m.host, m.li = to, li
-	if _, err := r.serve(to, li.Namespace, port(li.Addr6), li.Name); err != nil {
+	for _, d := range mv.Inbound {
+		r.check(d.Reached, "round %d: %s never reached the new %s: %+v", round, d.Namespace, m.name, d)
+	}
+	r.check(mv.Attach.Reached, "round %d: the new %s never reached %s: %+v", round, m.name, members[0].name, mv.Attach)
+	started, err := r.env.Exec(r.ctx, to, "cat", m.dir()+".started")
+	if err != nil {
 		return mv, err
 	}
-	if err := r.startEtcd(m, "existing"); err != nil {
-		return mv, err
-	}
-	// Each peer dials the new holder, and it dials each, while etcd joins.
-	type leg struct {
-		from       Node
-		ns         string
-		target     netip.AddrPort
-		name, want string
-	}
-	var legs []leg
-	for _, p := range peers {
-		legs = append(legs, leg{p.host, p.li.Namespace, port(li.Addr6), p.name + " to " + m.name, li.Name},
-			leg{to, li.Namespace, port(p.li.Addr6), m.name + " to " + p.name, ""})
-	}
-	mv.Dials = make([]bench.Dial, len(legs))
-	fns = nil
-	for i, l := range legs {
-		if l.want == "" && l.target != port(members[0].li.Addr6) {
-			// Only etcd-1's namespace answers wirenet-bench.
-			continue
+	if !r.env.DryRun() {
+		if mv.Started, err = strconv.ParseInt(strings.TrimSpace(string(started)), 10, 64); err != nil {
+			return mv, fmt.Errorf("members: the new %s's start: %w", m.name, err)
 		}
-		fns = append(fns, func() error {
-			var d bench.Dials
-			if err := r.bench(l.from, &d, "dial", "--target", l.target.String(), "--netns="+l.ns, "--want", l.want, "--until", "20s"); err != nil {
-				return err
-			}
-			if len(d.Results) == 1 {
-				mv.Dials[i] = d.Results[0]
-				mv.Dials[i].Target = l.name
-			}
-			return nil
-		})
-	}
-	fns = append(fns, func() error {
-		var err error
-		if mv.Healthy, err = r.untilOK(client, 60*time.Second, r.etcdctlArgv("--endpoints", memberURL(m.name, etcdClient), "endpoint", "health")...); err != nil {
-			return fmt.Errorf("members: round %d: the new %s never answered: %w", round, m.name, err)
-		}
-		return nil
-	})
-	if err := together(fns...); err != nil {
-		return mv, err
-	}
-	for _, d := range mv.Dials {
-		if d.Target != "" {
-			r.check(d.Reached, "round %d: %s never connected: %+v", round, d.Target, d)
-		}
-	}
-	count := shellJoin(r.etcdctlArgv("--endpoints", memberURL(m.name, etcdClient), "get", "key-", "--prefix", "--count-only", "--consistency=s", "-w", "fields"))
-	if mv.Synced, err = r.untilOK(client, 60*time.Second, "sh", "-c", fmt.Sprintf(`%s | grep -qx '"Count" : %d'`, count, membersKeys)); err != nil {
-		return mv, fmt.Errorf("members: round %d: the new %s never held every key: %w", round, m.name, err)
 	}
 
-	// The replaced holder is revoked: it reaches no peer, and the new
-	// holder does.
-	target := port(members[0].li.Addr6).String()
+	// The replaced holder is revoked: it reaches no peer.
 	var d bench.Dials
-	if err := r.bench(oldHost, &d, "dial", "--target", target, "--netns="+old.Namespace, "--until", "2s"); err != nil {
+	if err := r.bench(oldHost, &d, "dial", "--target", port(members[0].li.Addr6).String(), "--netns="+old.Namespace, "--until", "2s"); err != nil {
 		return mv, err
 	}
 	mv.Fenced = r.env.DryRun() || len(d.Results) == 1 && !d.Results[0].Reached
 	r.check(mv.Fenced, "round %d: the replaced holder %s still reaches %s", round, old.Interface, members[0].name)
-	if _, err := r.reach(to, li.Namespace, port(members[0].li.Addr6), 10*time.Second); err != nil {
-		return mv, err
-	}
 	var ifaces []api.InterfaceInfo
 	if err := r.ctl(r.env.CP(), &ifaces, "interface", "list", membersNet); err != nil {
 		return mv, err
@@ -369,19 +360,24 @@ func (r *run) resolvConf(n Node, li api.LocalInterface) error {
 }
 
 // startEtcd starts m's etcd in its namespace on a fresh data directory,
-// joining a new cluster or an existing one.
-func (r *run) startEtcd(m *etcdMember, state string) error {
-	if _, err := r.env.Exec(r.ctx, m.host, "sh", "-c", "rm -rf "+shellQuote(m.dir())+" && mkdir -p "+shellQuote(m.dir())); err != nil {
-		return err
-	}
-	p, err := r.spawn(m.host, "ip", "netns", "exec", m.li.Namespace, r.env.Bin("etcd"),
+// joining a new cluster or an existing one. It runs in one process with
+// the shell commands alongside, each in the background, so they start
+// together and end with it; the process writes when it started beside the
+// data directory.
+func (r *run) startEtcd(m *etcdMember, state string, alongside ...string) error {
+	etcd := []string{"ip", "netns", "exec", m.li.Namespace, r.env.Bin("etcd"),
 		"--name", m.name, "--data-dir", m.dir(),
 		"--listen-peer-urls", fmt.Sprintf("http://[::]:%d", etcdPeer),
 		"--listen-client-urls", fmt.Sprintf("http://[::]:%d", etcdClient),
 		"--initial-advertise-peer-urls", memberURL(m.name, etcdPeer),
 		"--advertise-client-urls", memberURL(m.name, etcdClient),
 		"--initial-cluster", etcdCluster(), "--initial-cluster-token", "wirenet-lab",
-		"--initial-cluster-state", state, "--log-level", "warn")
+		"--initial-cluster-state", state, "--log-level", "warn"}
+	script := fmt.Sprintf("rm -rf %[1]s && mkdir -p %[1]s && date +%%s%%N > %[2]s", shellQuote(m.dir()), shellQuote(m.dir()+".started"))
+	for _, c := range alongside {
+		script += " && { " + c + " & }"
+	}
+	p, err := r.spawn(m.host, "sh", "-c", script+" && exec "+shellJoin(etcd))
 	m.proc = p
 	return err
 }
@@ -397,11 +393,10 @@ func (r *run) inNS(ns nsOn, argv ...string) ([]byte, error) {
 }
 
 // untilOK runs argv in a namespace every 20ms until it succeeds or limit
-// passes, and returns when the first success launched, by its host's
-// clock.
+// passes, and returns when the success finished, by its host's clock.
 func (r *run) untilOK(ns nsOn, limit time.Duration, argv ...string) (int64, error) {
 	script := fmt.Sprintf(`end=$(( $(date +%%s%%N) + %d )); while [ "$(date +%%s%%N)" -lt "$end" ]; do `+
-		`t=$(date +%%s%%N); if %s >/dev/null 2>&1; then echo "$t"; exit 0; fi; sleep 0.02; done; echo "no success within %v" >&2; exit 1`,
+		`if %s >/dev/null 2>&1; then date +%%s%%N; exit 0; fi; sleep 0.02; done; echo "no success within %v" >&2; exit 1`,
 		limit.Nanoseconds(), shellJoin(argv), limit)
 	out, err := r.inNS(ns, "sh", "-c", script)
 	if err != nil || r.env.DryRun() {
@@ -436,31 +431,30 @@ func (r *run) membersTable(moves []memberMove) {
 		return
 	}
 	r.data("moves", moves)
-	var attach, names, inbound, outbound, healthy, synced []time.Duration
+	var attach, first, names, inbound, healthy, synced []time.Duration
 	fenced := 0
 	for _, mv := range moves {
-		attach = append(attach, mv.Attach)
-		since := func(ns int64) time.Duration { return time.Duration(ns - mv.Commit.UnixNano()) }
+		if mv.Attach.Reached {
+			attach = append(attach, time.Duration(mv.Attach.AttachMS*float64(time.Millisecond)))
+			first = append(first, time.Duration(mv.Attach.FirstConn*float64(time.Millisecond)))
+		}
+		fromCommit := func(ns int64) time.Duration { return max(time.Duration(ns-mv.Commit.UnixNano()), 0) }
+		fromStart := func(ns int64) time.Duration { return time.Duration(ns - mv.Started) }
 		for _, l := range mv.Lookups {
 			if l.Found {
-				names = append(names, max(since(l.First), 0))
+				names = append(names, fromCommit(l.First))
 			}
 		}
-		for _, d := range mv.Dials {
-			switch {
-			case !d.Reached:
-			case d.Want != "":
-				inbound = append(inbound, since(d.First))
-			default:
-				outbound = append(outbound, since(d.First))
+		if mv.Started == 0 {
+			continue
+		}
+		for _, d := range mv.Inbound {
+			if d.Reached {
+				inbound = append(inbound, fromStart(d.FirstDone))
 			}
 		}
-		if mv.Healthy != 0 {
-			healthy = append(healthy, since(mv.Healthy))
-		}
-		if mv.Synced != 0 {
-			synced = append(synced, since(mv.Synced))
-		}
+		healthy = append(healthy, fromStart(mv.Healthy))
+		synced = append(synced, fromStart(mv.Synced))
 		if mv.Fenced {
 			fenced++
 		}
@@ -474,22 +468,24 @@ func (r *run) membersTable(moves []memberMove) {
 		t.Rows = append(t.Rows, []string{step, from, msec(l.P50), msec(l.Max)})
 	}
 	row("The replacing attach answers", "from its request", attach)
+	row("The new member's first connection reaches etcd-1", "from the attach request", first)
 	row("A peer's namespace resolves etcd-2 to its new address", "from the commit", names)
-	row("A peer's first connection reaches the new etcd-2", "from the commit", inbound)
-	row("The new etcd-2's first connection reaches etcd-1", "from the commit", outbound)
-	row("The new etcd-2 answers a health check at its name", "from the commit", healthy)
-	row("The new etcd-2 serves every key", "from the commit", synced)
+	row("A peer's connection by name reaches the new etcd-2", "from its start", inbound)
+	row("The new etcd-2 answers a health check at its name", "from its start", healthy)
+	row("The new etcd-2 serves every key", "from its start", synced)
 	t.Caption = fmt.Sprintf("etcd v3.6 with three members in service `etcd`, each attached with `--member` and known to the others only as "+
 		"`http://etcd-N.etcd.members.internal:2380`; %d keys, written through the service address. Each round stops etcd-2's process "+
 		"as a lost host would, removes it from the cluster and adds a member at the same peer URL, then attaches a workload on another host "+
 		"with `--member etcd-2 --replace` and starts etcd there on an empty data directory; no other member's configuration changes. "+
-		"Times from the commit run from the control plane's commit of the replacing attach; peers ask for the name every 5ms, and the "+
-		"health check and key count repeat every 20ms. The new member starts once the attach answers, so its rows include the attach. "+
-		"Each peer and the new member dial each other every 20ms from then on, as etcd's own connections do; a new member that proposes "+
-		"itself before it hears from its leader also waits out etcd's 7-second publish timeout, which the last two rows include. "+
+		"Before the attach, each peer starts asking for etcd-2's name every 5ms and dialing it by name every 20ms, and a client starts "+
+		"checking the new member's health and keys every 20ms. One process on the new member's host attaches and dials etcd-1 the "+
+		"moment the attach answers, as a starting workload does; etcd then starts there beside a server for the peers' dials. "+
+		"Times from the commit run from the control plane's commit of the replacing attach to the first lookup with the new address; "+
+		"times from its start run from etcd's start to the end of the first connection or check that succeeded. A new member that "+
+		"proposes itself before it hears from its leader waits out etcd's 7-second publish timeout, which the last two rows include. "+
 		"In %d of %d rounds the replaced holder's namespace reached no peer.", membersKeys, fenced, len(moves))
 	if r.env.Name() != "local" {
-		t.Caption += " Times from the commit compare the control plane's clock with the hosts', so they carry the clocks' synchronization error."
+		t.Caption += " Past the first two rows, each figure compares two machines' clocks, so it carries their synchronization error."
 	}
 	r.rep.table(t)
 }

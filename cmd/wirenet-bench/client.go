@@ -24,16 +24,65 @@ import (
 )
 
 func dialTCP(ns, target string, timeout time.Duration) (*net.TCPConn, error) {
+	addr, err := resolveTarget(ns, target, timeout)
+	if err != nil {
+		return nil, err
+	}
 	var c net.Conn
-	err := inNetns(ns, func() error {
+	err = inNetns(ns, func() error {
 		var err error
-		c, err = net.DialTimeout("tcp", target, timeout)
+		c, err = net.DialTimeout("tcp", addr, timeout)
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	return c.(*net.TCPConn), nil
+}
+
+// resolverAddr is the agent's resolver inside every workload namespace.
+const resolverAddr = "127.0.0.53:53"
+
+// nsResolver asks the resolver at server from inside namespace ns. The
+// resolver dials from its own goroutines, so each dial enters the
+// namespace itself.
+func nsResolver(ns, server string) *net.Resolver {
+	return &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var c net.Conn
+		err := inNetns(ns, func() error {
+			var err error
+			c, err = (&net.Dialer{}).DialContext(ctx, network, server)
+			return err
+		})
+		return c, err
+	}}
+}
+
+// resolveTarget turns a target whose host is a name into an address,
+// asking the namespace's own resolver as a workload there would, IPv6
+// first.
+func resolveTarget(ns, target string, timeout time.Duration) (string, error) {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		return "", err
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return target, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	addrs, err := nsResolver(ns, resolverAddr).LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return "", err
+	}
+	if len(addrs) == 0 {
+		return "", fmt.Errorf("%s has no address", host)
+	}
+	addr := addrs[0]
+	if i := slices.IndexFunc(addrs, netip.Addr.Is6); i >= 0 {
+		addr = addrs[i]
+	}
+	return net.JoinHostPort(addr.String(), port), nil
 }
 
 func stream(args []string) error {
@@ -418,7 +467,7 @@ func lookup(args []string) error {
 	name := fs.String("name", "", "the name to look up")
 	want := fs.String("want", "", "the address that ends the loop")
 	unlike := fs.String("unlike", "", "the address an answer must move from to end the loop")
-	server := fs.String("server", "127.0.0.53:53", "the resolver, inside the namespace")
+	server := fs.String("server", resolverAddr, "the resolver, inside the namespace")
 	until := fs.Duration("until", 10*time.Second, "how long the loop tries")
 	interval := fs.Duration("interval", 5*time.Millisecond, "pause between attempts")
 	if err := parse(fs, args); err != nil {
@@ -441,15 +490,7 @@ func lookup(args []string) error {
 		}
 		return len(addrs) > 0 && !slices.Contains(addrs, ref)
 	}
-	r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-		var c net.Conn
-		err := inNetns(*ns, func() error {
-			var err error
-			c, err = (&net.Dialer{}).DialContext(ctx, network, *server)
-			return err
-		})
-		return c, err
-	}}
+	r := nsResolver(*ns, *server)
 	out := bench.Lookup{Namespace: *ns, Name: *name, Want: *want, Unlike: *unlike, Start: time.Now().UnixNano()}
 	deadline := time.Now().Add(*until)
 	for {

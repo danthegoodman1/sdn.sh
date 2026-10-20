@@ -42,6 +42,8 @@ Nine c6i.xlarge instances (4 vCPU, up to 12.5 Gb/s) in one placement group in us
 | A new workload's first connection to a peer on another host, 20 peers | 50 ms p50, 60 ms max |
 | A backend replaced, until every client reaches the new one | 25–45 ms p50, 36–55 ms p99 |
 | One of two backends removed, rewriting half of each client's slots | 99–123 ms p50, 137–161 ms p99 |
+| An etcd member moved to another host: its first connection to a peer, from the attach | 26–28 ms p50, 35 ms max |
+| Its peers' lookups of its name answering the new address, from the commit | 10–11 ms p50, 17 ms max |
 | A deny closing a wildcard to 30 sandboxes, from its commit | 9–11 ms p50, 16 ms max |
 | The deny lifted, until every sandbox reaches db again | 20–25 ms p50, 64 ms max |
 | A relay killed: an open TCP connection stalls | 0.82 s, then carries on |
@@ -49,7 +51,7 @@ Nine c6i.xlarge instances (4 vCPU, up to 12.5 Gb/s) in one placement group in us
 | Attaches and detaches across four hosts, 4 workers each | 46 pairs a second, no failures |
 | Interfaces on one host | 1,000, at 841 KiB each |
 
-Service changes ran under attach churn, with 30 clients over the four hosts. Ranges span two runs, and six for the rule changes.
+Service changes ran under attach churn, with 30 clients over the four hosts. Ranges span two runs, six for the rule changes, and two of ten moves for the member.
 
 Throughput runs at an 8,941-byte overlay MTU, the most a VPC's 9,001-byte path carries under WireGuard. WireGuard's cost is per packet, so at the 1,380-byte default, which a path across the internet needs, throughput drops substantially: to a third on one edge, and to half across relays.
 

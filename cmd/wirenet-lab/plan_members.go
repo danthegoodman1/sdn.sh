@@ -494,9 +494,13 @@ func (r *run) membersTable(moves []memberMove) {
 		if len(healthy[lost]) == 0 {
 			continue
 		}
-		which := fmt.Sprintf("its first publish through, %d rounds", len(healthy[lost]))
+		n := fmt.Sprintf("%d rounds", len(healthy[lost]))
+		if len(healthy[lost]) == 1 {
+			n = "1 round"
+		}
+		which := "its first publish through, " + n
 		if lost {
-			which = fmt.Sprintf("its first publish timed out, %d rounds", len(healthy[lost]))
+			which = "its first publish timed out, " + n
 		}
 		row("The new etcd-2 answers a health check at its name, "+which, "from its start", healthy[lost])
 		row("The new etcd-2 serves every key, "+which, "from its start", synced[lost])

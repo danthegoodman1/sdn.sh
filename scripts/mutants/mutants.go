@@ -208,7 +208,7 @@ var Mutants = []Mutant{
 		Breaks: "a batch removes a backend's slots before its peer, so no slot ever names an address without a peer",
 		Edits: []Edit{
 			{agentPlan, applyRules + removeUnwanted, removeUnwanted},
-			{agentPlan, "\tif st.sweep {\n", applyRules + "\tif st.sweep {\n"},
+			{agentPlan, "\treturn ops\n}\n\n// sweep removes", applyRules + "\treturn ops\n}\n\n// sweep removes"},
 		},
 		Catch: []string{"sim"},
 	},
@@ -285,9 +285,18 @@ var Mutants = []Mutant{
 	},
 	{
 		ID:     "sweep-forgets-live-peers",
-		Breaks: "a sweep keeps every flow a peer the batch leaves installed accounts for",
-		Edits:  []Edit{{agentPlan, "\tfor _, tp := range tgt.peers {\n\t\tfor _, a := range tp.peer.Allowed {\n\t\t\tkeep = append(keep, a.Addr())", "\tfor _, tp := range tgt.peers[:0] {\n\t\tfor _, a := range tp.peer.Allowed {\n\t\t\tkeep = append(keep, a.Addr())"}},
+		Breaks: "a sweep keeps every flow an installed peer accounts for",
+		Edits:  []Edit{{agentPlan, "for _, a := range installed[key].Allowed {", "for _, a := range installed[key].Allowed[:0] {"}},
 		Catch:  []string{"sim"},
+	},
+	{
+		ID:     "sweep-after-adds",
+		Breaks: "a restart's sweep runs before the batch installs anything, so no flow a crash left to an address outlives a new peer's claim to it",
+		Edits: []Edit{
+			{agentPlan, "\tif st.sweep {\n\t\tops = append(ops, sweep(st.name, n, x, st.peers, ok))\n\t}\n", ""},
+			{agentPlan, "\treturn ops\n}\n\n// sweep removes", "\tif st.sweep {\n\t\tops = append(ops, sweep(st.name, n, x, st.peers, ok))\n\t}\n\treturn ops\n}\n\n// sweep removes"},
+		},
+		Catch: []string{"agent-core"},
 	},
 	{
 		ID:     "shrunk-peer-not-flushed",
@@ -1073,6 +1082,30 @@ var Mutants = []Mutant{
 		Catch:  []string{"dns"},
 	},
 	{
+		ID:     "retry-ignores-member",
+		Breaks: "an attach retried under its interface's identifier returns the interface only for the member it holds",
+		Edits:  []Edit{{cpPlane, "if existing.Member != req.Member {", "if false {"}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "replace-without-member-accepted",
+		Breaks: "a replacement names the member it takes over",
+		Edits:  []Edit{{cpPlane, "if req.Replace && req.Member == \"\" {", "if false {"}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "journal-drops-member",
+		Breaks: "the agent's journal keeps an interface's member, so a restarted agent refuses to attach the workload as another",
+		Edits:  []Edit{{agentLife, "Kind: i.kind, Member: i.member,", "Kind: i.kind,"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "observe-forgets-removal",
+		Breaks: "a removal that failed partway still leaves the flows of the peers it took to flush",
+		Edits:  []Edit{{agentPlan, "if !held[a] && !slices.Contains(st.unflushed, a.Addr()) {", "if false && !held[a] {"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
 		ID:     "agent-drops-member",
 		Breaks: "the agent asks the control plane for the member and replacement its caller named",
 		Edits:  []Edit{{agentLife, "PublicKey: i.pub, ListenPort: i.port, Member: i.member, Replace: i.replace,", "PublicKey: i.pub, ListenPort: i.port,"}},
@@ -1081,7 +1114,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "agent-ignores-member-change",
 		Breaks: "a workload attached again keeps the member it holds",
-		Edits:  []Edit{{agentLife, `if i.netRef != "" && i.member != a.Member {`, `if false {`}},
+		Edits:  []Edit{{agentLife, `if i.member != a.Member {`, `if false {`}},
 		Catch:  []string{"agent-core"},
 	},
 	{
@@ -1105,7 +1138,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "held-initiations-unordered",
 		Breaks: "of two directions' held initiations, the one that waited longer goes",
-		Edits:  []Edit{{relayCore, "slices.SortStableFunc(batches, func(a, b batch) int {", "slices.SortStableFunc(batches[:0], func(a, b batch) int {"}},
+		Edits:  []Edit{{relayCore, "slices.SortStableFunc(batches, releaseOrder)", "slices.SortStableFunc(batches[:0], releaseOrder)"}},
 		Catch:  []string{"relay-core"},
 	},
 	{
@@ -1123,7 +1156,43 @@ var Mutants = []Mutant{
 	{
 		ID:     "response-unrecorded",
 		Breaks: "the relay records a handshake response as its end answering",
-		Edits:  []Edit{{relayCore, "k == wgInitiation && len(b) == 148 || k == wgResponse && len(b) == 92", "k == wgInitiation && len(b) == 148"}},
+		Edits:  []Edit{{relayCore, "k == wgInitiation && len(b) == 148, k == wgResponse && len(b) == 92, k == wgCookie", "k == wgInitiation && len(b) == 148, k == wgCookie"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "cookie-reply-unrecorded",
+		Breaks: "the relay records a cookie reply as its end answering, since it leaves the end's own handshake whole",
+		Edits:  []Edit{{relayCore, "\tcase wgResponse, wgCookie:\n", "\tcase wgResponse:\n"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "handshake-size-unchecked",
+		Breaks: "the relay reads a datagram as a handshake message only at that message's size",
+		Edits:  []Edit{{relayCore, "k == wgInitiation && len(b) == 148,", "k == wgInitiation && len(b) >= 148,"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "crossing-ignores-moved-endpoint",
+		Breaks: "an initiation from an end whose endpoint changed after the peer's went on crosses nothing, since the peer's went to the old endpoint",
+		Edits:  []Edit{{relayCore, "!d.answered.After(peer.initiated) && !d.opened.After(peer.initiated)", "!d.answered.After(peer.initiated)"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "same-endpoint-opens-window",
+		Breaks: "only a registration that changes the endpoint opens the window for judging crossings, so a periodic claim lets no forged initiation hold the other end back",
+		Edits:  []Edit{{relayCore, "\tif r.Endpoint != d.Endpoint {\n\t\td.opened = now", "\tif true {\n\t\td.opened = now"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "push-forgets-handshakes",
+		Breaks: "a table push keeps each unchanged direction's handshake record, so a push between two initiations still lets the rule judge them",
+		Edits:  []Edit{{relayCore, "\t\t\t\td.opened, d.initiated, d.answered = old.opened, old.initiated, old.answered\n", ""}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "release-order-partial",
+		Breaks: "the release order is total, so the older of an edge's two initiations goes however many batches one release holds",
+		Edits:  []Edit{{relayCore, "\tcase az && bz:\n\t\treturn 0\n\tcase az:\n\t\treturn 1\n\tcase bz:\n\t\treturn -1\n", "\tcase az || bz:\n\t\treturn 0\n"}},
 		Catch:  []string{"relay-core"},
 	},
 }

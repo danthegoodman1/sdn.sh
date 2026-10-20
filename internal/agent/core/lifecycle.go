@@ -41,7 +41,7 @@ func (c *Core) Start(now time.Time, journal []JournalEntry, snap kernel.Snapshot
 	for _, e := range journal {
 		i := &iface{
 			id: e.Interface, name: e.Name, phase: ready, ns: e.Namespace, port: e.ListenPort, pub: e.PublicKey,
-			kind: e.Kind, network: e.Network, service: e.Service, attachSent: true,
+			kind: e.Kind, network: e.Network, service: e.Service, member: e.Member, attachSent: true,
 		}
 		c.ifaces[i.id] = i
 		st := newNS(e.Namespace, i.id)
@@ -210,6 +210,12 @@ func (c *Core) Attach(now time.Time, req RequestID, a api.LocalAttach) {
 			reply(fmt.Errorf("workload %q is attached to another service", a.Name))
 			return
 		}
+		// The journal keeps the member, so an adopted interface is judged
+		// too.
+		if i.member != a.Member {
+			reply(fmt.Errorf("workload %q is attached as another member", a.Name))
+			return
+		}
 		if i.phase == ready {
 			c.emit(Reply{Request: req, Interface: c.describe(i)})
 		} else {
@@ -240,6 +246,7 @@ func (c *Core) Attach(now time.Time, req RequestID, a api.LocalAttach) {
 	i := &iface{
 		id: id, name: a.Name, phase: creating, ns: c.cfg.Prefix + model.Short(idStr), port: port,
 		priv: priv, pub: priv.Public(), netRef: a.Network, svcRef: a.Service, kind: kind,
+		member: a.Member, replace: a.Replace,
 		deadline: now.Add(c.cfg.AttachTimeout), waiting: []RequestID{req},
 	}
 	c.ifaces[id] = i
@@ -303,7 +310,7 @@ func (c *Core) release(i *iface) {
 
 func (c *Core) entry(i *iface) JournalEntry {
 	return JournalEntry{
-		Interface: i.id, Name: i.name, Network: i.network, Service: i.service, Kind: i.kind,
+		Interface: i.id, Name: i.name, Network: i.network, Service: i.service, Kind: i.kind, Member: i.member,
 		Namespace: i.ns, ListenPort: i.port, PublicKey: i.pub, Detaching: i.phase == detaching,
 	}
 }
@@ -352,7 +359,7 @@ func (c *Core) AttachDone(now time.Time, id model.InterfaceID, resp *api.AttachR
 func (c *Core) attachRequest(i *iface) api.AttachRequest {
 	return api.AttachRequest{
 		Interface: i.id, Network: i.netRef, Service: i.svcRef, Kind: i.kind,
-		PublicKey: i.pub, ListenPort: i.port,
+		PublicKey: i.pub, ListenPort: i.port, Member: i.member, Replace: i.replace,
 	}
 }
 
@@ -479,6 +486,9 @@ func (c *Core) describe(i *iface) api.LocalInterface {
 		li.Addr6, li.Addr4 = x.Addr6, x.Addr4
 		li.Search = n.Domain()
 		li.Resolver = dns.ListenAddr().Addr()
+		if x.Name != "" {
+			li.Member = x.Name + "." + n.Domain()
+		}
 	}
 	return li
 }

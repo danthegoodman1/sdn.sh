@@ -118,6 +118,9 @@ type Interface struct {
 	ListenPort uint16            `json:"listen_port"`
 	State      LeaseState        `json:"state"`
 	Expires    time.Time         `json:"expires"`
+	// Name is the interface's own DNS name under the network's domain,
+	// member.service, when it holds a member name.
+	Name string `json:"name,omitempty"`
 	// Peers, sorted by interface: every interface policy connects this one
 	// with, live or draining.
 	Peers []Peer `json:"peers,omitempty"`
@@ -218,6 +221,9 @@ type Backend struct {
 	Interface model.InterfaceID `json:"interface"`
 	Addr6     netip.Addr        `json:"addr6"`
 	Addr4     netip.Addr        `json:"addr4,omitzero"`
+	// Name is the backend's own DNS name under the network's domain,
+	// member.service, when it holds a member name.
+	Name string `json:"name,omitempty"`
 }
 
 // NetworkRef is a network a host holds state for, at a revision.

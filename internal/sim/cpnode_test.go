@@ -30,7 +30,7 @@ func TestAParkedPollWakesForItsNetwork(t *testing.T) {
 				return err
 			}
 		}
-		_, err = c.plane.Attach(tx, w.now(), host, api.AttachRequest{
+		_, _, err = c.plane.Attach(tx, w.now(), host, api.AttachRequest{
 			Interface: "if-a", Network: "n", Service: "a", PublicKey: model.Key{1}, ListenPort: 1,
 		})
 		return err

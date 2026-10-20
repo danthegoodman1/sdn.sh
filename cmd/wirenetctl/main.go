@@ -14,12 +14,16 @@
 //	wirenetctl relay create NAME --address LOCAL[=ADVERTISED] [--address ...] --ports LO-HI --probe-port N
 //	wirenetctl relay list | delete RELAY
 //	wirenetctl device create NET SVC --gateway IFACE [--ttl 24h] [--out FILE]
-//	wirenetctl attach NAME NET SVC      (local agent)
+//	wirenetctl attach NAME NET SVC [--member M [--replace]]   (local agent)
 //	wirenetctl detach IFACE             (local agent)
 //	wirenetctl interfaces | status      (local agent)
 //
 // A rule's FROM or TO may be '*', every service but the one on the other
 // side, and TO may be internet.
+//
+// An attach with --member holds that name among the service's members, so
+// M.SVC.NET.internal resolves to the workload's own address; --replace
+// revokes the name's current holder.
 //
 // The control plane is $WIRENET_CP, authenticated by $WIRENET_ADMIN_TOKEN; the
 // agent's socket is $WIRENET_AGENT_SOCKET.
@@ -256,11 +260,18 @@ func local(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "attach":
 		kind := fs.String("kind", "", "workload (default) or gateway")
+		member := fs.String("member", "", "a name to hold among the service's members")
+		replace := fs.Bool("replace", false, "revoke the member's current holder")
 		a, err := parse(fs, args[1:], 3)
 		if err != nil {
 			return err
 		}
-		return show(c.Attach(ctx, api.LocalAttach{Name: a[0], Network: a[1], Service: a[2], Kind: api.Kind(*kind)}))
+		if *replace && *member == "" {
+			return errors.New("attach: --replace needs --member")
+		}
+		return show(c.Attach(ctx, api.LocalAttach{
+			Name: a[0], Network: a[1], Service: a[2], Kind: api.Kind(*kind), Member: *member, Replace: *replace,
+		}))
 	case "detach":
 		a, err := parse(fs, args[1:], 1)
 		if err != nil {

@@ -20,8 +20,43 @@ func (q *Queries) DeleteInterface(ctx context.Context, id string) error {
 	return err
 }
 
+const getHolder = `-- name: GetHolder :one
+SELECT id, network, service, host, kind, gateway, public_key, addr6, addr4, listen_port, state, expires, created, ended, drained, member FROM interfaces
+WHERE service = $1 AND member = $2 AND state = 'live' AND member <> ''
+`
+
+type GetHolderParams struct {
+	Service string
+	Member  string
+}
+
+// The predicate repeats interfaces_member's, so the planner can use it.
+func (q *Queries) GetHolder(ctx context.Context, arg GetHolderParams) (Interface, error) {
+	row := q.db.QueryRow(ctx, getHolder, arg.Service, arg.Member)
+	var i Interface
+	err := row.Scan(
+		&i.ID,
+		&i.Network,
+		&i.Service,
+		&i.Host,
+		&i.Kind,
+		&i.Gateway,
+		&i.PublicKey,
+		&i.Addr6,
+		&i.Addr4,
+		&i.ListenPort,
+		&i.State,
+		&i.Expires,
+		&i.Created,
+		&i.Ended,
+		&i.Drained,
+		&i.Member,
+	)
+	return i, err
+}
+
 const getInterface = `-- name: GetInterface :one
-SELECT id, network, service, host, kind, gateway, public_key, addr6, addr4, listen_port, state, expires, created, ended, drained FROM interfaces WHERE id = $1
+SELECT id, network, service, host, kind, gateway, public_key, addr6, addr4, listen_port, state, expires, created, ended, drained, member FROM interfaces WHERE id = $1
 `
 
 func (q *Queries) GetInterface(ctx context.Context, id string) (Interface, error) {
@@ -43,12 +78,13 @@ func (q *Queries) GetInterface(ctx context.Context, id string) (Interface, error
 		&i.Created,
 		&i.Ended,
 		&i.Drained,
+		&i.Member,
 	)
 	return i, err
 }
 
 const listEnded = `-- name: ListEnded :many
-SELECT id, network, service, host, kind, gateway, public_key, addr6, addr4, listen_port, state, expires, created, ended, drained FROM interfaces
+SELECT id, network, service, host, kind, gateway, public_key, addr6, addr4, listen_port, state, expires, created, ended, drained, member FROM interfaces
 WHERE state <> 'live' AND drained AND ended < $1
 ORDER BY ended, id
 LIMIT $2
@@ -84,6 +120,7 @@ func (q *Queries) ListEnded(ctx context.Context, arg ListEndedParams) ([]Interfa
 			&i.Created,
 			&i.Ended,
 			&i.Drained,
+			&i.Member,
 		); err != nil {
 			return nil, err
 		}
@@ -96,7 +133,7 @@ func (q *Queries) ListEnded(ctx context.Context, arg ListEndedParams) ([]Interfa
 }
 
 const listExpired = `-- name: ListExpired :many
-SELECT id, network, service, host, kind, gateway, public_key, addr6, addr4, listen_port, state, expires, created, ended, drained FROM interfaces
+SELECT id, network, service, host, kind, gateway, public_key, addr6, addr4, listen_port, state, expires, created, ended, drained, member FROM interfaces
 WHERE state = 'live' AND expires < $1
 ORDER BY expires, id
 LIMIT $2
@@ -133,6 +170,7 @@ func (q *Queries) ListExpired(ctx context.Context, arg ListExpiredParams) ([]Int
 			&i.Created,
 			&i.Ended,
 			&i.Drained,
+			&i.Member,
 		); err != nil {
 			return nil, err
 		}
@@ -145,7 +183,7 @@ func (q *Queries) ListExpired(ctx context.Context, arg ListExpiredParams) ([]Int
 }
 
 const listHostInterfaces = `-- name: ListHostInterfaces :many
-SELECT id, network, service, host, kind, gateway, public_key, addr6, addr4, listen_port, state, expires, created, ended, drained FROM interfaces WHERE host = $1 ORDER BY id
+SELECT id, network, service, host, kind, gateway, public_key, addr6, addr4, listen_port, state, expires, created, ended, drained, member FROM interfaces WHERE host = $1 ORDER BY id
 `
 
 func (q *Queries) ListHostInterfaces(ctx context.Context, host string) ([]Interface, error) {
@@ -173,6 +211,7 @@ func (q *Queries) ListHostInterfaces(ctx context.Context, host string) ([]Interf
 			&i.Created,
 			&i.Ended,
 			&i.Drained,
+			&i.Member,
 		); err != nil {
 			return nil, err
 		}
@@ -185,7 +224,7 @@ func (q *Queries) ListHostInterfaces(ctx context.Context, host string) ([]Interf
 }
 
 const listInterfaces = `-- name: ListInterfaces :many
-SELECT id, network, service, host, kind, gateway, public_key, addr6, addr4, listen_port, state, expires, created, ended, drained FROM interfaces WHERE network = $1 ORDER BY id
+SELECT id, network, service, host, kind, gateway, public_key, addr6, addr4, listen_port, state, expires, created, ended, drained, member FROM interfaces WHERE network = $1 ORDER BY id
 `
 
 func (q *Queries) ListInterfaces(ctx context.Context, network string) ([]Interface, error) {
@@ -213,6 +252,7 @@ func (q *Queries) ListInterfaces(ctx context.Context, network string) ([]Interfa
 			&i.Created,
 			&i.Ended,
 			&i.Drained,
+			&i.Member,
 		); err != nil {
 			return nil, err
 		}
@@ -225,7 +265,7 @@ func (q *Queries) ListInterfaces(ctx context.Context, network string) ([]Interfa
 }
 
 const listUndrained = `-- name: ListUndrained :many
-SELECT id, network, service, host, kind, gateway, public_key, addr6, addr4, listen_port, state, expires, created, ended, drained FROM interfaces
+SELECT id, network, service, host, kind, gateway, public_key, addr6, addr4, listen_port, state, expires, created, ended, drained, member FROM interfaces
 WHERE state = 'released' AND NOT drained AND ended < $1
 ORDER BY ended, id
 LIMIT $2
@@ -261,6 +301,7 @@ func (q *Queries) ListUndrained(ctx context.Context, arg ListUndrainedParams) ([
 			&i.Created,
 			&i.Ended,
 			&i.Drained,
+			&i.Member,
 		); err != nil {
 			return nil, err
 		}
@@ -275,14 +316,14 @@ func (q *Queries) ListUndrained(ctx context.Context, arg ListUndrainedParams) ([
 const putInterface = `-- name: PutInterface :exec
 INSERT INTO interfaces (
 	id, network, service, host, kind, gateway, public_key, addr6, addr4,
-	listen_port, state, expires, created, ended, drained
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+	listen_port, state, expires, created, ended, drained, member
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 ON CONFLICT (id) DO UPDATE SET
 	network = excluded.network, service = excluded.service, host = excluded.host,
 	kind = excluded.kind, gateway = excluded.gateway, public_key = excluded.public_key,
 	addr6 = excluded.addr6, addr4 = excluded.addr4, listen_port = excluded.listen_port,
 	state = excluded.state, expires = excluded.expires, created = excluded.created,
-	ended = excluded.ended, drained = excluded.drained
+	ended = excluded.ended, drained = excluded.drained, member = excluded.member
 `
 
 type PutInterfaceParams struct {
@@ -301,6 +342,7 @@ type PutInterfaceParams struct {
 	Created    time.Time
 	Ended      time.Time
 	Drained    bool
+	Member     string
 }
 
 func (q *Queries) PutInterface(ctx context.Context, arg PutInterfaceParams) error {
@@ -320,6 +362,7 @@ func (q *Queries) PutInterface(ctx context.Context, arg PutInterfaceParams) erro
 		arg.Created,
 		arg.Ended,
 		arg.Drained,
+		arg.Member,
 	)
 	return err
 }

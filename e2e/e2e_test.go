@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1117,4 +1118,195 @@ func TestTrafficOutlivesTheControlPlaneAndARestartRevokesNothing(t *testing.T) {
 	if db2.Interface == "" {
 		t.Fatal("no attach after the restart")
 	}
+}
+
+// TestMembersResolveEachOtherAndANameFollowsItsReplacement runs a service
+// whose members address each other one by one, as etcd's do: each resolves
+// the others by name in both families, a replacement on another host takes
+// the name with it, and the replaced holder reaches none of its peers.
+func TestMembersResolveEachOtherAndANameFollowsItsReplacement(t *testing.T) {
+	l := newLab(t, "e2ep", fastClocks...)
+	ctx := context.Background()
+	relay := must(l.AddRelay(ctx, "r1"))
+	h1, h2, h3 := must(l.AddHost(ctx, "h1")), must(l.AddHost(ctx, "h2")), must(l.AddHost(ctx, "h3"))
+	must(l.Admin.CreateNetwork(ctx, api.CreateNetwork{Name: "shop", Prefix4: netip.MustParsePrefix("10.102.0.0/16"), Relays: []model.RelayID{relay.ID}}))
+	must(l.Admin.CreateService(ctx, "shop", api.CreateService{Name: "etcd", IPv4: true}))
+	must(l.Admin.CreateService(ctx, "shop", api.CreateService{Name: "app", IPv4: true}))
+	must(l.Admin.CreateRule(ctx, "shop", api.CreateRule{From: "etcd", To: "etcd", Proto: model.TCP, Ports: model.PortRange{Lo: 2380, Hi: 2380}}))
+	must(l.Admin.CreateRule(ctx, "shop", api.CreateRule{From: "app", To: "etcd", Proto: model.TCP, Ports: model.PortRange{Lo: 2379, Hi: 2379}}))
+
+	member := func(h *lab.Host, workload, name string, replace bool) api.LocalInterface {
+		t.Helper()
+		i, err := h.AttachMember(ctx, workload, "shop", "etcd", name, replace)
+		if err != nil {
+			t.Fatalf("attach %s as %s: %v", workload, name, err)
+		}
+		if want := name + ".etcd.shop.internal"; i.Member != want {
+			t.Fatalf("%s's answer names it %q, want %q", workload, i.Member, want)
+		}
+		for _, a := range []netip.Addr{i.Addr6, i.Addr4} {
+			must(lab.Serve(i.Namespace, netip.AddrPortFrom(a, 2380), workload))
+		}
+		return i
+	}
+	e1 := member(h1, "e1", "etcd-1", false)
+	e2 := member(h2, "e2", "etcd-2", false)
+	e3 := member(h3, "e3", "etcd-3", false)
+	app := must(h1.Attach(ctx, "app-1", "shop", "app"))
+
+	// resolves waits for a namespace to resolve a name to an interface's
+	// addresses, and dials the name's address in each family.
+	resolves := func(ns, name string, want api.LocalInterface, answers string) {
+		t.Helper()
+		for _, typ := range []dnsmessage.Type{dnsmessage.TypeAAAA, dnsmessage.TypeA} {
+			addr := want.Addr6
+			if typ == dnsmessage.TypeA {
+				addr = want.Addr4
+			}
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				got, _, err := lab.Lookup(ns, name, typ)
+				if err == nil && len(got) == 1 && got[0] == addr {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("%v %s: %v %v, want %v", typ, name, got, err, addr)
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			if answers == "" {
+				continue
+			}
+			if got, err := lab.DialUntil(ns, netip.AddrPortFrom(addr, 2380), 10*time.Second); err != nil || got != answers {
+				t.Fatalf("dialing %s at %v: %q %v, want %q", name, addr, got, err, answers)
+			}
+		}
+	}
+	resolves(e1.Namespace, "etcd-2.etcd.shop.internal.", e2, "e2")
+	resolves(e1.Namespace, "etcd-3.etcd.shop.internal.", e3, "e3")
+	resolves(e3.Namespace, "etcd-1.etcd.shop.internal.", e1, "e1")
+	resolves(e2.Namespace, "etcd-2.etcd.shop.internal.", e2, "")
+	// A client of the service resolves its members too, under the
+	// service's policy: port 2379, never the members' 2380.
+	resolves(app.Namespace, "etcd-1.etcd.shop.internal.", e1, "")
+	for _, a := range []netip.Addr{e1.Addr6, e1.Addr4} {
+		mustNotReach(t, app.Namespace, netip.AddrPortFrom(a, 2380), "app to a member's peer port")
+	}
+
+	// A held name refuses a second holder.
+	if i, err := h3.AttachMember(ctx, "e2-dup", "shop", "etcd", "etcd-2", false); err == nil || !strings.Contains(err.Error(), "held by") {
+		t.Fatalf("a second holder of etcd-2: %+v, %v", i, err)
+	}
+
+	// etcd-2's host is lost: its agent dies, and the old holder's device
+	// keeps every peer it had. etcd-2 moves to h3. Its peers follow the
+	// name, and their hosts fence the old holder: it reaches none of them,
+	// and none of them reaches it.
+	h2.Agent.Kill()
+	start := time.Now()
+	moved := member(h3, "e2-moved", "etcd-2", true)
+	resolves(e1.Namespace, "etcd-2.etcd.shop.internal.", moved, "e2-moved")
+	t.Logf("etcd-2 moved: e1 reached it by name %v after the replacing attach began", time.Since(start))
+	resolves(e3.Namespace, "etcd-2.etcd.shop.internal.", moved, "e2-moved")
+	for _, peer := range []api.LocalInterface{e1, e3} {
+		for _, a := range []netip.Addr{peer.Addr6, peer.Addr4} {
+			mustNotReach(t, e2.Namespace, netip.AddrPortFrom(a, 2380), "the replaced holder to a peer")
+		}
+	}
+	for _, a := range []netip.Addr{e2.Addr6, e2.Addr4} {
+		mustNotReach(t, e1.Namespace, netip.AddrPortFrom(a, 2380), "a peer to the replaced holder")
+	}
+	ifaces := must(l.Admin.Interfaces(ctx, "shop"))
+	for _, i := range ifaces {
+		if i.ID == e2.Interface && i.State != api.Revoked {
+			t.Fatalf("the replaced holder is %s, want revoked", i.State)
+		}
+		if i.ID == moved.Interface && (i.Member != "etcd-2" || i.State != api.Live) {
+			t.Fatalf("the new holder lists as %+v", i)
+		}
+	}
+}
+
+// TestPeersThatDialEachOtherAsTheirEdgeFormsConnectAtOnce replaces a
+// member round after round while it and etcd-1 dial each other, as a
+// starting etcd member and its leader do. etcd-1 dials every millisecond,
+// so in some rounds both first initiations reach the relay as the edge
+// forms. Crossed, each end would discard its own and both would wait
+// WireGuard's 5-second retry; the relay passes one.
+func TestPeersThatDialEachOtherAsTheirEdgeFormsConnectAtOnce(t *testing.T) {
+	l := newLab(t, "e2eq")
+	ctx := context.Background()
+	relay := must(l.AddRelay(ctx, "r1"))
+	hs := []*lab.Host{must(l.AddHost(ctx, "h1")), must(l.AddHost(ctx, "h2")), must(l.AddHost(ctx, "h3"))}
+	must(l.Admin.CreateNetwork(ctx, api.CreateNetwork{Name: "shop", Relays: []model.RelayID{relay.ID}}))
+	must(l.Admin.CreateService(ctx, "shop", api.CreateService{Name: "etcd"}))
+	must(l.Admin.CreateRule(ctx, "shop", api.CreateRule{From: "etcd", To: "etcd", Proto: model.TCP, Ports: model.PortRange{Lo: 2380, Hi: 2380}}))
+	member := func(h *lab.Host, workload, name string, replace bool) (api.LocalInterface, net.Listener) {
+		t.Helper()
+		i, err := h.AttachMember(ctx, workload, "shop", "etcd", name, replace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return i, must(lab.Serve(i.Namespace, netip.AddrPortFrom(i.Addr6, 2380), workload))
+	}
+	e1, _ := member(hs[0], "e1", "etcd-1", false)
+	_, ln := member(hs[1], "e2-r0", "etcd-2", false)
+	// etcd-1 dials etcd-2's name every millisecond, recording when each
+	// holder first answers.
+	var mu sync.Mutex
+	reached := map[string]time.Time{}
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Millisecond):
+			}
+			addrs, _, err := lab.LookupWithin(e1.Namespace, "etcd-2.etcd.shop.internal.", dnsmessage.TypeAAAA, 200*time.Millisecond)
+			if err != nil || len(addrs) == 0 {
+				continue
+			}
+			if got, err := lab.Dial(e1.Namespace, netip.AddrPortFrom(addrs[0], 2380), 300*time.Millisecond); err == nil {
+				mu.Lock()
+				if _, ok := reached[got]; !ok {
+					reached[got] = time.Now()
+				}
+				mu.Unlock()
+			}
+		}
+	}()
+	at := 1
+	for round := 1; round <= 40; round++ {
+		ln.Close()
+		at = 3 - at
+		start := time.Now()
+		w := fmt.Sprintf("e2-r%d", round)
+		var moved api.LocalInterface
+		moved, ln = member(hs[at], w, "etcd-2", true)
+		// The new member dials etcd-1 at once, as a starting etcd does.
+		back, _, err := timeToReach(moved.Namespace, netip.AddrPortFrom(e1.Addr6, 2380), 10*time.Second)
+		if err != nil || back > 2*time.Second {
+			t.Errorf("round %d: %s reached etcd-1 after %v, %v; a crossing costs 5s", round, w, back, err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			mu.Lock()
+			first, ok := reached[w]
+			mu.Unlock()
+			if ok {
+				if d := first.Sub(start); d > 2*time.Second {
+					t.Errorf("round %d: etcd-1 reached %s after %v; a crossing costs 5s", round, w, d)
+				}
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("round %d: etcd-1 never reached %s", round, w)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	t.Logf("relay: %v initiations crossed", metric(must(lab.Metrics(relay.Telemetry)), `wirenet_relay_waiting_packets_total{outcome="crossed"}`)+
+		metric(must(lab.Metrics(relay.Telemetry)), `wirenet_relay_dropped_packets_total{reason="crossed_initiation"}`))
 }

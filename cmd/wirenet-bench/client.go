@@ -4,13 +4,16 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,16 +24,65 @@ import (
 )
 
 func dialTCP(ns, target string, timeout time.Duration) (*net.TCPConn, error) {
+	addr, err := resolveTarget(ns, target, timeout)
+	if err != nil {
+		return nil, err
+	}
 	var c net.Conn
-	err := inNetns(ns, func() error {
+	err = inNetns(ns, func() error {
 		var err error
-		c, err = net.DialTimeout("tcp", target, timeout)
+		c, err = net.DialTimeout("tcp", addr, timeout)
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	return c.(*net.TCPConn), nil
+}
+
+// resolverAddr is the agent's resolver inside every workload namespace.
+const resolverAddr = "127.0.0.53:53"
+
+// nsResolver asks the resolver at server from inside namespace ns. The
+// resolver dials from its own goroutines, so each dial enters the
+// namespace itself.
+func nsResolver(ns, server string) *net.Resolver {
+	return &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var c net.Conn
+		err := inNetns(ns, func() error {
+			var err error
+			c, err = (&net.Dialer{}).DialContext(ctx, network, server)
+			return err
+		})
+		return c, err
+	}}
+}
+
+// resolveTarget turns a target whose host is a name into an address,
+// asking the namespace's own resolver as a workload there would, IPv6
+// first.
+func resolveTarget(ns, target string, timeout time.Duration) (string, error) {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		return "", err
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return target, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	addrs, err := nsResolver(ns, resolverAddr).LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return "", err
+	}
+	if len(addrs) == 0 {
+		return "", fmt.Errorf("%s has no address", host)
+	}
+	addr := addrs[0]
+	if i := slices.IndexFunc(addrs, netip.Addr.Is6); i >= 0 {
+		addr = addrs[i]
+	}
+	return net.JoinHostPort(addr.String(), port), nil
 }
 
 func stream(args []string) error {
@@ -404,4 +456,65 @@ func askName(ns, target string, timeout time.Duration) (string, error) {
 		return "", err
 	}
 	return strings.TrimSuffix(line, "\n"), nil
+}
+
+// lookup asks a namespace's resolver for a name every interval until the
+// answer holds the wanted address, or holds addresses other than the one
+// it is to move from, in that address's family; or until passes.
+func lookup(args []string) error {
+	fs := flag.NewFlagSet("lookup", flag.ContinueOnError)
+	ns := fs.String("netns", "", "namespace whose resolver to ask")
+	name := fs.String("name", "", "the name to look up")
+	want := fs.String("want", "", "the address that ends the loop")
+	unlike := fs.String("unlike", "", "the address an answer must move from to end the loop")
+	server := fs.String("server", resolverAddr, "the resolver, inside the namespace")
+	until := fs.Duration("until", 10*time.Second, "how long the loop tries")
+	interval := fs.Duration("interval", 5*time.Millisecond, "pause between attempts")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if *name == "" || (*want == "") == (*unlike == "") {
+		return errors.New("lookup: --name and one of --want and --unlike are required")
+	}
+	ref, err := netip.ParseAddr(*want + *unlike)
+	if err != nil {
+		return fmt.Errorf("lookup: %w", err)
+	}
+	family := "ip6"
+	if ref.Is4() {
+		family = "ip4"
+	}
+	sought := func(addrs []netip.Addr) bool {
+		if *want != "" {
+			return slices.Contains(addrs, ref)
+		}
+		return len(addrs) > 0 && !slices.Contains(addrs, ref)
+	}
+	r := nsResolver(*ns, *server)
+	out := bench.Lookup{Namespace: *ns, Name: *name, Want: *want, Unlike: *unlike, Start: time.Now().UnixNano()}
+	deadline := time.Now().Add(*until)
+	for {
+		launched := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		addrs, err := r.LookupNetIP(ctx, family, *name)
+		cancel()
+		out.Attempts++
+		if err == nil && sought(addrs) {
+			out.Found, out.First = true, launched.UnixNano()
+			for _, a := range addrs {
+				out.Got = append(out.Got, a.String())
+			}
+			break
+		}
+		out.Last = fmt.Sprint(addrs)
+		if err != nil {
+			out.Last = err.Error()
+		}
+		if time.Now().After(deadline) {
+			out.Error = fmt.Sprintf("no answer sought within %v", *until)
+			break
+		}
+		time.Sleep(*interval)
+	}
+	return emit(out)
 }

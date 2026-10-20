@@ -96,6 +96,12 @@ var roleBinaries = map[Role][]string{
 	RoleMiddle: {"wirenet-relay", "wirenet-bench"},
 }
 
+// extraBinaries are binaries a role takes when --bin holds them: etcd for
+// the members plan.
+var extraBinaries = map[Role][]string{
+	RoleAgent: {"etcd", "etcdctl"},
+}
+
 // awsEnv runs plans against EC2 instances over ssh. In a dry run it prints
 // every remote command and answers with stand-in output, so the whole
 // flow runs without credentials or instances.
@@ -443,6 +449,11 @@ func (e *awsEnv) Deploy(ctx context.Context) error {
 		var bins []string
 		for _, b := range roleBinaries[n.Role] {
 			bins = append(bins, filepath.Join(e.bin, b))
+		}
+		for _, b := range extraBinaries[n.Role] {
+			if _, err := os.Stat(filepath.Join(e.bin, b)); err == nil {
+				bins = append(bins, filepath.Join(e.bin, b))
+			}
 		}
 		if err := e.scp(ctx, n, bins, remoteStage+"/bin/"); err != nil {
 			return err

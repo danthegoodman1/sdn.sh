@@ -178,7 +178,8 @@ func (c *cpNode) view(fn func(store.ReadTx) error) error {
 
 // record snapshots a network's interfaces at its revision and checks that
 // addresses are unique among connected interfaces, that IPv6 addresses are
-// never reused, and that IPv4 addresses wait out their quarantine.
+// never reused, that IPv4 addresses wait out their quarantine, and that each
+// member name has at most one live holder, the one that asked for it.
 func (c *cpNode) record(id model.NetworkID) {
 	now := c.w.now()
 	c.view(func(tx store.ReadTx) error {
@@ -194,6 +195,24 @@ func (c *cpNode) record(id model.NetworkID) {
 			c.holder4[id] = map[netip.Addr]addrHolder{}
 		}
 		c.snaps[id][n.Revision] = ifaces
+		var requested map[model.InterfaceID]string
+		if c.w.orch != nil {
+			requested = c.w.orch.requested
+		}
+		holders := map[[2]string]model.InterfaceID{}
+		for _, i := range ifaces {
+			if want, ok := requested[i.ID]; ok && i.Member != want {
+				c.w.fail("%s holds member %q, but its attach asked for %q", i.ID, i.Member, want)
+			}
+			if i.Member == "" || i.State != api.Live {
+				continue
+			}
+			k := [2]string{string(i.Service), i.Member}
+			if other, ok := holders[k]; ok {
+				c.w.fail("member %s of %s held by both %s and %s", i.Member, i.Service, other, i.ID)
+			}
+			holders[k] = i.ID
+		}
 		held := map[netip.Addr]string{}
 		for _, s := range svcs {
 			held[s.Addr6] = string(s.ID)
@@ -380,14 +399,18 @@ func (c *cpNode) handleAttach(host model.HostID, req api.AttachRequest, reply fu
 		return
 	}
 	var iface store.Interface
+	var replaced model.InterfaceID
 	_, err := c.update(func(tx store.Tx) error {
 		var err error
-		iface, err = c.plane.Attach(tx, c.w.now(), host, req)
+		iface, replaced, err = c.plane.Attach(tx, c.w.now(), host, req)
 		return err
 	})
 	if err != nil {
 		reply(nil, err)
 		return
+	}
+	if replaced != "" {
+		c.w.summary.Replacements++
 	}
 	var ns api.NetworkState
 	err = c.view(func(tx store.ReadTx) error {

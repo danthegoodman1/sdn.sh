@@ -126,6 +126,11 @@ func (t *tx) HostInterfaces(host model.HostID) ([]store.Interface, error) {
 	return all(t, rows, err, iface)
 }
 
+func (t *tx) Holder(svc model.ServiceID, member string) (store.Interface, error) {
+	r, err := t.q.GetHolder(t.ctx, db.GetHolderParams{Service: string(svc), Member: member})
+	return one(t, r, err, iface)
+}
+
 func (t *tx) Expired(before time.Time, n int) ([]store.Interface, error) {
 	rows, err := t.q.ListExpired(t.ctx, db.ListExpiredParams{Before: before, Lim: limit(n)})
 	return all(t, rows, err, iface)
@@ -265,7 +270,7 @@ func (t *tx) PutInterface(i store.Interface) error {
 		ID: string(i.ID), Network: string(i.Network), Service: string(i.Service), Host: string(i.Host),
 		Kind: string(i.Kind), Gateway: string(i.Gateway), PublicKey: i.PublicKey[:],
 		Addr6: i.Addr6, Addr4: i.Addr4, ListenPort: int32(i.ListenPort), State: string(i.State),
-		Expires: i.Expires, Created: i.Created, Ended: i.Ended, Drained: i.Drained,
+		Expires: i.Expires, Created: i.Created, Ended: i.Ended, Drained: i.Drained, Member: i.Member,
 	}))
 }
 
@@ -444,7 +449,7 @@ func iface(r db.Interface) (store.Interface, error) {
 		Host: model.HostID(r.Host), Kind: api.Kind(r.Kind), Gateway: model.InterfaceID(r.Gateway),
 		PublicKey: model.Key(key), Addr6: r.Addr6, Addr4: r.Addr4, ListenPort: uint16(r.ListenPort),
 		State: api.LeaseState(r.State), Expires: r.Expires.UTC(), Created: r.Created.UTC(),
-		Ended: r.Ended.UTC(), Drained: r.Drained,
+		Ended: r.Ended.UTC(), Drained: r.Drained, Member: r.Member,
 	}, nil
 }
 

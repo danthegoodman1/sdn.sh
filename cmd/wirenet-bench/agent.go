@@ -67,7 +67,13 @@ func (a *agentClient) call(path string, in any) (localInterface, error) {
 }
 
 func (a *agentClient) attach(name, network, service string) (localInterface, error) {
-	return a.call("/v1/attach", map[string]string{"name": name, "network": network, "service": service})
+	return a.attachMember(name, network, service, "", false)
+}
+
+// attachMember attaches a workload holding a member name, replacing its
+// holder if replace is set.
+func (a *agentClient) attachMember(name, network, service, member string, replace bool) (localInterface, error) {
+	return a.call("/v1/attach", map[string]any{"name": name, "network": network, "service": service, "member": member, "replace": replace})
 }
 
 func (a *agentClient) detach(id string) error {
@@ -104,6 +110,8 @@ func agentAttach(args []string) error {
 	until := fs.Duration("until", 20*time.Second, "how long to try the first connection")
 	interval := fs.Duration("interval", 5*time.Millisecond, "pause between connection attempts")
 	detach := fs.Bool("detach", false, "detach each interface after its round, outside the timer")
+	member := fs.String("member", "", "a member name each interface holds")
+	replace := fs.Bool("replace", false, "revoke the member's holder")
 	if err := parse(fs, args); err != nil {
 		return err
 	}
@@ -119,7 +127,7 @@ func agentAttach(args []string) error {
 			wname += "-" + strconv.Itoa(i)
 		}
 		start := time.Now()
-		li, err := a.attach(wname, *network, *service)
+		li, err := a.attachMember(wname, *network, *service, *member, *replace)
 		round := bench.AttachRound{Interface: li.Interface, Namespace: li.Namespace, Addr6: li.Addr6, AttachMS: ms(time.Since(start))}
 		if err != nil {
 			round.Error = err.Error()

@@ -28,6 +28,8 @@
 package core
 
 import (
+	"cmp"
+	"encoding/binary"
 	"maps"
 	"net/netip"
 	"slices"
@@ -64,13 +66,18 @@ type Config struct {
 	WaitFor   time.Duration
 	WaitMax   int
 	WaitTotal int
+	// CrossWithin is how long after either direction of an edge gains a
+	// new endpoint, and after sending one end's handshake initiation on,
+	// the relay drops an initiation from the other end that has not
+	// answered it: one that crossed it.
+	CrossWithin time.Duration
 }
 
 // DefaultConfig returns production limits. Agents probe each relay every
 // 200ms, so the probe cap answers 10,000 hosts.
 func DefaultConfig() Config {
 	return Config{Rate: 0, Burst: 0, RegistrationRate: 20, RejectRate: 50000, ProbeRate: 50000,
-		WaitFor: 2 * time.Second, WaitMax: 8, WaitTotal: 65536}
+		WaitFor: 2 * time.Second, WaitMax: 8, WaitTotal: 65536, CrossWithin: time.Second}
 }
 
 // Verdict is what to do with a packet.
@@ -103,6 +110,7 @@ const (
 	Unregistered Reason = "unregistered_sender"
 	PeerAbsent   Reason = "peer_unregistered"
 	Limited      Reason = "rate_limited"
+	Crossed      Reason = "crossed_initiation"
 )
 
 // Decision is the verdict on one packet.
@@ -118,11 +126,13 @@ type Decision struct {
 }
 
 // Release is a waiting packet to send, or, with Drop set, one whose wait
-// ended.
+// ended, by running out or, with Crossed set, because it is an initiation
+// that crossed the peer's.
 type Release struct {
 	Token    uint64
 	From, To netip.AddrPort
 	Drop     bool
+	Crossed  bool
 }
 
 // Registration is a verified claim to an endpoint, or with Withdraw set,
@@ -140,6 +150,9 @@ type Registration struct {
 // Counters are one direction's packet counts.
 type Counters struct {
 	Forwarded, Bytes, Unregistered, PeerAbsent, Limited, Registered, Replayed, BadMAC uint64
+	// Crossed counts handshake initiations dropped because they crossed
+	// the peer's.
+	Crossed uint64
 }
 
 // Table is the relay's port table and what each direction registered.
@@ -175,6 +188,11 @@ type Dir struct {
 	regs     bucket
 	// waits holds the packets waiting on this port, oldest first.
 	waits []*waiting
+	// opened is when a registration last gave the direction a new
+	// endpoint. initiated is when the relay last sent its handshake
+	// initiation on, and answered when it last sent an answer to one: a
+	// handshake response, or the cookie reply an end under load sends.
+	opened, initiated, answered time.Time
 }
 
 // waiting is a data packet kept for the registration that would admit it.
@@ -183,7 +201,61 @@ type waiting struct {
 	at         time.Time
 	local, src netip.AddrPort
 	bytes      int
+	kind       uint32
 	prev, next *waiting
+}
+
+// WireGuard's handshake messages, whose type leads them in the clear
+// (drivers/net/wireguard/messages.h).
+const (
+	wgInitiation = 1
+	wgResponse   = 2
+	wgCookie     = 3
+)
+
+// wgKind returns a handshake initiation's, response's or cookie reply's
+// type, or zero for any other datagram.
+func wgKind(b []byte) uint32 {
+	if len(b) < 4 {
+		return 0
+	}
+	switch k := binary.LittleEndian.Uint32(b); {
+	case k == wgInitiation && len(b) == 148, k == wgResponse && len(b) == 92, k == wgCookie && len(b) == 64:
+		return k
+	}
+	return 0
+}
+
+// crossed reports whether an initiation from d crosses one the relay sent
+// on from its peer moments ago, which d's end has not answered. Each end
+// answers the other's initiation, which discards its own (noise.c), and
+// having answered may not initiate for 5 seconds (send.c), so two
+// initiations that cross both fail and their ends retry together, five
+// seconds on. Dropped, d's end answers the peer's instead. An end that
+// answered sends no initiation for 5 seconds, so one that has not answered
+// sent its own before the peer's arrived. An end under load answers with a
+// cookie reply, which leaves its own handshake whole, so its initiation
+// crosses nothing. Nor does one from an end whose endpoint changed after the
+// peer's initiation went on, since that went to the old endpoint.
+//
+// Both ends first send as their agents install the edge, which is also
+// when a registration gives each direction its endpoint, so the relay
+// judges crossings only that soon after. A sender forging an end's source
+// can then suppress the other end's initiations for that moment alone.
+func (t *Table) crossed(now time.Time, d, peer *Dir) bool {
+	within := func(at time.Time) bool { return !at.IsZero() && now.Sub(at) < t.cfg.CrossWithin }
+	return t.cfg.CrossWithin > 0 && (within(d.opened) || within(peer.opened)) && within(peer.initiated) &&
+		!d.answered.After(peer.initiated) && !d.opened.After(peer.initiated)
+}
+
+// sent records a handshake message the relay sends on from d.
+func (d *Dir) sent(now time.Time, kind uint32) {
+	switch kind {
+	case wgInitiation:
+		d.initiated = now
+	case wgResponse, wgCookie:
+		d.answered = now
+	}
 }
 
 // New returns an empty table.
@@ -218,8 +290,8 @@ func (t *Table) Dir(local netip.AddrPort) (*Dir, bool) {
 }
 
 // Load replaces the pushed table. A direction whose key is unchanged keeps
-// its endpoint and counter; one whose key changed starts over, since its
-// port was reallocated. Packets waiting on a port the table keeps go on
+// its endpoint, counter and handshake record; one whose key changed starts
+// over, since its port was reallocated. Packets waiting on a port the table keeps go on
 // waiting, and those on a port it drops end.
 func (t *Table) Load(st api.RelayState) {
 	next := map[netip.AddrPort]*Dir{}
@@ -228,6 +300,7 @@ func (t *Table) Load(st api.RelayState) {
 		if old, ok := t.ports[p.Local]; ok {
 			if old.Key == p.Key && old.Advertised == p.Advertised {
 				d.Endpoint, d.Counter, d.Stats = old.Endpoint, old.Counter, old.Stats
+				d.opened, d.initiated, d.answered = old.opened, old.initiated, old.answered
 			}
 			d.waits = old.waits
 			t.touch(d)
@@ -260,7 +333,7 @@ func (t *Table) Packet(now time.Time, local, src netip.AddrPort, b []byte) Decis
 	if !d.Endpoint.IsValid() || src != d.Endpoint {
 		// The sender's registration may still be committing; the packet
 		// goes nowhere unless one from this source commits.
-		if t.wait(now, d, src, len(b)) {
+		if t.wait(now, d, src, b) {
 			return Decision{Verdict: Wait, Reason: Unregistered, Token: t.nextToken}
 		}
 		d.Stats.Unregistered++
@@ -272,12 +345,18 @@ func (t *Table) Packet(now time.Time, local, src netip.AddrPort, b []byte) Decis
 	}
 	peer, ok := t.ports[netip.AddrPortFrom(local.Addr(), d.Peer)]
 	if !ok || !peer.Endpoint.IsValid() {
-		if ok && t.wait(now, d, src, len(b)) {
+		if ok && t.wait(now, d, src, b) {
 			return Decision{Verdict: Wait, Reason: PeerAbsent, Token: t.nextToken}
 		}
 		d.Stats.PeerAbsent++
 		return Decision{Reason: PeerAbsent}
 	}
+	kind := wgKind(b)
+	if kind == wgInitiation && t.crossed(now, d, peer) {
+		d.Stats.Crossed++
+		return Decision{Reason: Crossed}
+	}
+	d.sent(now, kind)
 	d.Stats.Forwarded++
 	d.Stats.Bytes += uint64(len(b))
 	return Decision{Verdict: Forward, From: peer.Local, To: peer.Endpoint}
@@ -307,7 +386,7 @@ func (t *Table) register(now time.Time, d *Dir, src netip.AddrPort, b []byte) De
 }
 
 // wait keeps a data packet, if its port and the relay have room.
-func (t *Table) wait(now time.Time, d *Dir, src netip.AddrPort, n int) bool {
+func (t *Table) wait(now time.Time, d *Dir, src netip.AddrPort, b []byte) bool {
 	if t.cfg.WaitFor <= 0 {
 		return false
 	}
@@ -316,7 +395,7 @@ func (t *Table) wait(now time.Time, d *Dir, src netip.AddrPort, n int) bool {
 		return false
 	}
 	t.nextToken++
-	w := &waiting{token: t.nextToken, at: now, local: d.Local, src: src, bytes: n, prev: t.newest}
+	w := &waiting{token: t.nextToken, at: now, local: d.Local, src: src, bytes: len(b), kind: wgKind(b), prev: t.newest}
 	if t.newest != nil {
 		t.newest.next = w
 	} else {
@@ -368,6 +447,11 @@ func (t *Table) touch(d *Dir) {
 // the order they arrived on each port, and those whose wait ended. A packet
 // goes only once its source is its direction's registered endpoint and the
 // peer has registered, exactly as Packet would forward it now.
+//
+// One registration can let both ends' first initiations through at once:
+// a direction's packets wait for the peer to register, and the peer's wait
+// for it. So the direction whose first initiation waited longest goes
+// first, and the other's initiations cross it.
 func (t *Table) Release(now time.Time) []Release {
 	t.expire(now)
 	var out []Release
@@ -375,6 +459,7 @@ func (t *Table) Release(now time.Time) []Release {
 		out = append(out, Release{Token: tok, Drop: true})
 	}
 	t.dropped = t.dropped[:0]
+	var batches []batch
 	for _, local := range t.touched {
 		d, ok := t.ports[local]
 		if !ok {
@@ -384,6 +469,7 @@ func (t *Table) Release(now time.Time) []Release {
 		if !d.Endpoint.IsValid() || !pok || !peer.Endpoint.IsValid() {
 			continue
 		}
+		b := batch{d: d, peer: peer}
 		kept := d.waits[:0]
 		for _, w := range d.waits {
 			if w.src != d.Endpoint {
@@ -391,15 +477,60 @@ func (t *Table) Release(now time.Time) []Release {
 				continue
 			}
 			t.unlink(w)
-			d.Stats.Forwarded++
-			d.Stats.Bytes += uint64(w.bytes)
-			out = append(out, Release{Token: w.token, From: peer.Local, To: peer.Endpoint})
+			b.ws = append(b.ws, w)
+			if w.kind == wgInitiation && b.first.IsZero() {
+				b.first = w.at
+			}
 		}
 		clear(d.waits[len(kept):])
 		d.waits = kept
+		if len(b.ws) > 0 {
+			batches = append(batches, b)
+		}
+	}
+	slices.SortStableFunc(batches, releaseOrder)
+	for _, b := range batches {
+		for _, w := range b.ws {
+			if w.kind == wgInitiation && t.crossed(now, b.d, b.peer) {
+				b.d.Stats.Crossed++
+				out = append(out, Release{Token: w.token, Drop: true, Crossed: true})
+				continue
+			}
+			b.d.sent(now, w.kind)
+			b.d.Stats.Forwarded++
+			b.d.Stats.Bytes += uint64(w.bytes)
+			out = append(out, Release{Token: w.token, From: b.peer.Local, To: b.peer.Endpoint})
+		}
 	}
 	t.touched = t.touched[:0]
 	return out
+}
+
+// batch is one direction's packets a Release lets through.
+type batch struct {
+	d, peer *Dir
+	ws      []*waiting
+	// first is the earliest initiation's arrival.
+	first time.Time
+}
+
+// releaseOrder puts the batches holding an initiation first, earliest
+// initiation first and then by port, and the rest after them in their
+// order. A sort needs the order total: had a batch without an initiation
+// tied with every other, the sort could put an edge's newer initiation
+// ahead of its older one.
+func releaseOrder(a, b batch) int {
+	switch az, bz := a.first.IsZero(), b.first.IsZero(); {
+	case az && bz:
+		return 0
+	case az:
+		return 1
+	case bz:
+		return -1
+	case !a.first.Equal(b.first):
+		return a.first.Compare(b.first)
+	}
+	return cmp.Compare(a.d.Local.Port(), b.d.Local.Port())
 }
 
 // Waiting reports how many packets wait, for metrics.
@@ -427,7 +558,7 @@ func (t *Table) verify(d *Dir, src netip.AddrPort, b []byte) (Registration, Reas
 }
 
 // Commit applies a durable registration, unless a later one won meanwhile.
-func (t *Table) Commit(r Registration) bool {
+func (t *Table) Commit(now time.Time, r Registration) bool {
 	d, ok := t.ports[r.Local]
 	if !ok || r.Key != d.Key || r.Counter <= d.Counter {
 		return false
@@ -436,6 +567,9 @@ func (t *Table) Commit(r Registration) bool {
 	if r.Withdraw {
 		d.Endpoint = netip.AddrPort{}
 		return true
+	}
+	if r.Endpoint != d.Endpoint {
+		d.opened = now
 	}
 	d.Endpoint = r.Endpoint
 	d.Stats.Registered++
@@ -476,11 +610,12 @@ func (t *Table) Restore(st State, log []Registration) {
 	for _, p := range st.Ports {
 		t.ports[p.Local] = t.newDir(p)
 	}
+	// Restored endpoints are no new paths, so the zero time opens none.
 	for _, r := range st.Registrations {
-		t.Commit(r)
+		t.Commit(time.Time{}, r)
 	}
 	for _, r := range log {
-		t.Commit(r)
+		t.Commit(time.Time{}, r)
 	}
 }
 

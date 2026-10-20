@@ -67,6 +67,7 @@ var cases = []struct {
 	{"PortCursor", testPortCursor},
 	{"Meta", testMeta},
 	{"UniqueNames", testUniqueNames},
+	{"MemberHolders", testMemberHolders},
 	{"ConflictLeavesTransactionUsable", testConflictLeavesTransactionUsable},
 	{"RecordsAreCopies", testRecordsAreCopies},
 	{"UpdateReadsItsOwnWrites", testUpdateReadsItsOwnWrites},
@@ -212,7 +213,7 @@ func fullInterface(id model.InterfaceID) store.Interface {
 		Gateway: "if-gateway", PublicKey: model.Key(key(1)),
 		Addr6: addr("fd12:3456:789a:1::106"), Addr4: addr("10.20.0.6"), ListenPort: 65535,
 		State: api.Released, Expires: fine.Add(time.Minute), Created: fine, Ended: fine.Add(time.Second),
-		Drained: true,
+		Drained: true, Member: "etcd-1",
 	}
 }
 
@@ -809,6 +810,42 @@ func testUniqueNames(t *testing.T, s store.Store) {
 	})
 	same(t, "NetworkByName after the delete", read(t, s, func(tx store.ReadTx) (store.Network, error) { return tx.NetworkByName("bank") }), bareNetwork("net-3", "bank"))
 	conflicts(t, s, "renaming onto a held name", func(tx store.Tx) error { return tx.PutNetwork(bareNetwork("net-3", "shop")) })
+}
+
+func testMemberHolders(t *testing.T, s store.Store) {
+	member := func(id model.InterfaceID, svc model.ServiceID, name string, state api.LeaseState) store.Interface {
+		i := bareInterface(id)
+		i.Service, i.Member, i.State = svc, name, state
+		return i
+	}
+	holder := func(svc model.ServiceID, name string) func(store.ReadTx) (store.Interface, error) {
+		return func(tx store.ReadTx) (store.Interface, error) { return tx.Holder(svc, name) }
+	}
+	// Ended interfaces hold nothing, so a name may pass through many.
+	put(t, s, putInterface,
+		member("if-1", "svc-a", "m", api.Released), member("if-2", "svc-a", "m", api.Revoked),
+		member("if-3", "svc-a", "m", api.Live), member("if-4", "svc-b", "m", api.Live),
+		member("if-5", "svc-a", "", api.Live), member("if-6", "svc-a", "", api.Live))
+	same(t, "Holder of svc-a's m", read(t, s, holder("svc-a", "m")), member("if-3", "svc-a", "m", api.Live))
+	same(t, "Holder of svc-b's m", read(t, s, holder("svc-b", "m")), member("if-4", "svc-b", "m", api.Live))
+	missing(t, s, "Holder of an unheld name", holder("svc-a", "n"))
+	missing(t, s, "Holder of no name", holder("svc-a", ""))
+	conflicts(t, s, "a second live holder of svc-a's m", func(tx store.Tx) error {
+		return tx.PutInterface(member("if-7", "svc-a", "m", api.Live))
+	})
+	conflicts(t, s, "a holder taking a held name", func(tx store.Tx) error {
+		return tx.PutInterface(member("if-5", "svc-a", "m", api.Live))
+	})
+	// Ending the holder frees the name within the same transaction.
+	update(t, s, func(tx store.Tx) error {
+		if err := tx.PutInterface(member("if-3", "svc-a", "m", api.Revoked)); err != nil {
+			return err
+		}
+		return tx.PutInterface(member("if-7", "svc-a", "m", api.Live))
+	})
+	same(t, "Holder after the handover", read(t, s, holder("svc-a", "m")), member("if-7", "svc-a", "m", api.Live))
+	// Putting the holder again is no conflict with itself.
+	put(t, s, putInterface, member("if-7", "svc-a", "m", api.Live))
 }
 
 func testConflictLeavesTransactionUsable(t *testing.T, s store.Store) {

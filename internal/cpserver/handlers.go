@@ -321,12 +321,13 @@ func (s *Server) attach(r *http.Request, p principal) (any, error) {
 		return nil, err
 	}
 	var resp api.AttachResponse
+	var replaced model.InterfaceID
 	if _, err := s.update(r.Context(), "attach", func(tx store.Tx) error {
-		iface, err := s.plane.Attach(tx, s.now(), p.host, req)
+		iface, holder, err := s.plane.Attach(tx, s.now(), p.host, req)
 		if err != nil {
 			return err
 		}
-		resp.Interface = iface.ID
+		resp.Interface, replaced = iface.ID, holder
 		return nil
 	}); err != nil {
 		return nil, err
@@ -344,8 +345,16 @@ func (s *Server) attach(r *http.Request, p principal) (any, error) {
 		return nil, err
 	}
 	s.m.leaseEvents.WithLabelValues("attached").Inc()
-	s.log.Info().Str("host", string(p.host)).Str("interface", string(resp.Interface)).Str("network", string(resp.State.Network)).
-		Str("service", req.Service).Uint64("revision", resp.State.Revision).Msg("interface attached")
+	ev := s.log.Info().Str("host", string(p.host)).Str("interface", string(resp.Interface)).Str("network", string(resp.State.Network)).
+		Str("service", req.Service).Uint64("revision", resp.State.Revision)
+	if req.Member != "" {
+		ev = ev.Str("member", req.Member)
+	}
+	if replaced != "" {
+		s.m.leaseEvents.WithLabelValues("replaced").Inc()
+		ev = ev.Str("replaced", string(replaced))
+	}
+	ev.Msg("interface attached")
 	return resp, nil
 }
 
@@ -531,5 +540,6 @@ func interfaceInfo(i store.Interface) api.InterfaceInfo {
 	return api.InterfaceInfo{
 		ID: i.ID, Network: i.Network, Service: i.Service, Host: i.Host, Kind: i.Kind, PublicKey: i.PublicKey,
 		Addr6: i.Addr6, Addr4: i.Addr4, ListenPort: i.ListenPort, State: i.State, Expires: i.Expires,
+		Member: i.Member,
 	}
 }

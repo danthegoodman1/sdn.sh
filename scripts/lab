@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # Builds the daemons, wirenet-bench, hostbench and wirenet-lab as you, then runs
 # wirenet-lab as root, since the local environment creates namespaces and
-# devices. Reports land in reports/ under the repository.
+# devices. Reports land in reports/ under the repository. WIRENET_LAB_ETCD,
+# a directory holding etcd and etcdctl, joins them to the binaries for the
+# members plan.
 #
 #   scripts/lab run --plan paths --duration 3s
 #   scripts/lab run --plan all --store postgres://user:pass@127.0.0.1:5432/db
+#   WIRENET_LAB_ETCD=~/etcd-v3.6.15-linux-amd64 scripts/lab run --plan members
 set -euo pipefail
 cd "$(dirname "$0")/.."
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 go build -o "$work/" ./cmd/wirenet-cp ./cmd/wirenet-agent ./cmd/wirenet-relay ./cmd/wirenetctl ./cmd/wirenet-bench ./cmd/hostbench ./cmd/wirenet-lab
+if [ -n "${WIRENET_LAB_ETCD:-}" ]; then
+	cp "$WIRENET_LAB_ETCD/etcd" "$WIRENET_LAB_ETCD/etcdctl" "$work/"
+fi
 cmd=${1:-}
 shift || true
 sudo "$work/wirenet-lab" "$cmd" --bin "$work" "$@"

@@ -693,6 +693,12 @@ func (h *Host) Attach(ctx context.Context, name, network, service string) (api.L
 	return h.Local.Attach(ctx, api.LocalAttach{Name: name, Network: network, Service: service})
 }
 
+// AttachMember asks the host's agent for an interface holding a member
+// name, revoking its holder if replace is set.
+func (h *Host) AttachMember(ctx context.Context, name, network, service, member string, replace bool) (api.LocalInterface, error) {
+	return h.Local.Attach(ctx, api.LocalAttach{Name: name, Network: network, Service: service, Member: member, Replace: replace})
+}
+
 func writeJSON(path string, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {

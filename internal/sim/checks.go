@@ -17,6 +17,7 @@ import (
 	"github.com/danthegoodman1/wirenet/internal/api"
 	"github.com/danthegoodman1/wirenet/internal/compile"
 	"github.com/danthegoodman1/wirenet/internal/cp"
+	"github.com/danthegoodman1/wirenet/internal/dns"
 	"github.com/danthegoodman1/wirenet/internal/kernel"
 	"github.com/danthegoodman1/wirenet/internal/kernel/kmodel"
 	"github.com/danthegoodman1/wirenet/internal/model"
@@ -412,14 +413,16 @@ func sortPrefixes(p []netip.Prefix) []netip.Prefix {
 func compareKeys(a, b model.Key) int { return cmp.Compare(string(a[:]), string(b[:])) }
 
 // checkSafety runs the properties that hold at every instant: every settled
-// namespace holds exactly what the oracle expects at its revision, and no
-// flow outlives the peer it went through.
+// namespace holds exactly what the oracle expects at its revision, every
+// ready interface's resolver answers what the oracle expects at the
+// revision its agent holds, and no flow outlives the peer it went through.
 func (w *World) checkSafety() {
 	for _, h := range w.hosts {
 		w.checkMoves(h)
 		if !h.up || w.failure != nil {
 			continue
 		}
+		w.checkZones(h)
 		settled := h.core.Settled()
 		for _, name := range sortedKeys(settled) {
 			s := settled[name]
@@ -457,6 +460,101 @@ func (w *World) checkSafety() {
 			}
 		}
 	}
+}
+
+// zoneAt is one interface's zone at a network revision. A zone depends on
+// nothing else, so each is checked once.
+type zoneAt struct {
+	net model.NetworkID
+	rev uint64
+	id  model.InterfaceID
+}
+
+// checkZones compares what each ready interface's resolver would answer,
+// from its agent's desired state, with what the oracle expects at that
+// revision.
+func (w *World) checkZones(h *hostNode) {
+	desired := h.core.Desired()
+	for _, li := range h.core.Interfaces() {
+		if !li.Ready {
+			continue
+		}
+		n, x, ok := desired.Interface(li.Interface)
+		if !ok {
+			continue
+		}
+		at := zoneAt{n.Network, n.Revision, x.ID}
+		if w.zoned[at] {
+			continue
+		}
+		want, ok := w.expectNames(at)
+		if !ok {
+			continue
+		}
+		w.zoned[at] = true
+		got := map[string]dns.Name{}
+		for _, name := range dns.ZoneFor(n, x).Names {
+			got[name.FQDN] = name
+		}
+		for _, fqdn := range slices.Sorted(maps.Keys(want)) {
+			if got[fqdn] != want[fqdn] {
+				w.fail("%s: %s at revision %d answers %s with %+v, want %+v", h.name, x.ID, n.Revision, fqdn, got[fqdn], want[fqdn])
+				return
+			}
+		}
+		for _, fqdn := range slices.Sorted(maps.Keys(got)) {
+			if _, ok := want[fqdn]; !ok {
+				w.fail("%s: %s at revision %d answers %s with %+v, which it should not know", h.name, x.ID, n.Revision, fqdn, got[fqdn])
+				return
+			}
+		}
+	}
+}
+
+// expectNames computes, independently of the compiler and the resolver, the
+// names one interface's resolver answers at a network revision: each service
+// its own may reach, and each live member of one, and its own member name.
+func (w *World) expectNames(at zoneAt) (map[string]dns.Name, bool) {
+	snap, ok := w.cp.snaps[at.net][at.rev]
+	n := w.orch.network(at.net)
+	if !ok || n == nil {
+		return nil, false
+	}
+	var x *store.Interface
+	for i := range snap {
+		if snap[i].ID == at.id {
+			x = &snap[i]
+		}
+	}
+	names := map[string]dns.Name{}
+	if x == nil || x.State != api.Live {
+		return names, true
+	}
+	domain := strings.ToLower(n.name) + ".internal."
+	add := func(rel string, addr6, addr4 netip.Addr) {
+		name := dns.Name{FQDN: rel + "." + domain, AAAA: addr6}
+		if x.Addr4.IsValid() && addr4.IsValid() {
+			name.A = addr4
+		}
+		names[name.FQDN] = name
+	}
+	rules := n.rulesAt(at.rev)
+	pts := points(rules)
+	for _, s := range n.services {
+		if s.id == x.Service && x.Member != "" {
+			add(x.Member+"."+s.name, x.Addr6, x.Addr4)
+		}
+		if !reaches(rules, pts, x.Service, s.id) {
+			continue
+		}
+		add(s.name, s.addr6, s.addr4)
+		for _, y := range snap {
+			if y.Service == s.id && y.Member != "" && y.State == api.Live && y.Kind != api.Device {
+				add(y.Member+"."+s.name, y.Addr6, y.Addr4)
+			}
+		}
+	}
+	return names, true
 }
 
 // probe is a connection the liveness check opens and what it must do.

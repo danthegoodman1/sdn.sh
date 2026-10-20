@@ -11,7 +11,9 @@
 //  1. the device's addresses, routes and MTU;
 //  2. peers added and changed;
 //  3. one nftables transaction, so slots name only installed peers;
-//  4. peers removed, then their conntrack entries and sockets flushed.
+//  4. peers removed, then their conntrack entries and sockets flushed. A
+//     batch that adds peers leaves the flush to lead the next batch, so the
+//     peers it adds register at their relays without waiting on it.
 //
 // A peer that would claim an address another installed peer still holds
 // waits until a later batch has removed the holder, so no allowed IP ever
@@ -110,6 +112,7 @@ type JournalEntry struct {
 	Network    model.NetworkID   `json:"network"`
 	Service    model.ServiceID   `json:"service"`
 	Kind       api.Kind          `json:"kind"`
+	Member     string            `json:"member,omitempty"`
 	Namespace  string            `json:"namespace"`
 	ListenPort uint16            `json:"listen_port"`
 	PublicKey  model.Key         `json:"public_key"`
@@ -235,16 +238,20 @@ func (p phase) tearingDown() bool { return p == detaching || p == aborting || p 
 
 // iface is one interface the agent manages.
 type iface struct {
-	id      model.InterfaceID
-	name    string
-	phase   phase
-	ns      string
-	port    uint16
-	pub     model.Key
-	priv    model.Key
-	netRef  string
-	svcRef  string
-	kind    api.Kind
+	id     model.InterfaceID
+	name   string
+	phase  phase
+	ns     string
+	port   uint16
+	pub    model.Key
+	priv   model.Key
+	netRef string
+	svcRef string
+	kind   api.Kind
+	// member is the name the attach asks to hold, replacing its holder if
+	// replace is set.
+	member  string
+	replace bool
 	network model.NetworkID
 	service model.ServiceID
 	// deadline is when an attach gives up waiting on the control plane;

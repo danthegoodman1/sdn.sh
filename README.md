@@ -42,6 +42,8 @@ Nine c6i.xlarge instances (4 vCPU, up to 12.5 Gb/s) in one placement group in us
 | A new workload's first connection to a peer on another host, 20 peers | 50 ms p50, 60 ms max |
 | A backend replaced, until every client reaches the new one | 25–45 ms p50, 36–55 ms p99 |
 | One of two backends removed, rewriting half of each client's slots | 99–123 ms p50, 137–161 ms p99 |
+| An etcd member moved to another host: its first connection to a peer, from the attach | 26–28 ms p50, 35 ms max |
+| Its peers' lookups of its name answering the new address, from the commit | 10–11 ms p50, 17 ms max |
 | A deny closing a wildcard to 30 sandboxes, from its commit | 9–11 ms p50, 16 ms max |
 | The deny lifted, until every sandbox reaches db again | 20–25 ms p50, 64 ms max |
 | A relay killed: an open TCP connection stalls | 0.82 s, then carries on |
@@ -49,7 +51,7 @@ Nine c6i.xlarge instances (4 vCPU, up to 12.5 Gb/s) in one placement group in us
 | Attaches and detaches across four hosts, 4 workers each | 46 pairs a second, no failures |
 | Interfaces on one host | 1,000, at 841 KiB each |
 
-Service changes ran under attach churn, with 30 clients over the four hosts. Ranges span two runs, and six for the rule changes.
+Service changes ran under attach churn, with 30 clients over the four hosts. Ranges span two runs, six for the rule changes, and two of ten moves for the member.
 
 Throughput runs at an 8,941-byte overlay MTU, the most a VPC's 9,001-byte path carries under WireGuard. WireGuard's cost is per packet, so at the 1,380-byte default, which a path across the internet needs, throughput drops substantially: to a third on one edge, and to half across relays.
 
@@ -221,6 +223,14 @@ table inet wirenet {
 
 The slot count stays fixed, so a backend change rewrites only the slots whose backend moved. Conntrack pins each connection to its backend and translates the replies, so the application sees answers from the address it dialed. IPv6 is always on; IPv4 is opt-in per service.
 
+A service's members can hold names, for software whose members address each other one by one, such as etcd. An attach with `--member etcd-1` makes `etcd-1.etcd.shop.internal` resolve to that workload's own address, while `etcd.shop.internal` still spreads connections over every member. One live workload holds a name. `--replace` revokes the holder and hands the name over in one transaction, so a member moves hosts while its peers keep their configuration, and the replaced process reaches none of them:
+
+```console
+wirenetctl rule create shop etcd etcd --proto tcp --ports 2379-2380   # members reach each other
+sudo wirenetctl attach etcd-a shop etcd --member etcd-1
+sudo wirenetctl attach etcd-d shop etcd --member etcd-2 --replace     # etcd-2's host is lost
+```
+
 ### Policy
 
 Policy names services, and denies every flow it does not name. A rule allows or denies, and either side may be `*`, every service but the one on the rule's other side:
@@ -307,7 +317,7 @@ Each daemon serves `/metrics`, `/healthz` and `/readyz` on its `--telemetry` add
 
 ### Tuning
 
-**Relays per network.** One edge uses one relay core, and a relay carries about 2 Gb/s per busy core. On 4-vCPU machines two relays carried twice what one did, and a third left the receiving hosts' encryption as the limit.
+**Relays per network.** One edge uses one relay core, and a relay forwards about 4–5 Gb per busy core at an 8,941-byte MTU, and about 2 at 1,380. On 4-vCPU machines at 8,941 bytes, two relays carried what plain TCP does between the same hosts.
 
 **Drain grace.** `--drain-grace` (30 s) is how long clients keep a departing backend's peer so established flows can finish. A `cutover` service skips it.
 
@@ -337,6 +347,7 @@ Relaying ciphertext is common: Tailscale's DERP, Nebula's relays and NetBird all
 - **The relay's socket model caps its edges.** One socket per directed port; the next step is XDP or TC.
 - **A partition keeps an island alive.** A revoked interface cut off together with some of its clients keeps serving them until the partition heals.
 - **No connection migrates.** A workload that moves breaks its connections, and clients reconnect.
+- **A member's address changes when it moves.** Its name follows within the resolver's 5-second TTL; software that caches a resolved address for longer must resolve again.
 - **Linux hosts, L3 only.** A laptop joins through a gateway interface with a stock WireGuard client.
 - **A `CAP_NET_ADMIN` workload loses sender-side policy.** It keeps its identity, since the receiver enforces it.
 - **A flat network runs out of relay ports.** Ports scale with policy edges, so segment a fully connected network.

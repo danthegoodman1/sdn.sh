@@ -215,6 +215,8 @@ func Layers(o options) map[string]Layer {
 		goTest("relay-server", "./internal/relay/server"),
 		goTest("api", "./internal/api"),
 		goTest("compile", "./internal/compile"),
+		goTest("dns", "./internal/dns"),
+		goTest("store", "./internal/store/mem"),
 		goTest("cp", "./internal/cp"),
 		goTest("cpserver", "./internal/cpserver"),
 		goTest("agent-core", "./internal/agent/core"),

@@ -36,6 +36,9 @@ const (
 	modelGo      = "internal/model/model.go"
 	policyGo     = "internal/compile/policy.go"
 	agentFDStore = "internal/agent/resolver/fdstore.go"
+	dnsGo        = "internal/dns/dns.go"
+	memStore     = "internal/store/mem/mem.go"
+	pgQueries    = "internal/store/pgstore/db/interfaces.sql.go"
 )
 
 // Code that more than one edit moves or matches.
@@ -133,7 +136,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "relay-core-commits-on-verify",
 		Breaks: "a verified registration moves no endpoint until the shell has made it durable and calls Commit",
-		Edits:  []Edit{{relayCore, "return Decision{Verdict: Register, Registration: r}", "t.Commit(r)\n\t\treturn Decision{Verdict: Register, Registration: r}"}},
+		Edits:  []Edit{{relayCore, "return Decision{Verdict: Register, Registration: r}", "t.Commit(now, r)\n\t\treturn Decision{Verdict: Register, Registration: r}"}},
 		Catch:  []string{"relay-core", "relay-server"},
 	},
 	{
@@ -149,14 +152,18 @@ var Mutants = []Mutant{
 		ID:     "agent-skips-flush",
 		Breaks: "removing a peer flushes the conntrack entries and sockets addressed to it",
 		Edits: []Edit{
-			{agentPlan,
-				"\t\tops = append(ops,\n\t\t\tkernel.Op{Kind: kernel.SetPeers, Namespace: st.name, Device: c.cfg.Device, Peers: removes},\n\t\t\tkernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: flush})",
-				"\t\tops = append(ops, kernel.Op{Kind: kernel.SetPeers, Namespace: st.name, Device: c.cfg.Device, Peers: removes})"},
+			{agentPlan, "\t\t\tops = append(ops, kernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: flush})\n", ""},
 			{agentPlan,
 				"\t\t\t\tfor _, a := range st.peers[u.PublicKey].Allowed {\n\t\t\t\t\tif !slices.Contains(st.unflushed, a.Addr()) {\n\t\t\t\t\t\tst.unflushed = append(st.unflushed, a.Addr())\n\t\t\t\t\t}\n\t\t\t\t}\n",
 				""},
 		},
 		Catch: []string{"sim"},
+	},
+	{
+		ID:     "flush-delays-registration",
+		Breaks: "a batch that adds peers leaves the flush, which walks tables the whole host shares, to the next batch, so the peers register at once",
+		Edits:  []Edit{{agentPlan, "\t\tif len(adds) == 0 {\n\t\t\tops = append(ops, kernel.Op{Kind: kernel.Flush", "\t\tif true {\n\t\t\tops = append(ops, kernel.Op{Kind: kernel.Flush"}},
+		Catch:  []string{"agent-core"},
 	},
 	{
 		ID:     "kernel-flush-skips-conntrack",
@@ -201,7 +208,7 @@ var Mutants = []Mutant{
 		Breaks: "a batch removes a backend's slots before its peer, so no slot ever names an address without a peer",
 		Edits: []Edit{
 			{agentPlan, applyRules + removeUnwanted, removeUnwanted},
-			{agentPlan, "\tif st.sweep {\n", applyRules + "\tif st.sweep {\n"},
+			{agentPlan, "\treturn ops\n}\n\n// sweep removes", applyRules + "\treturn ops\n}\n\n// sweep removes"},
 		},
 		Catch: []string{"sim"},
 	},
@@ -278,9 +285,18 @@ var Mutants = []Mutant{
 	},
 	{
 		ID:     "sweep-forgets-live-peers",
-		Breaks: "a sweep keeps every flow a peer the batch leaves installed accounts for",
-		Edits:  []Edit{{agentPlan, "\tfor _, tp := range tgt.peers {\n\t\tfor _, a := range tp.peer.Allowed {\n\t\t\tkeep = append(keep, a.Addr())", "\tfor _, tp := range tgt.peers[:0] {\n\t\tfor _, a := range tp.peer.Allowed {\n\t\t\tkeep = append(keep, a.Addr())"}},
+		Breaks: "a sweep keeps every flow an installed peer accounts for",
+		Edits:  []Edit{{agentPlan, "for _, a := range installed[key].Allowed {", "for _, a := range installed[key].Allowed[:0] {"}},
 		Catch:  []string{"sim"},
+	},
+	{
+		ID:     "sweep-after-adds",
+		Breaks: "a restart's sweep runs before the batch installs anything, so no flow a crash left to an address outlives a new peer's claim to it",
+		Edits: []Edit{
+			{agentPlan, "\tif st.sweep {\n\t\tops = append(ops, sweep(st.name, n, x, st.peers, ok))\n\t}\n", ""},
+			{agentPlan, "\treturn ops\n}\n\n// sweep removes", "\tif st.sweep {\n\t\tops = append(ops, sweep(st.name, n, x, st.peers, ok))\n\t}\n\treturn ops\n}\n\n// sweep removes"},
+		},
+		Catch: []string{"agent-core"},
 	},
 	{
 		ID:     "shrunk-peer-not-flushed",
@@ -579,7 +595,7 @@ var Mutants = []Mutant{
 	{
 		ID:     "relay-drops-what-races-the-peer",
 		Breaks: "a packet that reaches a bound port before the peer direction registers waits for that registration instead of dropping",
-		Edits:  []Edit{{relayCore, "if ok && t.wait(now, d, src, len(b)) {", "if false && t.wait(now, d, src, len(b)) {"}},
+		Edits:  []Edit{{relayCore, "if ok && t.wait(now, d, src, b) {", "if false && t.wait(now, d, src, b) {"}},
 		Catch:  []string{"relay-core"},
 	},
 	{
@@ -980,5 +996,203 @@ var Mutants = []Mutant{
 		Breaks: "a wildcard rule's scope lists each pair within its service once",
 		Edits:  []Edit{{cpEdges, "case j == i || j < i && y.Service == s.service:", "case j == i:"}},
 		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "member-conflict-unchecked",
+		Breaks: "an attach naming a held member fails with a conflict unless it replaces the holder",
+		Edits:  []Edit{{cpPlane, "case !req.Replace:", "case false:"}},
+		Catch:  []string{"cp", "e2e"},
+	},
+	{
+		ID:     "replace-leaves-holder-live",
+		Breaks: "a replacing attach revokes the member's holder in its own transaction",
+		Edits:  []Edit{{cpPlane, "if err := p.Revoke(tx, now, holder.ID); err != nil {", "if err := error(nil); err != nil {"}},
+		Catch:  []string{"cp", "e2e"},
+	},
+	{
+		ID:     "replace-drains-holder",
+		Breaks: "a replaced holder is revoked, so it reaches no peer once hosts converge, rather than draining",
+		Edits:  []Edit{{cpPlane, "if err := p.Revoke(tx, now, holder.ID); err != nil {", "if err := p.Release(tx, now, holder.Host, []model.InterfaceID{holder.ID}); err != nil {"}},
+		Catch:  []string{"cp", "e2e"},
+	},
+	{
+		ID:     "member-label-unchecked",
+		Breaks: "a member name is a DNS label",
+		Edits:  []Edit{{cpPlane, `req.Member != "" && (kind != api.Workload || !ValidName(req.Member))`, `req.Member != "" && kind != api.Workload`}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "gateway-holds-member",
+		Breaks: "only workloads hold member names",
+		Edits:  []Edit{{cpPlane, `req.Member != "" && (kind != api.Workload || !ValidName(req.Member))`, `req.Member != "" && !ValidName(req.Member)`}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "store-holder-counts-ended",
+		Breaks: "an ended interface holds no member name, in the memory store",
+		Edits:  []Edit{{memStore, `return member != "" && i.State == api.Live && i.Service == svc && i.Member == member`, `return member != "" && i.Service == svc && i.Member == member`}},
+		Catch:  []string{"store", "cp"},
+	},
+	{
+		ID:     "pg-holder-counts-ended",
+		Breaks: "an ended interface holds no member name, in Postgres",
+		Edits:  []Edit{{pgQueries, "WHERE service = $1 AND member = $2 AND state = 'live' AND member <> ''", "WHERE service = $1 AND member = $2 AND member <> ''"}},
+		Catch:  []string{"pgstore"},
+	},
+	{
+		ID:     "backend-name-unset",
+		Breaks: "a client's state names each member it reaches",
+		Edits:  []Edit{{compileGo, "Interface: i.ID, Addr6: i.Addr6, Addr4: i.Addr4, Name: memberName(i, services),", "Interface: i.ID, Addr6: i.Addr6, Addr4: i.Addr4,"}},
+		Catch:  []string{"cp", "sim", "e2e"},
+	},
+	{
+		ID:     "own-name-unset",
+		Breaks: "a member's own state carries its name",
+		Edits:  []Edit{{compileGo, "Name:       memberName(x, services),", ""}},
+		Catch:  []string{"cp", "sim", "e2e"},
+	},
+	{
+		ID:     "ended-holder-keeps-name",
+		Breaks: "an interface names itself only while it holds its name",
+		Edits:  []Edit{{compileGo, `if i.Member == "" || i.State != api.Live || !ok {`, `if i.Member == "" || !ok {`}},
+		Catch:  []string{"cp", "sim"},
+	},
+	{
+		ID:     "zone-skips-members",
+		Breaks: "a resolver answers the members of every service its interface reaches",
+		Edits:  []Edit{{dnsGo, "\t\t\t\tadd(b.Name, b.Addr6, b.Addr4)\n", ""}},
+		Catch:  []string{"dns", "sim", "e2e"},
+	},
+	{
+		ID:     "zone-skips-own-name",
+		Breaks: "a member's resolver answers its own name, whatever it reaches",
+		Edits:  []Edit{{dnsGo, "\tif x.Name != \"\" {\n", "\tif false {\n"}},
+		Catch:  []string{"dns", "sim"},
+	},
+	{
+		ID:     "zone-a-for-ipv6-client",
+		Breaks: "a client without IPv4 receives no A record, for a service or a member",
+		Edits:  []Edit{{dnsGo, "if x.Addr4.IsValid() && addr4.IsValid() {", "if addr4.IsValid() {"}},
+		Catch:  []string{"dns", "sim"},
+	},
+	{
+		ID:     "name-above-member-missing",
+		Breaks: "a name above a member's exists, with no records",
+		Edits:  []Edit{{dnsGo, "if z.above(name) {", "if false {"}},
+		Catch:  []string{"dns"},
+	},
+	{
+		ID:     "retry-ignores-member",
+		Breaks: "an attach retried under its interface's identifier returns the interface only for the member it holds",
+		Edits:  []Edit{{cpPlane, "if existing.Member != req.Member {", "if false {"}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "replace-without-member-accepted",
+		Breaks: "a replacement names the member it takes over",
+		Edits:  []Edit{{cpPlane, "if req.Replace && req.Member == \"\" {", "if false {"}},
+		Catch:  []string{"cp"},
+	},
+	{
+		ID:     "journal-drops-member",
+		Breaks: "the agent's journal keeps an interface's member, so a restarted agent refuses to attach the workload as another",
+		Edits:  []Edit{{agentLife, "Kind: i.kind, Member: i.member,", "Kind: i.kind,"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "observe-forgets-removal",
+		Breaks: "a removal that failed partway still leaves the flows of the peers it took to flush",
+		Edits:  []Edit{{agentPlan, "if !held[a] && !slices.Contains(st.unflushed, a.Addr()) {", "if false && !held[a] {"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "agent-drops-member",
+		Breaks: "the agent asks the control plane for the member and replacement its caller named",
+		Edits:  []Edit{{agentLife, "PublicKey: i.pub, ListenPort: i.port, Member: i.member, Replace: i.replace,", "PublicKey: i.pub, ListenPort: i.port,"}},
+		Catch:  []string{"agent-core", "e2e"},
+	},
+	{
+		ID:     "agent-ignores-member-change",
+		Breaks: "a workload attached again keeps the member it holds",
+		Edits:  []Edit{{agentLife, `if i.member != a.Member {`, `if false {`}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "answer-omits-member-name",
+		Breaks: "an attach answer names the member's full name",
+		Edits:  []Edit{{agentLife, "\t\tif x.Name != \"\" {\n", "\t\tif false {\n"}},
+		Catch:  []string{"agent-core", "e2e"},
+	},
+	{
+		ID:     "crossed-initiation-forwarded",
+		Breaks: "an initiation that crosses its peer's as the edge forms is dropped, so the two ends handshake once",
+		Edits:  []Edit{{relayCore, "if kind == wgInitiation && t.crossed(now, d, peer) {", "if false {"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "held-initiations-released-together",
+		Breaks: "of two directions' initiations one registration releases, only one goes",
+		Edits:  []Edit{{relayCore, "if w.kind == wgInitiation && t.crossed(now, b.d, b.peer) {", "if false {"}},
+		Catch:  []string{"relay-core", "e2e"},
+	},
+	{
+		ID:     "held-initiations-unordered",
+		Breaks: "of two directions' held initiations, the one that waited longer goes",
+		Edits:  []Edit{{relayCore, "slices.SortStableFunc(batches, releaseOrder)", "slices.SortStableFunc(batches[:0], releaseOrder)"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "crossing-judged-always",
+		Breaks: "the relay judges crossings only as a direction gains an endpoint, so a forged initiation suppresses the other end's that long at most",
+		Edits:  []Edit{{relayCore, "(within(d.opened) || within(peer.opened)) && within(peer.initiated) &&", "within(peer.initiated) &&"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "answered-end-crosses",
+		Breaks: "an initiation from an end that answered the peer's crosses nothing",
+		Edits:  []Edit{{relayCore, "!d.answered.After(peer.initiated)", "true"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "response-unrecorded",
+		Breaks: "the relay records a handshake response as its end answering",
+		Edits:  []Edit{{relayCore, "k == wgInitiation && len(b) == 148, k == wgResponse && len(b) == 92, k == wgCookie", "k == wgInitiation && len(b) == 148, k == wgCookie"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "cookie-reply-unrecorded",
+		Breaks: "the relay records a cookie reply as its end answering, since it leaves the end's own handshake whole",
+		Edits:  []Edit{{relayCore, "\tcase wgResponse, wgCookie:\n", "\tcase wgResponse:\n"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "handshake-size-unchecked",
+		Breaks: "the relay reads a datagram as a handshake message only at that message's size",
+		Edits:  []Edit{{relayCore, "k == wgInitiation && len(b) == 148,", "k == wgInitiation && len(b) >= 148,"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "crossing-ignores-moved-endpoint",
+		Breaks: "an initiation from an end whose endpoint changed after the peer's went on crosses nothing, since the peer's went to the old endpoint",
+		Edits:  []Edit{{relayCore, "!d.answered.After(peer.initiated) && !d.opened.After(peer.initiated)", "!d.answered.After(peer.initiated)"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "same-endpoint-opens-window",
+		Breaks: "only a registration that changes the endpoint opens the window for judging crossings, so a periodic claim lets no forged initiation hold the other end back",
+		Edits:  []Edit{{relayCore, "\tif r.Endpoint != d.Endpoint {\n\t\td.opened = now", "\tif true {\n\t\td.opened = now"}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "push-forgets-handshakes",
+		Breaks: "a table push keeps each unchanged direction's handshake record, so a push between two initiations still lets the rule judge them",
+		Edits:  []Edit{{relayCore, "\t\t\t\td.opened, d.initiated, d.answered = old.opened, old.initiated, old.answered\n", ""}},
+		Catch:  []string{"relay-core"},
+	},
+	{
+		ID:     "release-order-partial",
+		Breaks: "the release order is total, so the older of an edge's two initiations goes however many batches one release holds",
+		Edits:  []Edit{{relayCore, "\tcase az && bz:\n\t\treturn 0\n\tcase az:\n\t\treturn 1\n\tcase bz:\n\t\treturn -1\n", "\tcase az || bz:\n\t\treturn 0\n"}},
+		Catch:  []string{"relay-core"},
 	},
 }

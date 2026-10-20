@@ -1226,9 +1226,10 @@ func TestMembersResolveEachOtherAndANameFollowsItsReplacement(t *testing.T) {
 
 // TestPeersThatDialEachOtherAsTheirEdgeFormsConnectAtOnce replaces a
 // member round after round while it and etcd-1 dial each other, as a
-// starting etcd member and its leader do. Both first initiations reach the
-// relay as the edge forms, and crossed, each end would discard its own and
-// both would wait WireGuard's 5-second retry; the relay passes one.
+// starting etcd member and its leader do. etcd-1 dials every millisecond,
+// so in some rounds both first initiations reach the relay as the edge
+// forms. Crossed, each end would discard its own and both would wait
+// WireGuard's 5-second retry; the relay passes one.
 func TestPeersThatDialEachOtherAsTheirEdgeFormsConnectAtOnce(t *testing.T) {
 	l := newLab(t, "e2eq")
 	ctx := context.Background()
@@ -1247,8 +1248,8 @@ func TestPeersThatDialEachOtherAsTheirEdgeFormsConnectAtOnce(t *testing.T) {
 	}
 	e1, _ := member(hs[0], "e1", "etcd-1", false)
 	_, ln := member(hs[1], "e2-r0", "etcd-2", false)
-	// etcd-1 dials etcd-2's name every 20ms, recording when each holder
-	// first answers.
+	// etcd-1 dials etcd-2's name every millisecond, recording when each
+	// holder first answers.
 	var mu sync.Mutex
 	reached := map[string]time.Time{}
 	stop := make(chan struct{})
@@ -1258,7 +1259,7 @@ func TestPeersThatDialEachOtherAsTheirEdgeFormsConnectAtOnce(t *testing.T) {
 			select {
 			case <-stop:
 				return
-			case <-time.After(20 * time.Millisecond):
+			case <-time.After(time.Millisecond):
 			}
 			addrs, _, err := lab.LookupWithin(e1.Namespace, "etcd-2.etcd.shop.internal.", dnsmessage.TypeAAAA, 200*time.Millisecond)
 			if err != nil || len(addrs) == 0 {
@@ -1274,7 +1275,7 @@ func TestPeersThatDialEachOtherAsTheirEdgeFormsConnectAtOnce(t *testing.T) {
 		}
 	}()
 	at := 1
-	for round := 1; round <= 6; round++ {
+	for round := 1; round <= 40; round++ {
 		ln.Close()
 		at = 3 - at
 		start := time.Now()

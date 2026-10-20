@@ -517,6 +517,57 @@ func TestAFreshDirectionIsRegisteredAgainOnASchedule(t *testing.T) {
 	}
 }
 
+// TestAReplacementRegistersBeforeItsHolderIsFlushed swaps a client's db
+// backend for another, as a replacing attach does. A flush walks tables
+// the whole host shares, so the batch that installs the new backend ends
+// at the old one's removal and registers the new direction; the flush
+// leads the next batch.
+func TestAReplacementRegistersBeforeItsHolderIsFlushed(t *testing.T) {
+	c, now := adopted(t)
+	c.cfg.RegisterEvery = time.Hour
+	update := func(rev uint64, b api.Peer) {
+		t.Helper()
+		if err := c.State(now, api.StateUpdate{Host: "h1", Generation: rev, Networks: []api.NetworkState{client(rev, "if-a", self, b)},
+			Present: []api.NetworkRef{{Network: "net-1", Revision: rev}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	update(3, backend("if-b", peer, "fd00::6"))
+	sent(c, now)
+	next := backend("if-c", model.Key{12}, "fd00::7")
+	next.Relays = []api.RelayPath{{Relay: "r1", Send: ap("192.0.2.1:7002")}}
+	update(4, next)
+
+	var events []string
+	for acts := c.Actions(now); len(acts) > 0; acts = c.Actions(now) {
+		for _, a := range acts {
+			switch a := a.(type) {
+			case RunBatch:
+				for _, op := range a.Ops {
+					switch {
+					case op.Kind == kernel.Flush:
+						events = append(events, "flush "+fmt.Sprint(op.Addrs))
+					case op.Kind == kernel.SetPeers && op.Peers[0].Remove:
+						events = append(events, "remove")
+					case op.Kind == kernel.SetPeers:
+						events = append(events, "add")
+					}
+				}
+				events = append(events, "done")
+				c.BatchDone(now, a.Namespace, a.ID, len(a.Ops), nil)
+			case SendRegistration:
+				if a.To == next.Relays[0].Send {
+					events = append(events, "register")
+				}
+			}
+		}
+	}
+	want := []string{"add", "remove", "done", "register", "flush [fd00::6]", "done"}
+	if !slices.Equal(events, want) {
+		t.Fatalf("the replacement ran %q, want %q", events, want)
+	}
+}
+
 func TestAnAcknowledgedDirectionIsNotResentAndANewPeerResendsAlone(t *testing.T) {
 	c, now := adopted(t)
 	c.cfg.RegisterEvery = time.Hour

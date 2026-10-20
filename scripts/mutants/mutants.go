@@ -152,14 +152,18 @@ var Mutants = []Mutant{
 		ID:     "agent-skips-flush",
 		Breaks: "removing a peer flushes the conntrack entries and sockets addressed to it",
 		Edits: []Edit{
-			{agentPlan,
-				"\t\tops = append(ops,\n\t\t\tkernel.Op{Kind: kernel.SetPeers, Namespace: st.name, Device: c.cfg.Device, Peers: removes},\n\t\t\tkernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: flush})",
-				"\t\tops = append(ops, kernel.Op{Kind: kernel.SetPeers, Namespace: st.name, Device: c.cfg.Device, Peers: removes})"},
+			{agentPlan, "\t\t\tops = append(ops, kernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: flush})\n", ""},
 			{agentPlan,
 				"\t\t\t\tfor _, a := range st.peers[u.PublicKey].Allowed {\n\t\t\t\t\tif !slices.Contains(st.unflushed, a.Addr()) {\n\t\t\t\t\t\tst.unflushed = append(st.unflushed, a.Addr())\n\t\t\t\t\t}\n\t\t\t\t}\n",
 				""},
 		},
 		Catch: []string{"sim"},
+	},
+	{
+		ID:     "flush-delays-registration",
+		Breaks: "a batch that adds peers leaves the flush, which walks tables the whole host shares, to the next batch, so the peers register at once",
+		Edits:  []Edit{{agentPlan, "\t\tif len(adds) == 0 {\n\t\t\tops = append(ops, kernel.Op{Kind: kernel.Flush", "\t\tif true {\n\t\t\tops = append(ops, kernel.Op{Kind: kernel.Flush"}},
+		Catch:  []string{"agent-core"},
 	},
 	{
 		ID:     "kernel-flush-skips-conntrack",

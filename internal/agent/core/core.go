@@ -11,7 +11,9 @@
 //  1. the device's addresses, routes and MTU;
 //  2. peers added and changed;
 //  3. one nftables transaction, so slots name only installed peers;
-//  4. peers removed, then their conntrack entries and sockets flushed.
+//  4. peers removed, then their conntrack entries and sockets flushed. A
+//     batch that adds peers leaves the flush to lead the next batch, so the
+//     peers it adds register at their relays without waiting on it.
 //
 // A peer that would claim an address another installed peer still holds
 // waits until a later batch has removed the holder, so no allowed IP ever

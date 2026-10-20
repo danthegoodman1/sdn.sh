@@ -249,9 +249,14 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 	}
 	flush = slices.DeleteFunc(flush, func(a netip.Addr) bool { return slices.Contains(st.unflushed, a) })
 	if len(removes) > 0 {
-		ops = append(ops,
-			kernel.Op{Kind: kernel.SetPeers, Namespace: st.name, Device: c.cfg.Device, Peers: removes},
-			kernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: flush})
+		ops = append(ops, kernel.Op{Kind: kernel.SetPeers, Namespace: st.name, Device: c.cfg.Device, Peers: removes})
+		// A flush walks conntrack and socket tables the whole host shares,
+		// tens of milliseconds on a large machine. A batch that adds peers
+		// ends without it, so they register at their relays at once, and
+		// the next batch leads with it.
+		if len(adds) == 0 {
+			ops = append(ops, kernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: flush})
+		}
 	}
 	if st.sweep {
 		ops = append(ops, sweep(st.name, n, x, tgt, ok))

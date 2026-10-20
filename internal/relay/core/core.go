@@ -190,7 +190,8 @@ type Dir struct {
 	waits []*waiting
 	// opened is when a registration last gave the direction a new
 	// endpoint. initiated is when the relay last sent its handshake
-	// initiation on, and answered when it last sent its handshake response.
+	// initiation on, and answered when it last sent an answer to one: a
+	// handshake response, or the cookie reply an end under load sends.
 	opened, initiated, answered time.Time
 }
 
@@ -209,17 +210,18 @@ type waiting struct {
 const (
 	wgInitiation = 1
 	wgResponse   = 2
+	wgCookie     = 3
 )
 
-// wgKind returns a handshake initiation's or response's type, or zero for
-// any other datagram.
+// wgKind returns a handshake initiation's, response's or cookie reply's
+// type, or zero for any other datagram.
 func wgKind(b []byte) uint32 {
-	switch k := uint32(0); {
-	case len(b) >= 4:
-		k = binary.LittleEndian.Uint32(b)
-		if k == wgInitiation && len(b) == 148 || k == wgResponse && len(b) == 92 {
-			return k
-		}
+	if len(b) < 4 {
+		return 0
+	}
+	switch k := binary.LittleEndian.Uint32(b); {
+	case k == wgInitiation && len(b) == 148, k == wgResponse && len(b) == 92, k == wgCookie && len(b) == 64:
+		return k
 	}
 	return 0
 }
@@ -231,7 +233,10 @@ func wgKind(b []byte) uint32 {
 // initiations that cross both fail and their ends retry together, five
 // seconds on. Dropped, d's end answers the peer's instead. An end that
 // answered sends no initiation for 5 seconds, so one that has not answered
-// sent its own before the peer's arrived.
+// sent its own before the peer's arrived. An end under load answers with a
+// cookie reply, which leaves its own handshake whole, so its initiation
+// crosses nothing. Nor does one from an end whose endpoint changed after the
+// peer's initiation went on, since that went to the old endpoint.
 //
 // Both ends first send as their agents install the edge, which is also
 // when a registration gives each direction its endpoint, so the relay
@@ -240,7 +245,7 @@ func wgKind(b []byte) uint32 {
 func (t *Table) crossed(now time.Time, d, peer *Dir) bool {
 	within := func(at time.Time) bool { return !at.IsZero() && now.Sub(at) < t.cfg.CrossWithin }
 	return t.cfg.CrossWithin > 0 && (within(d.opened) || within(peer.opened)) && within(peer.initiated) &&
-		!d.answered.After(peer.initiated)
+		!d.answered.After(peer.initiated) && !d.opened.After(peer.initiated)
 }
 
 // sent records a handshake message the relay sends on from d.
@@ -248,7 +253,7 @@ func (d *Dir) sent(now time.Time, kind uint32) {
 	switch kind {
 	case wgInitiation:
 		d.initiated = now
-	case wgResponse:
+	case wgResponse, wgCookie:
 		d.answered = now
 	}
 }
@@ -285,8 +290,8 @@ func (t *Table) Dir(local netip.AddrPort) (*Dir, bool) {
 }
 
 // Load replaces the pushed table. A direction whose key is unchanged keeps
-// its endpoint and counter; one whose key changed starts over, since its
-// port was reallocated. Packets waiting on a port the table keeps go on
+// its endpoint, counter and handshake record; one whose key changed starts
+// over, since its port was reallocated. Packets waiting on a port the table keeps go on
 // waiting, and those on a port it drops end.
 func (t *Table) Load(st api.RelayState) {
 	next := map[netip.AddrPort]*Dir{}
@@ -295,6 +300,7 @@ func (t *Table) Load(st api.RelayState) {
 		if old, ok := t.ports[p.Local]; ok {
 			if old.Key == p.Key && old.Advertised == p.Advertised {
 				d.Endpoint, d.Counter, d.Stats = old.Endpoint, old.Counter, old.Stats
+				d.opened, d.initiated, d.answered = old.opened, old.initiated, old.answered
 			}
 			d.waits = old.waits
 			t.touch(d)
@@ -453,12 +459,6 @@ func (t *Table) Release(now time.Time) []Release {
 		out = append(out, Release{Token: tok, Drop: true})
 	}
 	t.dropped = t.dropped[:0]
-	type batch struct {
-		d, peer *Dir
-		ws      []*waiting
-		// first is the earliest initiation's arrival.
-		first time.Time
-	}
 	var batches []batch
 	for _, local := range t.touched {
 		d, ok := t.ports[local]
@@ -488,15 +488,7 @@ func (t *Table) Release(now time.Time) []Release {
 			batches = append(batches, b)
 		}
 	}
-	slices.SortStableFunc(batches, func(a, b batch) int {
-		switch {
-		case a.first.IsZero() || b.first.IsZero():
-			return 0
-		case !a.first.Equal(b.first):
-			return a.first.Compare(b.first)
-		}
-		return cmp.Compare(a.d.Local.Port(), b.d.Local.Port())
-	})
+	slices.SortStableFunc(batches, releaseOrder)
 	for _, b := range batches {
 		for _, w := range b.ws {
 			if w.kind == wgInitiation && t.crossed(now, b.d, b.peer) {
@@ -512,6 +504,33 @@ func (t *Table) Release(now time.Time) []Release {
 	}
 	t.touched = t.touched[:0]
 	return out
+}
+
+// batch is one direction's packets a Release lets through.
+type batch struct {
+	d, peer *Dir
+	ws      []*waiting
+	// first is the earliest initiation's arrival.
+	first time.Time
+}
+
+// releaseOrder puts the batches holding an initiation first, earliest
+// initiation first and then by port, and the rest after them in their
+// order. A sort needs the order total: had a batch without an initiation
+// tied with every other, the sort could put an edge's newer initiation
+// ahead of its older one.
+func releaseOrder(a, b batch) int {
+	switch az, bz := a.first.IsZero(), b.first.IsZero(); {
+	case az && bz:
+		return 0
+	case az:
+		return 1
+	case bz:
+		return -1
+	case !a.first.Equal(b.first):
+		return a.first.Compare(b.first)
+	}
+	return cmp.Compare(a.d.Local.Port(), b.d.Local.Port())
 }
 
 // Waiting reports how many packets wait, for metrics.

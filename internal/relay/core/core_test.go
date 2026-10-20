@@ -576,8 +576,12 @@ func TestOnlyOneOfTwoInitiationsOneRegistrationReleasesGoes(t *testing.T) {
 	}
 }
 
-// response is a WireGuard handshake response's size and type.
-var response = append([]byte{2, 0, 0, 0}, make([]byte, 88)...)
+// response is a WireGuard handshake response's size and type, and cookie
+// a cookie reply's.
+var (
+	response = append([]byte{2, 0, 0, 0}, make([]byte, 88)...)
+	cookie   = append([]byte{3, 0, 0, 0}, make([]byte, 60)...)
+)
 
 // TestAnInitiationThatCrossesThePeersIsDropped: with both directions
 // registered, B's initiation reaches the relay just after A's went on, so
@@ -664,6 +668,208 @@ func TestAnInitiationGoesWhenNoneWaitsTheOtherWay(t *testing.T) {
 	register(t, tb, portBA, keyBA, advBA, senderB, 10)
 	if rel := tb.Release(t0); len(rel) != 1 || rel[0].Token != alone.Token || rel[0].Drop {
 		t.Fatalf("an initiation waiting alone: %+v", rel)
+	}
+}
+
+func TestOnlyHandshakeMessagesOfTheirOwnSizeCount(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		b    []byte
+		want uint32
+	}{
+		{"an initiation", handshake, wgInitiation},
+		{"a response", response, wgResponse},
+		{"a cookie reply", cookie, wgCookie},
+		{"a short initiation", handshake[:147], 0},
+		{"a long initiation", append(slices.Clone(handshake), 0), 0},
+		{"a short response", response[:91], 0},
+		{"a long cookie reply", append(slices.Clone(cookie), 0), 0},
+		{"a transport packet", data, 0},
+		{"a fragment", []byte{1, 0}, 0},
+	} {
+		if got := wgKind(c.b); got != c.want {
+			t.Errorf("%s: kind %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// TestAnInitiationCrossesOnlyOneItsEndReceived: B's initiation goes when B
+// answered A's with a cookie reply, which leaves B's own handshake whole,
+// and when B's endpoint changed after A's went on, since A's went to B's
+// old endpoint.
+func TestAnInitiationCrossesOnlyOneItsEndReceived(t *testing.T) {
+	tb := waitTable()
+	register(t, tb, portAB, keyAB, advAB, senderA, 10)
+	register(t, tb, portBA, keyBA, advBA, senderB, 10)
+	if d := tb.Packet(t0, portAB, senderA, handshake); d.Verdict != Forward {
+		t.Fatalf("A's initiation: %+v", d)
+	}
+	if d := tb.Packet(t0.Add(time.Millisecond), portBA, senderB, cookie); d.Verdict != Forward {
+		t.Fatalf("B's cookie reply: %+v", d)
+	}
+	if d := tb.Packet(t0.Add(2*time.Millisecond), portBA, senderB, handshake); d.Verdict != Forward {
+		t.Fatalf("B's initiation after its cookie reply: %+v", d)
+	}
+
+	tb = waitTable()
+	register(t, tb, portAB, keyAB, advAB, senderA, 10)
+	register(t, tb, portBA, keyBA, advBA, senderB, 10)
+	start := t0.Add(10 * time.Second)
+	if d := tb.Packet(start, portAB, senderA, handshake); d.Verdict != Forward || d.To != senderB {
+		t.Fatalf("A's initiation to B's old endpoint: %+v", d)
+	}
+	moved := netip.MustParseAddrPort("203.0.113.20:42001")
+	if !registerAt(t, tb, start.Add(200*time.Millisecond), portBA, keyBA, advBA, moved, 11) {
+		t.Fatal("B's registration from its new endpoint failed")
+	}
+	if d := tb.Packet(start.Add(300*time.Millisecond), portBA, moved, handshake); d.Verdict != Forward {
+		t.Fatalf("B's initiation from its new endpoint: %+v", d)
+	}
+}
+
+// TestAClaimFromTheSameEndpointOpensNoWindow: the periodic claim that holds
+// a NAT mapping open leaves the endpoint as it was, so it lets no forged
+// initiation hold the other end's back.
+func TestAClaimFromTheSameEndpointOpensNoWindow(t *testing.T) {
+	tb := waitTable()
+	register(t, tb, portAB, keyAB, advAB, senderA, 10)
+	register(t, tb, portBA, keyBA, advBA, senderB, 10)
+	at := t0.Add(25 * time.Second)
+	if !registerAt(t, tb, at, portBA, keyBA, advBA, senderB, 11) {
+		t.Fatal("B's periodic claim failed")
+	}
+	if d := tb.Packet(at.Add(time.Millisecond), portAB, senderA, handshake); d.Verdict != Forward {
+		t.Fatalf("A's initiation: %+v", d)
+	}
+	if d := tb.Packet(at.Add(2*time.Millisecond), portBA, senderB, handshake); d.Verdict != Forward {
+		t.Fatalf("B's initiation after its periodic claim: %+v", d)
+	}
+}
+
+// TestATablePushKeepsWhatTheRuleJudgesBy: a new generation of the table
+// lands between A's initiation and B's crossing one, and the relay still
+// drops B's.
+func TestATablePushKeepsWhatTheRuleJudgesBy(t *testing.T) {
+	tb := waitTable()
+	register(t, tb, portAB, keyAB, advAB, senderA, 10)
+	register(t, tb, portBA, keyBA, advBA, senderB, 10)
+	if d := tb.Packet(t0.Add(time.Millisecond), portAB, senderA, handshake); d.Verdict != Forward {
+		t.Fatalf("A's initiation: %+v", d)
+	}
+	tb.Load(api.RelayState{Generation: 2, Ports: []api.RelayPort{
+		{Local: portAB, Peer: 7002, Advertised: advAB, Key: keyAB},
+		{Local: portBA, Peer: 7001, Advertised: advBA, Key: keyBA},
+	}})
+	if d := tb.Packet(t0.Add(2*time.Millisecond), portBA, senderB, handshake); d.Verdict != Drop || d.Reason != Crossed {
+		t.Fatalf("B's initiation after the push: %+v", d)
+	}
+}
+
+// TestEveryEdgeOneReleaseLetsThroughSendsItsOlderInitiation: sixty edges
+// hold packets when one Release follows all their registrations, as when
+// a committer's batch commits many at once. A third of them hold only a
+// transport packet. Whichever end of an edge sent first, its initiation
+// goes and the other's is dropped.
+func TestEveryEdgeOneReleaseLetsThroughSendsItsOlderInitiation(t *testing.T) {
+	const edges = 60
+	tb := New(Config{WaitFor: 2 * time.Second, WaitMax: 2, WaitTotal: 1000, CrossWithin: time.Second})
+	type edge struct {
+		a, b         api.RelayPort
+		fromA, fromB netip.AddrPort
+		quiet        bool
+		older, newer Decision
+		data         Decision
+	}
+	var es []*edge
+	var ports []api.RelayPort
+	for i := range edges {
+		pa, pb := uint16(8000+2*i), uint16(8001+2*i)
+		e := &edge{
+			a:     api.RelayPort{Local: netip.AddrPortFrom(local, pa), Peer: pb, Advertised: netip.AddrPortFrom(adv, pa), Key: model.Secret{byte(i), 1}},
+			b:     api.RelayPort{Local: netip.AddrPortFrom(local, pb), Peer: pa, Advertised: netip.AddrPortFrom(adv, pb), Key: model.Secret{byte(i), 2}},
+			fromA: netip.AddrPortFrom(netip.MustParseAddr("203.0.113.10"), uint16(41000+i)),
+			fromB: netip.AddrPortFrom(netip.MustParseAddr("203.0.113.20"), uint16(41000+i)),
+			quiet: i%3 == 2,
+		}
+		es = append(es, e)
+		ports = append(ports, e.a, e.b)
+	}
+	tb.Load(api.RelayState{Generation: 1, Ports: ports})
+	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
+	// Half the edges' A sides send first.
+	for i, e := range es {
+		if !e.quiet && i%2 == 0 {
+			e.older = tb.Packet(at(i), e.a.Local, e.fromA, handshake)
+		}
+	}
+	for i, e := range es {
+		switch {
+		case e.quiet:
+			e.data = tb.Packet(at(100+i), e.b.Local, e.fromB, data)
+		case i%2 == 0:
+			e.newer = tb.Packet(at(100+i), e.b.Local, e.fromB, handshake)
+		default:
+			e.older = tb.Packet(at(100+i), e.b.Local, e.fromB, handshake)
+		}
+		if !registerAt(t, tb, at(200), e.b.Local, e.b.Key, e.b.Advertised, e.fromB, 10) {
+			t.Fatalf("%v's registration failed", e.b.Local)
+		}
+	}
+	for i, e := range es {
+		if !e.quiet && i%2 == 1 {
+			e.newer = tb.Packet(at(300+i), e.a.Local, e.fromA, handshake)
+		}
+	}
+	for _, e := range es {
+		if !registerAt(t, tb, at(500), e.a.Local, e.a.Key, e.a.Advertised, e.fromA, 10) {
+			t.Fatalf("%v's registration failed", e.a.Local)
+		}
+	}
+	got := map[uint64]Release{}
+	for _, r := range tb.Release(at(500)) {
+		got[r.Token] = r
+	}
+	for i, e := range es {
+		if e.quiet {
+			if r, ok := got[e.data.Token]; !ok || r.Drop {
+				t.Errorf("edge %d's transport packet: %+v", i, r)
+			}
+			continue
+		}
+		if r, ok := got[e.older.Token]; !ok || r.Drop {
+			t.Errorf("edge %d's older initiation: %+v", i, r)
+		}
+		if r, ok := got[e.newer.Token]; !ok || !r.Drop || !r.Crossed {
+			t.Errorf("edge %d's newer initiation: %+v, want dropped as crossed", i, r)
+		}
+	}
+}
+
+// TestReleaseOrderIsTotal sorts sixty batches, a third holding no
+// initiation, from an order that interleaves them, and expects every
+// batch with an initiation in time order ahead of the rest.
+func TestReleaseOrderIsTotal(t *testing.T) {
+	var in []batch
+	for i := range 60 {
+		b := batch{d: &Dir{RelayPort: api.RelayPort{Local: netip.AddrPortFrom(local, uint16(9000+i))}}}
+		if i%3 != 2 {
+			// Times fall as the batches go on, so most must move.
+			b.first = t0.Add(time.Duration(60-i) * time.Millisecond)
+		}
+		in = append(in, b)
+	}
+	out := slices.Clone(in)
+	slices.SortStableFunc(out, releaseOrder)
+	for i := 1; i < len(out); i++ {
+		a, b := out[i-1], out[i]
+		switch {
+		case a.first.IsZero() && !b.first.IsZero():
+			t.Fatalf("a batch without an initiation, port %d, sorts ahead of one with, port %d", a.d.Local.Port(), b.d.Local.Port())
+		case !a.first.IsZero() && !b.first.IsZero() && b.first.Before(a.first):
+			t.Fatalf("port %d's initiation sorts ahead of port %d's older one", a.d.Local.Port(), b.d.Local.Port())
+		case a.first.IsZero() && b.first.IsZero() && b.d.Local.Port() < a.d.Local.Port():
+			t.Fatalf("batches without an initiation lost their order: port %d before %d", a.d.Local.Port(), b.d.Local.Port())
+		}
 	}
 }
 

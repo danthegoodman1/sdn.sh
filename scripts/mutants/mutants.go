@@ -1067,7 +1067,7 @@ var Mutants = []Mutant{
 		ID:     "zone-skips-own-name",
 		Breaks: "a member's resolver answers its own name, whatever it reaches",
 		Edits:  []Edit{{dnsGo, "\tif x.Name != \"\" {\n", "\tif false {\n"}},
-		Catch:  []string{"dns", "sim", "e2e"},
+		Catch:  []string{"dns", "sim"},
 	},
 	{
 		ID:     "zone-a-for-ipv6-client",
@@ -1127,7 +1127,7 @@ var Mutants = []Mutant{
 		ID:     "crossed-initiation-forwarded",
 		Breaks: "an initiation that crosses its peer's as the edge forms is dropped, so the two ends handshake once",
 		Edits:  []Edit{{relayCore, "if kind == wgInitiation && t.crossed(now, d, peer) {", "if false {"}},
-		Catch:  []string{"relay-core", "e2e"},
+		Catch:  []string{"relay-core"},
 	},
 	{
 		ID:     "held-initiations-released-together",

@@ -170,6 +170,9 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 	if len(st.unflushed) > 0 {
 		ops = append(ops, kernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: slices.Clone(st.unflushed)})
 	}
+	if st.sweep {
+		ops = append(ops, sweep(st.name, n, x, st.peers, ok))
+	}
 	if ok && x.Addr6.IsValid() && (st.link == nil || !st.link.Equal(&tgt.link)) {
 		l := tgt.link
 		ops = append(ops, kernel.Op{Kind: kernel.ConfigureLink, Namespace: st.name, Device: c.cfg.Device, Link: &l})
@@ -258,28 +261,28 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 			ops = append(ops, kernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: flush})
 		}
 	}
-	if st.sweep {
-		ops = append(ops, sweep(st.name, n, x, tgt, ok))
-	}
 	return ops
 }
 
 // sweep removes, after a restart lost track of what earlier batches
-// removed, every flow that no peer the batch leaves installed accounts for.
-// It runs last, so those peers are the target's. With no state for the
-// network, the interface was revoked and forgotten and keeps no flow at
-// all.
-func sweep(name string, n *api.NetworkState, x *api.Interface, tgt target, ok bool) kernel.Op {
-	if !ok {
-		all := []netip.Prefix{netip.MustParsePrefix("::/0"), netip.MustParsePrefix("0.0.0.0/0")}
-		return kernel.Op{Kind: kernel.Sweep, Namespace: name, Prefixes: all}
-	}
-	keep := slices.Clone(x.Addrs())
-	for _, tp := range tgt.peers {
-		for _, a := range tp.peer.Allowed {
+// removed, every flow that no installed peer accounts for. It runs before
+// the batch installs anything, so a flow a crash left to an address goes
+// before a peer the batch adds claims the address; the peers the batch
+// removes keep theirs until their own flush. With no state for the
+// network, the interface was revoked and forgotten, and the sweep covers
+// every address.
+func sweep(name string, n *api.NetworkState, x *api.Interface, installed map[model.Key]kernel.Peer, ok bool) kernel.Op {
+	var keep []netip.Addr
+	for _, key := range slices.SortedFunc(maps.Keys(installed), compareKey) {
+		for _, a := range installed[key].Allowed {
 			keep = append(keep, a.Addr())
 		}
 	}
+	if !ok {
+		all := []netip.Prefix{netip.MustParsePrefix("::/0"), netip.MustParsePrefix("0.0.0.0/0")}
+		return kernel.Op{Kind: kernel.Sweep, Namespace: name, Addrs: keep, Prefixes: all}
+	}
+	keep = append(keep, x.Addrs()...)
 	prefixes := []netip.Prefix{n.Prefix6}
 	if n.Prefix4.IsValid() {
 		prefixes = append(prefixes, n.Prefix4)
@@ -540,6 +543,21 @@ func (c *Core) Observed(now time.Time, ns kernel.Namespace, err error) {
 			// Installed by an operation that failed partway: it registers
 			// as any new peer does.
 			st.fresh[p.PublicKey] = true
+		}
+	}
+	// A removal that failed partway, as when wgctrl splits a large one into
+	// several messages, still leaves the flows of what it removed to flush.
+	held := map[netip.Prefix]bool{}
+	for _, key := range slices.SortedFunc(maps.Keys(st.peers), compareKey) {
+		for _, a := range st.peers[key].Allowed {
+			held[a] = true
+		}
+	}
+	for _, key := range slices.SortedFunc(maps.Keys(before), compareKey) {
+		for _, a := range without(before[key].Allowed, st.peers[key].Allowed) {
+			if !held[a] && !slices.Contains(st.unflushed, a.Addr()) {
+				st.unflushed = append(st.unflushed, a.Addr())
+			}
 		}
 	}
 	defer c.registerFresh(now, st)

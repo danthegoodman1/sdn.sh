@@ -154,6 +154,80 @@ func TestAMachineAPeerStopsFrontingIsFlushed(t *testing.T) {
 	}
 }
 
+// TestARemovalThatFailedPartwayStillFlushes: a batch's removal fails after
+// the kernel removed the peer, so the agent looks; the peer it finds gone
+// leaves its flows to the next batch's flush.
+func TestARemovalThatFailedPartwayStillFlushes(t *testing.T) {
+	c, now := adopted(t)
+	db := api.Peer{Interface: "if-d", Service: "svc-db", PublicKey: peer, Allowed: []netip.Prefix{pfx("fd00::6/128")}}
+	if err := c.State(now, state(3, nil, db)); err != nil {
+		t.Fatal(err)
+	}
+	drive(c, now, succeed)
+	if err := c.State(now, state(4, nil)); err != nil {
+		t.Fatal(err)
+	}
+	var observe string
+	for _, a := range c.Actions(now) {
+		b, ok := a.(RunBatch)
+		if !ok {
+			continue
+		}
+		at := slices.IndexFunc(b.Ops, func(op kernel.Op) bool { return op.Kind == kernel.SetPeers })
+		if at < 0 {
+			t.Fatalf("the removal's batch holds no peer change: %+v", b.Ops)
+		}
+		c.BatchDone(now, b.Namespace, b.ID, at, errors.New("netlink: the second message failed"))
+	}
+	for _, a := range c.Actions(now) {
+		if o, ok := a.(Observe); ok {
+			observe = o.Namespace
+		}
+	}
+	if observe == "" {
+		t.Fatal("the agent did not look after the failed removal")
+	}
+	dev := kernel.Device{Name: c.cfg.Device, HasKey: true, PublicKey: self, ListenPort: 40000}
+	c.Observed(now, kernel.Namespace{Name: observe, Devices: []kernel.Device{dev}}, nil)
+	now = now.Add(time.Second)
+	var flushed bool
+	for _, a := range c.Actions(now) {
+		if b, ok := a.(RunBatch); ok && len(b.Ops) > 0 && b.Ops[0].Kind == kernel.Flush {
+			flushed = slices.Contains(b.Ops[0].Addrs, netip.MustParseAddr("fd00::6"))
+		}
+	}
+	if !flushed {
+		t.Fatal("the next batch does not flush the peer the failed removal took")
+	}
+}
+
+// TestARestartSweepsBeforeANewPeerClaimsAnAddress: the agent crashed after
+// removing a peer and before flushing it, and while it was down the
+// peer's address passed to another interface. The first batch after the
+// restart sweeps before it installs the new holder, and keeps no flow to
+// the address.
+func TestARestartSweepsBeforeANewPeerClaimsAnAddress(t *testing.T) {
+	c, now := adopted(t)
+	next := api.Peer{Interface: "if-n", Service: "svc-db", PublicKey: model.Key{11}, Allowed: []netip.Prefix{pfx("fd00::6/128")}}
+	if err := c.State(now, state(3, nil, next)); err != nil {
+		t.Fatal(err)
+	}
+	var b RunBatch
+	for _, a := range c.Actions(now) {
+		if r, ok := a.(RunBatch); ok {
+			b = r
+		}
+	}
+	swept := slices.IndexFunc(b.Ops, func(op kernel.Op) bool { return op.Kind == kernel.Sweep })
+	added := slices.IndexFunc(b.Ops, func(op kernel.Op) bool { return op.Kind == kernel.SetPeers })
+	if swept < 0 || added < 0 || swept > added {
+		t.Fatalf("the first batch sweeps at %d and installs peers at %d: %+v", swept, added, b.Ops)
+	}
+	if slices.Contains(b.Ops[swept].Addrs, netip.MustParseAddr("fd00::6")) {
+		t.Fatalf("the sweep keeps flows to the address the new peer claims: %v", b.Ops[swept].Addrs)
+	}
+}
+
 func TestAPeersRelayAnswersAndBelongsToTheSet(t *testing.T) {
 	c, now := adopted(t)
 	relays := map[model.RelayID]int{"r1": 1, "r2": 2, "r3": 3}
@@ -1345,5 +1419,32 @@ func TestAnAttachAsksForItsMemberAndAnswersWithItsName(t *testing.T) {
 	}
 	if len(asked) != 1 {
 		t.Fatalf("the control plane was asked %d times, want once", len(asked))
+	}
+
+	// A restarted agent adopts the interface from its journal, member and
+	// all.
+	e := c.entry(c.ifaces[replies[0].Interface.Interface])
+	if e.Member != "etcd-1" {
+		t.Fatalf("the journal holds %+v, want member etcd-1", e)
+	}
+	r := New(DefaultConfig("h1"), prng.New(2))
+	dev := kernel.Device{Name: r.cfg.Device, HasKey: true, PublicKey: e.PublicKey, ListenPort: e.ListenPort}
+	r.Start(now, []JournalEntry{e}, kernel.Snapshot{Namespaces: []kernel.Namespace{{Name: e.Namespace, Devices: []kernel.Device{dev}}}})
+	answers := func(req RequestID, a api.LocalAttach) []Reply {
+		r.Attach(now, req, a)
+		var out []Reply
+		for _, act := range r.Actions(now) {
+			if act, ok := act.(Reply); ok {
+				out = append(out, act)
+			}
+		}
+		return out
+	}
+	if other := answers(4, a); len(other) != 1 || !strings.Contains(fmt.Sprint(other[0].Err), "another member") {
+		t.Fatalf("after a restart, attaching the workload as another member: %+v", other)
+	}
+	a.Member = "etcd-1"
+	if same := answers(5, a); len(same) != 1 || same[0].Err != nil || same[0].Interface.Interface != e.Interface {
+		t.Fatalf("after a restart, attaching the workload as its member: %+v", same)
 	}
 }

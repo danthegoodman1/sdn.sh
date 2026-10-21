@@ -360,9 +360,9 @@ func (c *Core) tpeer(self model.InterfaceID, p api.Peer) tpeer {
 }
 
 // rules builds the namespace's nftables table from the peers it holds, so a
-// slot never names an address without a peer and a source set never names
-// an address with none, and rejects every service address of the network
-// it does not translate.
+// slot never names an address without a peer and a source set or the open
+// set never names an address with none, and rejects every service address
+// of the network it does not translate.
 func (c *Core) rules(n *api.NetworkState, x *api.Interface, peers []tpeer) *nft.Ruleset {
 	rs := &nft.Ruleset{Forward: x.Kind == api.Gateway}
 	live := map[model.InterfaceID]bool{x.ID: true}
@@ -446,6 +446,33 @@ func (c *Core) rules(n *api.NetworkState, x *api.Interface, peers []tpeer) *nft.
 			}
 			rs.Rules.Accept = append(rs.Rules.Accept, nft.Accept{Set: name, Family: f, Proto: in.Proto, Ports: in.Ports})
 		}
+	}
+	// A new flow into the network goes only to the namespace's own
+	// addresses and to the peers a slot may name. A dial to a waiting peer's
+	// own address, which a member's name gives, would send the handshake
+	// initiation the wait holds back, and a draining peer takes no new flow
+	// by any address.
+	for _, f := range families {
+		prefix := n.Prefix6
+		if f == nft.IPv4 {
+			prefix = n.Prefix4
+		}
+		if !prefix.IsValid() || x.State != api.Live {
+			continue
+		}
+		set := nft.Set{Name: nft.OpenSetName(f), Family: f}
+		for _, a := range x.Addrs() {
+			if nft.FamilyOf(a) == f {
+				set.Addrs = append(set.Addrs, a)
+			}
+		}
+		for _, p := range peers {
+			if live[p.peer.Interface] {
+				set.Addrs = append(set.Addrs, inFamily(p.peer.Allowed, f)...)
+			}
+		}
+		rs.Sets = append(rs.Sets, set)
+		rs.Rules.Open = append(rs.Rules.Open, nft.Open{Prefix: prefix, Set: set.Name})
 	}
 	// A gateway's development machines take replies alone: no new flow is
 	// forwarded to one, from a backend or from another machine.

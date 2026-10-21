@@ -12,6 +12,7 @@ import (
 	"github.com/danthegoodman1/wirenet/internal/api"
 	"github.com/danthegoodman1/wirenet/internal/kernel"
 	"github.com/danthegoodman1/wirenet/internal/model"
+	"github.com/danthegoodman1/wirenet/internal/nft"
 	"github.com/danthegoodman1/wirenet/internal/prng"
 	"github.com/danthegoodman1/wirenet/internal/regproto"
 )
@@ -192,8 +193,10 @@ func TestARemovalThatFailedPartwayStillFlushes(t *testing.T) {
 	now = now.Add(time.Second)
 	var flushed bool
 	for _, a := range c.Actions(now) {
-		if b, ok := a.(RunBatch); ok && len(b.Ops) > 0 && b.Ops[0].Kind == kernel.Flush {
-			flushed = slices.Contains(b.Ops[0].Addrs, netip.MustParseAddr("fd00::6"))
+		if b, ok := a.(RunBatch); ok {
+			flushed = slices.ContainsFunc(b.Ops, func(op kernel.Op) bool {
+				return op.Kind == kernel.Flush && slices.Contains(op.Addrs, netip.MustParseAddr("fd00::6"))
+			})
 		}
 	}
 	if !flushed {
@@ -591,54 +594,188 @@ func TestAFreshDirectionIsRegisteredAgainOnASchedule(t *testing.T) {
 	}
 }
 
-// TestAReplacementRegistersBeforeItsHolderIsFlushed swaps a client's db
-// backend for another, as a replacing attach does. A flush walks tables
-// the whole host shares, so the batch that installs the new backend ends
-// at the old one's removal and registers the new direction; the flush
-// leads the next batch.
-func TestAReplacementRegistersBeforeItsHolderIsFlushed(t *testing.T) {
+// TestAFlushWaitsOnAddsAtMostAckWait removes a peer in a batch that adds
+// another, then adds a peer in every batch after, as churn does. Each batch
+// that adds peers leaves the flush to a later one, but only until AckWait
+// passes, so the removed peer's flows go though the adds never stop.
+func TestAFlushWaitsOnAddsAtMostAckWait(t *testing.T) {
 	c, now := adopted(t)
-	c.cfg.RegisterEvery = time.Hour
-	update := func(rev uint64, b api.Peer) {
+	start := now
+	peerN := func(n byte) api.Peer {
+		return api.Peer{Interface: model.InterfaceID(fmt.Sprintf("if-%d", n)), Service: "svc-2", PublicKey: model.Key{n},
+			Allowed: []netip.Prefix{pfx(fmt.Sprintf("fd00::%d/128", n))}}
+	}
+	flushed := func() []netip.Addr {
+		var out []netip.Addr
+		for _, b := range drive(c, now, succeed) {
+			for _, op := range b.Ops {
+				if op.Kind == kernel.Flush {
+					out = append(out, op.Addrs...)
+				}
+			}
+		}
+		return out
+	}
+	if err := c.State(now, state(3, nil, peerN(9))); err != nil {
+		t.Fatal(err)
+	}
+	flushed()
+	peers := []api.Peer{peerN(10)}
+	for rev := uint64(4); ; rev++ {
+		if err := c.State(now, state(rev, nil, peers...)); err != nil {
+			t.Fatal(err)
+		}
+		got := flushed()
+		if len(got) > 0 {
+			if !slices.Equal(got, []netip.Addr{netip.MustParseAddr("fd00::9")}) || now.Sub(start) < c.cfg.AckWait {
+				t.Fatalf("after %v of adds the flush took %v, want fd00::9 once AckWait passed", now.Sub(start), got)
+			}
+			return
+		}
+		if now.Sub(start) > c.cfg.AckWait {
+			t.Fatalf("%v of adds and still no flush", now.Sub(start))
+		}
+		now = now.Add(100 * time.Millisecond)
+		c.Tick(now)
+		peers = append(peers, peerN(byte(11+len(peers))))
+	}
+}
+
+// TestAFlushWaitsOnACoLocatedPeerAtMostAckWait swaps if-a's remote peer for
+// a co-located one whose namespace has yet to hold if-a, as when that
+// namespace's batches stall. Nothing ends that wait, so the swap's flush
+// waits for it only until AckWait passes, and the core wakes then though no
+// other timer is due.
+func TestAFlushWaitsOnACoLocatedPeerAtMostAckWait(t *testing.T) {
+	cfg := DefaultConfig("h1")
+	cfg.ProbeEvery, cfg.RegisterEvery, cfg.ResyncEvery = 0, time.Hour, time.Hour
+	c, now := New(cfg, prng.New(1)), time.Unix(1000, 0)
+	keyC := model.Key{10}
+	var journal []JournalEntry
+	var snap kernel.Snapshot
+	for _, e := range []JournalEntry{
+		{Interface: "if-a", Name: "a", Network: "net-1", Service: "svc-1", Kind: api.Workload, Namespace: "wirenet-a", ListenPort: 40000, PublicKey: self},
+		{Interface: "if-c", Name: "c", Network: "net-1", Service: "svc-2", Kind: api.Workload, Namespace: "wirenet-c", ListenPort: 40002, PublicKey: keyC},
+	} {
+		journal = append(journal, e)
+		snap.Namespaces = append(snap.Namespaces, kernel.Namespace{Name: e.Namespace,
+			Devices: []kernel.Device{{Name: c.cfg.Device, HasKey: true, PublicKey: e.PublicKey, ListenPort: e.ListenPort}}})
+	}
+	c.Start(now, journal, snap)
+	update := func(rev uint64, aPeers, cPeers []api.Peer) {
 		t.Helper()
-		if err := c.State(now, api.StateUpdate{Host: "h1", Generation: rev, Networks: []api.NetworkState{client(rev, "if-a", self, b)},
+		n := api.NetworkState{Network: "net-1", Name: "n", Revision: rev, Prefix6: pfx("fd00::/64"), MTU: 1380, Interfaces: []api.Interface{
+			{ID: "if-a", Service: "svc-1", Kind: api.Workload, PublicKey: self, Addr6: netip.MustParseAddr("fd00::5"), ListenPort: 40000, State: api.Live, Peers: aPeers},
+			{ID: "if-c", Service: "svc-2", Kind: api.Workload, PublicKey: keyC, Addr6: netip.MustParseAddr("fd00::7"), ListenPort: 40002, State: api.Live, Peers: cPeers},
+		}}
+		if err := c.State(now, api.StateUpdate{Host: "h1", Generation: rev, Networks: []api.NetworkState{n},
 			Present: []api.NetworkRef{{Network: "net-1", Revision: rev}}}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	update(3, backend("if-b", peer, "fd00::6"))
-	sent(c, now)
-	next := backend("if-c", model.Key{12}, "fd00::7")
-	next.Relays = []api.RelayPath{{Relay: "r1", Send: ap("192.0.2.1:7002")}}
-	update(4, next)
-
-	var events []string
-	for acts := c.Actions(now); len(acts) > 0; acts = c.Actions(now) {
-		for _, a := range acts {
-			switch a := a.(type) {
-			case RunBatch:
-				for _, op := range a.Ops {
-					switch {
-					case op.Kind == kernel.Flush:
-						events = append(events, "flush "+fmt.Sprint(op.Addrs))
-					case op.Kind == kernel.SetPeers && op.Peers[0].Remove:
-						events = append(events, "remove")
-					case op.Kind == kernel.SetPeers:
-						events = append(events, "add")
+	// flushes carries out wirenet-a's batches, holding wirenet-c's, and
+	// returns what they flushed.
+	flushes := func(now time.Time) []netip.Addr {
+		var out []netip.Addr
+		for acts := c.Actions(now); len(acts) > 0; acts = c.Actions(now) {
+			for _, act := range acts {
+				if b, ok := act.(RunBatch); ok && b.Namespace == "wirenet-a" {
+					for _, op := range b.Ops {
+						if op.Kind == kernel.Flush {
+							out = append(out, op.Addrs...)
+						}
 					}
-				}
-				events = append(events, "done")
-				c.BatchDone(now, a.Namespace, a.ID, len(a.Ops), nil)
-			case SendRegistration:
-				if a.To == next.Relays[0].Send {
-					events = append(events, "register")
+					c.BatchDone(now, b.Namespace, b.ID, len(b.Ops), nil)
 				}
 			}
 		}
+		return out
 	}
-	want := []string{"add", "remove", "done", "register", "flush [fd00::6]", "done"}
-	if !slices.Equal(events, want) {
-		t.Fatalf("the replacement ran %q, want %q", events, want)
+	remote := api.Peer{Interface: "if-e", Service: "svc-2", PublicKey: model.Key{11}, Allowed: []netip.Prefix{pfx("fd00::9/128")}}
+	update(3, []api.Peer{remote}, nil)
+	runPair(c, now)
+	update(4, []api.Peer{{Interface: "if-c", Service: "svc-2", PublicKey: keyC, Allowed: []netip.Prefix{pfx("fd00::7/128")}, Loopback: 40002, Keepalive: true}},
+		[]api.Peer{{Interface: "if-a", Service: "svc-1", PublicKey: self, Allowed: []netip.Prefix{pfx("fd00::5/128")}, Loopback: 40000}})
+	if got := flushes(now); len(got) > 0 {
+		t.Fatalf("flushed %v while if-c's namespace had yet to hold if-a", got)
+	}
+	later := now.Add(c.cfg.AckWait)
+	if wake := c.NextWake(now); wake.After(later) {
+		t.Fatalf("the core next wakes at %v, after the flush's wait ends at %v", wake, later)
+	}
+	c.Tick(later)
+	if got := flushes(later); !slices.Equal(got, []netip.Addr{netip.MustParseAddr("fd00::9")}) {
+		t.Fatalf("once AckWait passed the flush took %v, want fd00::9", got)
+	}
+}
+
+// TestAReplacementOpensItsBackendBeforeTheHolderIsFlushed swaps a
+// client's db backend for another, as a replacing attach does. A flush
+// walks tables the whole host shares, so the batch that installs the new
+// backend ends at the old one's removal and registers the new direction,
+// and the flush waits on the relay's acknowledgment: the batch that opens
+// the new backend flushes the old one after. Without an acknowledgment the
+// flush runs once AckWait passes.
+func TestAReplacementOpensItsBackendBeforeTheHolderIsFlushed(t *testing.T) {
+	for _, acked := range []bool{true, false} {
+		c, now := adopted(t)
+		c.cfg.RegisterEvery = time.Hour
+		update := func(rev uint64, b api.Peer) {
+			t.Helper()
+			if err := c.State(now, api.StateUpdate{Host: "h1", Generation: rev, Networks: []api.NetworkState{client(rev, "if-a", self, b)},
+				Present: []api.NetworkRef{{Network: "net-1", Revision: rev}}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		update(3, backend("if-b", peer, "fd00::6"))
+		sent(c, now)
+		next := backend("if-c", model.Key{12}, "fd00::7")
+		next.Relays = []api.RelayPath{{Relay: "r1", Send: ap("192.0.2.1:7002")}}
+		update(4, next)
+
+		var events []string
+		run := func(now time.Time) {
+			for acts := c.Actions(now); len(acts) > 0; acts = c.Actions(now) {
+				for _, a := range acts {
+					switch a := a.(type) {
+					case RunBatch:
+						for _, op := range a.Ops {
+							switch {
+							case op.Kind == kernel.Flush:
+								events = append(events, "flush "+fmt.Sprint(op.Addrs))
+							case op.Kind == kernel.SetPeers && op.Peers[0].Remove:
+								events = append(events, "remove")
+							case op.Kind == kernel.SetPeers:
+								events = append(events, "add")
+							case op.Kind == kernel.ApplyRules && slices.ContainsFunc(op.Rules.SetAdd, func(e nft.SetElems) bool {
+								return e.Set == nft.OpenSetName(nft.IPv6) && slices.Contains(e.Addrs, netip.MustParseAddr("fd00::7"))
+							}):
+								events = append(events, "open")
+							}
+						}
+						events = append(events, "done")
+						c.BatchDone(now, a.Namespace, a.ID, len(a.Ops), nil)
+					case SendRegistration:
+						// Resends follow until the relay acknowledges.
+						if a.To == next.Relays[0].Send && !slices.Contains(events, "register") {
+							events = append(events, "register")
+						}
+					}
+				}
+			}
+		}
+		run(now)
+		if acked {
+			c.RegistrationAcked(now, 40000, next.Relays[0].Send, c.counter)
+		} else {
+			now = now.Add(c.cfg.AckWait)
+			c.Tick(now)
+		}
+		run(now)
+		want := []string{"add", "remove", "done", "register", "open", "flush [fd00::6]", "done"}
+		if !slices.Equal(events, want) {
+			t.Fatalf("acknowledged %v: the replacement ran %q, want %q", acked, events, want)
+		}
 	}
 }
 
@@ -808,6 +945,71 @@ func TestAPeerWhoseNamespaceLostItsNameStopsTakingSlots(t *testing.T) {
 	}
 	if slotted(c, "wirenet-a") || !deleted {
 		t.Fatalf("after the scan: a slotted %v, b's name deleted %v", slotted(c, "wirenet-a"), deleted)
+	}
+}
+
+// opened reports whether a namespace's table takes new flows to addr.
+func opened(c *Core, ns string, addr netip.Addr) bool {
+	st := c.ns[ns]
+	return st.rules != nil && len(st.rules.Rules.Open) > 0 && !st.rules.Closed(addr)
+}
+
+// TestAPeerTakesNewFlowsAtItsOwnAddressOnlyOnceASlotMayNameIt: a dial to a
+// peer's own address, as a member's name gives, would send the handshake
+// initiation a slot's wait holds back. So in a loopback pair whose ends
+// each reach the other, if-a, which keeps the pair alive, opens if-b's
+// address once if-b's device holds if-a, and if-b opens if-a's once its
+// device holds a session; a relay peer new to a namespace opens once its
+// relay acknowledges. Each namespace's own address is open throughout.
+func TestAPeerTakesNewFlowsAtItsOwnAddressOnlyOnceASlotMayNameIt(t *testing.T) {
+	a6, b6 := netip.MustParseAddr("fd00::5"), netip.MustParseAddr("fd00::6")
+	c, now, u := pairOnOneHost(t)
+	if err := c.State(now, u); err != nil {
+		t.Fatal(err)
+	}
+	// if-b's batches wait, so if-a's namespace holds if-b while if-b's
+	// device still knows nothing of if-a.
+	var held []RunBatch
+	for acts := c.Actions(now); len(acts) > 0; acts = c.Actions(now) {
+		for _, act := range acts {
+			if b, ok := act.(RunBatch); ok {
+				if b.Namespace == "wirenet-b" {
+					held = append(held, b)
+					continue
+				}
+				c.BatchDone(now, b.Namespace, b.ID, len(b.Ops), nil)
+			}
+		}
+	}
+	if opened(c, "wirenet-a", b6) || !opened(c, "wirenet-a", a6) {
+		t.Fatalf("before if-b's device held if-a: a opens b %v, itself %v", opened(c, "wirenet-a", b6), opened(c, "wirenet-a", a6))
+	}
+	for _, b := range held {
+		c.BatchDone(now, b.Namespace, b.ID, len(b.Ops), nil)
+	}
+	runPair(c, now)
+	if !opened(c, "wirenet-a", b6) || opened(c, "wirenet-b", a6) || !opened(c, "wirenet-b", b6) {
+		t.Fatalf("before if-b's session: a opens b %v, b opens a %v, b opens itself %v; want true, false, true",
+			opened(c, "wirenet-a", b6), opened(c, "wirenet-b", a6), opened(c, "wirenet-b", b6))
+	}
+	c.SessionsSeen(now, "wirenet-b", []model.Key{self}, nil)
+	runPair(c, now)
+	if !opened(c, "wirenet-b", a6) {
+		t.Fatal("b never opened a once its session showed")
+	}
+
+	c, now = adopted(t)
+	if err := c.State(now, state(4, nil, backend("if-b", peer, "fd00::6"))); err != nil {
+		t.Fatal(err)
+	}
+	drive(c, now, succeed)
+	if opened(c, "wirenet-a", b6) {
+		t.Fatal("a relay peer new to the namespace took new flows before its relay acknowledged")
+	}
+	c.RegistrationAcked(now, 40000, relayAt, c.counter)
+	drive(c, now, succeed)
+	if !opened(c, "wirenet-a", b6) {
+		t.Fatal("the acknowledged relay peer never opened")
 	}
 }
 

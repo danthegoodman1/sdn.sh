@@ -217,7 +217,8 @@ func (t *Transaction) Size() int {
 		for _, s := range t.Replace.Sets {
 			n += len(s.Addrs) + 1
 		}
-		return n + len(t.Replace.Rules.Translate) + len(t.Replace.Rules.Reject) + len(t.Replace.Rules.Accept) + len(t.Replace.Rules.Shield)
+		return n + len(t.Replace.Rules.Translate) + len(t.Replace.Rules.Reject) + len(t.Replace.Rules.Accept) + len(t.Replace.Rules.Shield) +
+			len(t.Replace.Rules.Open)
 	}
 	n := len(t.DelMaps) + len(t.DelSets) + len(t.Slots)
 	for _, m := range t.AddMaps {
@@ -233,7 +234,7 @@ func (t *Transaction) Size() int {
 		n += len(e.Addrs)
 	}
 	if t.Rules != nil {
-		n += len(t.Rules.Translate) + len(t.Rules.Reject) + len(t.Rules.Accept) + len(t.Rules.Shield)
+		n += len(t.Rules.Translate) + len(t.Rules.Reject) + len(t.Rules.Accept) + len(t.Rules.Shield) + len(t.Rules.Open)
 	}
 	return n
 }
@@ -258,6 +259,23 @@ func (r *Ruleset) TranslateOut(dst netip.Addr, proto model.Proto, port uint16, d
 func (r *Ruleset) Rejected(dst netip.Addr) bool {
 	_, ok := slices.BinarySearchFunc(r.Rules.Reject, dst, netip.Addr.Compare)
 	return ok
+}
+
+// Closed reports whether a new flow to dst, after translation, is rejected
+// for lying in one of the network's prefixes outside its open set.
+func (r *Ruleset) Closed(dst netip.Addr) bool {
+	for _, o := range r.Rules.Open {
+		if !o.Prefix.Contains(dst) {
+			continue
+		}
+		s, ok := r.Set(o.Set)
+		if !ok {
+			return true
+		}
+		_, found := slices.BinarySearchFunc(s.Addrs, dst, netip.Addr.Compare)
+		return !found
+	}
+	return false
 }
 
 // Admit reports whether the inbound chain accepts a new flow from src.

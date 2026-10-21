@@ -50,6 +50,7 @@ func (c *Core) plan(now time.Time, st *nsState, i *iface) []kernel.Op {
 	st.nextDrain = time.Time{}
 	if i == nil || i.phase != configuring && i.phase != ready {
 		c.dropWaits(st)
+		st.flushBy = time.Time{}
 	}
 	if st.ref != "" {
 		if st.reaped {
@@ -167,9 +168,6 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 	}
 	st.nextDrain = tgt.nextDrain
 	var ops []kernel.Op
-	if len(st.unflushed) > 0 {
-		ops = append(ops, kernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: slices.Clone(st.unflushed)})
-	}
 	if st.sweep {
 		ops = append(ops, sweep(st.name, n, x, st.peers, ok))
 	}
@@ -253,13 +251,32 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 	flush = slices.DeleteFunc(flush, func(a netip.Addr) bool { return slices.Contains(st.unflushed, a) })
 	if len(removes) > 0 {
 		ops = append(ops, kernel.Op{Kind: kernel.SetPeers, Namespace: st.name, Device: c.cfg.Device, Peers: removes})
-		// A flush walks conntrack and socket tables the whole host shares,
-		// tens of milliseconds on a large machine. A batch that adds peers
-		// ends without it, so they register at their relays at once, and
-		// the next batch leads with it.
-		if len(adds) == 0 {
-			ops = append(ops, kernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: flush})
-		}
+	}
+	// A flush walks conntrack and socket tables the whole host shares, tens
+	// of milliseconds on a large machine, so it leads a batch only when the
+	// batch gives a peer an address it flushes. Otherwise it ends the first
+	// batch that adds no peers, since a batch's new peers register at their
+	// relays only once it ends. While the namespace waits on peers, a flush
+	// with nothing to follow waits too, so the batch that ends a wait opens
+	// the peers before it flushes. It waits at most AckWait either way.
+	claims := slices.ContainsFunc(adds, func(u kernel.PeerUpdate) bool {
+		return slices.ContainsFunc(u.Allowed, func(a netip.Prefix) bool { return slices.Contains(st.unflushed, a.Addr()) })
+	})
+	if claims {
+		ops = slices.Insert(ops, 0, kernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: slices.Clone(st.unflushed)})
+	} else {
+		flush = slices.Concat(st.unflushed, flush)
+	}
+	later := len(adds) > 0 || len(ops) == 0 && len(st.awaiting) > 0
+	switch {
+	case len(flush) == 0:
+		st.flushBy = time.Time{}
+	case later && st.flushBy.IsZero():
+		st.flushBy = now.Add(c.cfg.AckWait)
+	case later && now.Before(st.flushBy):
+	default:
+		st.flushBy = time.Time{}
+		ops = append(ops, kernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: flush})
 	}
 	return ops
 }

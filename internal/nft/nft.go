@@ -7,10 +7,13 @@
 //	map s_<service>_4 { typeof numgen random mod 1024 : ip daddr; }
 //	set f_<service>_6 { type ipv6_addr; }   live source addresses
 //	set f_<service>_4 { type ipv4_addr; }
+//	set o_6 { type ipv6_addr; }             addresses open to new flows
+//	set o_4 { type ipv4_addr; }
 //	chain services { type nat hook output priority dstnat; }
 //	    ip6 daddr <service> tcp dport 5432 dnat ip6 to numgen random mod 1024 map @s_<service>_6
 //	chain untranslated { type filter hook output priority filter; }
 //	    ip6 daddr { <service>, ... } reject
+//	    ct state new ip6 daddr <network prefix> ip6 daddr != @o_6 reject
 //	chain inbound { type filter hook input priority filter; policy drop; }
 //	    iif lo accept; ct state established,related accept; ct state invalid drop
 //	    ICMP errors accept
@@ -24,6 +27,11 @@
 // port policy does not name, or a service policy keeps the namespace from.
 // The reject lists every service address of the network. A client fails
 // fast rather than hanging, and the failure leaves no conntrack entry.
+//
+// Within the network's prefixes, a new flow goes only to an open address:
+// the namespace's own, or a peer's whose wait has ended. A peer that waits
+// takes nothing new, by service address or by its own, so nothing sends it
+// a handshake before it can answer one. Replies pass whatever the set holds.
 //
 // A Ruleset is the table's content as data; Diff turns two of them into one
 // Transaction, which nftables applies atomically; Apply plays a transaction
@@ -102,6 +110,9 @@ type Rules struct {
 	// Shield names sets whose addresses take no new forwarded flow, only
 	// replies: the development machines behind a gateway.
 	Shield []string `json:"shield,omitempty"`
+	// Open admits new flows into each of the network's prefixes only to
+	// the addresses of a set, and rejects the rest.
+	Open []Open `json:"open,omitempty"`
 }
 
 // Clone copies the rules.
@@ -111,6 +122,7 @@ func (r Rules) Clone() Rules {
 		Reject:    slices.Clone(r.Reject),
 		Accept:    slices.Clone(r.Accept),
 		Shield:    slices.Clone(r.Shield),
+		Open:      slices.Clone(r.Open),
 	}
 }
 
@@ -130,6 +142,12 @@ type Accept struct {
 	Ports  model.PortRange `json:"ports"`
 }
 
+// Open admits new flows into a prefix only to a set's addresses.
+type Open struct {
+	Prefix netip.Prefix `json:"prefix"`
+	Set    string       `json:"set"`
+}
+
 // MapName names a service's slot map in one family.
 func MapName(svc model.ServiceID, f Family) string {
 	return fmt.Sprintf("s_%s_%d", model.Short(string(svc)), f)
@@ -144,8 +162,11 @@ func SetName(svc model.ServiceID, f Family) string {
 // in one family.
 func DeviceSetName(f Family) string { return fmt.Sprintf("d_%d", f) }
 
-// ParseName reports whether a name MapName, SetName or DeviceSetName made
-// names a slot map, and its family.
+// OpenSetName names the set of addresses open to new flows, in one family.
+func OpenSetName(f Family) string { return fmt.Sprintf("o_%d", f) }
+
+// ParseName reports whether a name MapName, SetName, DeviceSetName or
+// OpenSetName made names a slot map, and its family.
 func ParseName(name string) (isMap bool, f Family) {
 	f = IPv6
 	if strings.HasSuffix(name, "_4") {
@@ -172,6 +193,9 @@ func (r *Ruleset) Normalize() {
 	})
 	slices.Sort(r.Rules.Shield)
 	r.Rules.Shield = slices.Compact(r.Rules.Shield)
+	slices.SortFunc(r.Rules.Open, func(a, b Open) int {
+		return cmp.Or(a.Prefix.Addr().Compare(b.Prefix.Addr()), cmp.Compare(a.Prefix.Bits(), b.Prefix.Bits()))
+	})
 }
 
 // Validate checks what nftables would otherwise accept and then misbehave
@@ -214,6 +238,12 @@ func (r *Ruleset) Validate() error {
 	for _, name := range r.Rules.Shield {
 		if _, ok := sets[name]; !ok {
 			return fmt.Errorf("shield names set %s, which is missing", name)
+		}
+	}
+	for _, o := range r.Rules.Open {
+		s, ok := sets[o.Set]
+		if !ok || !o.Prefix.IsValid() || s.Family != FamilyOf(o.Prefix.Addr()) {
+			return fmt.Errorf("open for %v names set %s, which is missing or of another family", o.Prefix, o.Set)
 		}
 	}
 	return nil
@@ -276,5 +306,5 @@ func Equal(a, b *Ruleset) bool {
 
 func rulesEqual(a, b Rules) bool {
 	return slices.Equal(a.Translate, b.Translate) && slices.Equal(a.Reject, b.Reject) && slices.Equal(a.Accept, b.Accept) &&
-		slices.Equal(a.Shield, b.Shield)
+		slices.Equal(a.Shield, b.Shield) && slices.Equal(a.Open, b.Open)
 }

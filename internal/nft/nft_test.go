@@ -46,6 +46,16 @@ func randomRuleset(r *prng.Rand) *Ruleset {
 			}
 		}
 	}
+	for _, f := range []Family{IPv6, IPv4} {
+		if r.Percent(50) {
+			s := Set{Name: OpenSetName(f), Family: f}
+			for range r.Below(4) {
+				s.Addrs = append(s.Addrs, addr(f))
+			}
+			rs.Sets = append(rs.Sets, s)
+			rs.Rules.Open = append(rs.Rules.Open, Open{Prefix: netip.PrefixFrom(addr(f), 8).Masked(), Set: s.Name})
+		}
+	}
 	rs.Normalize()
 	return rs
 }
@@ -133,11 +143,12 @@ func TestEvaluation(t *testing.T) {
 	client := netip.MustParseAddr("fd00::31")
 	rs := &Ruleset{
 		Maps: []Map{m},
-		Sets: []Set{{Name: "f_y_6", Family: IPv6, Addrs: []netip.Addr{client}}},
+		Sets: []Set{{Name: "f_y_6", Family: IPv6, Addrs: []netip.Addr{client}}, {Name: "o_6", Family: IPv6, Addrs: []netip.Addr{b1, b2}}},
 		Rules: Rules{
 			Translate: []Translate{{Addr: svc, Proto: model.TCP, Ports: model.PortRange{Lo: 5432, Hi: 5432}, Map: "s_x_6"}},
 			Reject:    []netip.Addr{svc},
 			Accept:    []Accept{{Set: "f_y_6", Family: IPv6, Proto: model.TCP, Ports: model.PortRange{Lo: 5432, Hi: 5432}}},
+			Open:      []Open{{Prefix: netip.MustParsePrefix("fd00::/64"), Set: "o_6"}},
 		},
 	}
 	rs.Normalize()
@@ -152,5 +163,10 @@ func TestEvaluation(t *testing.T) {
 	}
 	if !rs.Admit(client, model.TCP, 5432) || rs.Admit(client, model.TCP, 22) || rs.Admit(b1, model.TCP, 5432) {
 		t.Fatal("admission wrong")
+	}
+	// Within the prefix only the open set takes new flows; beyond it,
+	// everything does.
+	if rs.Closed(b1) || !rs.Closed(client) || rs.Closed(netip.MustParseAddr("2001:db8::1")) || rs.Closed(netip.MustParseAddr("10.0.0.1")) {
+		t.Fatal("the open set closes the wrong addresses")
 	}
 }

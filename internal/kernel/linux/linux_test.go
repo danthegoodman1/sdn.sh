@@ -566,6 +566,105 @@ func TestARejectedServiceLeavesNoEntryToRefuseItsReturn(t *testing.T) {
 	}
 }
 
+// TestANewFlowGoesOnlyToAnOpenAddress closes b's addresses in a's table
+// while a's peer for b holds no session. a's dials to b are refused at once
+// and send b no handshake; a still reaches its own address, and b's
+// connection to a, with a's replies, passes. Opened, b's address takes a's
+// dial.
+func TestANewFlowGoesOnlyToAnOpenAddress(t *testing.T) {
+	k := newKernel(t)
+	a, b := pair(t, k, prng.New(13))
+	// Fresh peers without keepalive hold no session until traffic starts one.
+	for _, e := range [][2]end{{a, b}, {b, a}} {
+		from, to := e[0], e[1]
+		u := kernel.PeerUpdate{PublicKey: to.pub(), Allowed: []netip.Prefix{netip.PrefixFrom(to.addr, 128), netip.PrefixFrom(to.a4, 32)},
+			Endpoint: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), to.port)}
+		remove := u
+		remove.Remove = true
+		run(t, k, kernel.Op{Kind: kernel.SetPeers, Namespace: from.ns, Device: "wirenet0", Peers: []kernel.PeerUpdate{remove}},
+			kernel.Op{Kind: kernel.SetPeers, Namespace: from.ns, Device: "wirenet0", Peers: []kernel.PeerUpdate{u}})
+	}
+	for _, e := range []end{a, b} {
+		serve(t, e.ns, netip.AddrPortFrom(e.addr, 5432), e.ns)
+		serve(t, e.ns, netip.AddrPortFrom(e.a4, 5432), e.ns)
+	}
+	rules := func(open6, open4 []netip.Addr) *nft.Ruleset {
+		rs := &nft.Ruleset{
+			Sets: []nft.Set{
+				{Name: "f_b_6", Family: nft.IPv6, Addrs: []netip.Addr{b.addr}},
+				{Name: nft.OpenSetName(nft.IPv6), Family: nft.IPv6, Addrs: open6},
+				{Name: nft.OpenSetName(nft.IPv4), Family: nft.IPv4, Addrs: open4},
+			},
+			Rules: nft.Rules{
+				Accept: []nft.Accept{{Set: "f_b_6", Family: nft.IPv6, Proto: model.TCP, Ports: model.PortRange{Lo: 5432, Hi: 5432}}},
+				Open: []nft.Open{
+					{Prefix: netip.MustParsePrefix("fd00::/64"), Set: nft.OpenSetName(nft.IPv6)},
+					{Prefix: netip.MustParsePrefix("10.99.0.0/16"), Set: nft.OpenSetName(nft.IPv4)},
+				},
+			},
+		}
+		rs.Normalize()
+		return rs
+	}
+	closed := rules([]netip.Addr{a.addr}, []netip.Addr{a.a4})
+	run(t, k, kernel.Op{Kind: kernel.ApplyRules, Namespace: a.ns, Rules: &nft.Transaction{Replace: closed}})
+	sessions := func(e end) []model.Key {
+		t.Helper()
+		r, err := k.Run(kernel.Op{Kind: kernel.ReadSessions, Namespace: e.ns, Device: "wirenet0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.Sessions
+	}
+	for _, addr := range []netip.Addr{b.addr, b.a4} {
+		start := time.Now()
+		if c, err := dial(t, a.ns, netip.AddrPortFrom(addr, 5432), time.Second); err == nil {
+			c.Close()
+			t.Fatalf("reached %v, which a's table closes", addr)
+		} else if !errors.Is(err, unix.ECONNREFUSED) || time.Since(start) > 100*time.Millisecond {
+			t.Fatalf("a dial to closed %v failed with %v after %v, want a refusal at once", addr, err, time.Since(start))
+		}
+		if udpArrives(t, a.ns, b.ns, netip.AddrPortFrom(addr, 9998)) {
+			t.Fatalf("a datagram reached %v, which a's table closes", addr)
+		}
+	}
+	if got := sessions(b); len(got) != 0 {
+		t.Fatalf("b holds sessions %v after a's dials to it were refused", got)
+	}
+	for _, addr := range []netip.Addr{a.addr, a.a4} {
+		c, err := dial(t, a.ns, netip.AddrPortFrom(addr, 5432), time.Second)
+		if err != nil {
+			t.Fatalf("a's dial to its own %v: %v", addr, err)
+		}
+		readReply(t, c)
+		c.Close()
+	}
+	c, err := dial(t, b.ns, netip.AddrPortFrom(a.addr, 5432), 3*time.Second)
+	if err != nil {
+		t.Fatalf("b's dial to a, whose replies go to an address a's table closes: %v", err)
+	}
+	if got := readReply(t, c); got != a.ns {
+		t.Fatalf("b reached %q", got)
+	}
+	c.Close()
+	open := rules([]netip.Addr{a.addr, b.addr}, []netip.Addr{a.a4, b.a4})
+	tx := nft.Diff(closed, open)
+	if tx.Replace != nil || tx.Rules != nil {
+		t.Fatalf("opening an address should change set elements alone: %+v", tx)
+	}
+	run(t, k, kernel.Op{Kind: kernel.ApplyRules, Namespace: a.ns, Rules: &tx})
+	for _, addr := range []netip.Addr{b.addr, b.a4} {
+		c, err := dial(t, a.ns, netip.AddrPortFrom(addr, 5432), 3*time.Second)
+		if err != nil {
+			t.Fatalf("a's dial to opened %v: %v", addr, err)
+		}
+		if got := readReply(t, c); got != b.ns {
+			t.Fatalf("a reached %q at %v", got, addr)
+		}
+		c.Close()
+	}
+}
+
 // TestASessionShowsOnceAHandshakeCompletes reads b's sessions after a's
 // keepalive handshake, which lists a, then gives b a fresh peer for a,
 // which lists nothing until traffic shakes hands again.

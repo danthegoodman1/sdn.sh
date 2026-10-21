@@ -5,6 +5,7 @@ package linux
 import (
 	"encoding/binary"
 	"fmt"
+	"net"
 	"net/netip"
 	"slices"
 
@@ -299,6 +300,26 @@ func (w *nftWriter) rules(r nft.Rules) error {
 					w.add(chain, append(match, &expr.Reject{Type: unix.NFT_REJECT_ICMPX_UNREACH, Code: unix.NFT_REJECT_ICMPX_PORT_UNREACH})...)
 				}
 			}
+		}
+	}
+	// A new flow into the network's prefix goes only to an open address;
+	// replies, being established, pass.
+	for _, o := range r.Open {
+		f := nft.FamilyOf(o.Prefix.Addr())
+		set := w.set(o.Set)
+		mask := net.CIDRMask(o.Prefix.Bits(), o.Prefix.Addr().BitLen())
+		match := append(family(f), ctState(expr.CtStateBitNEW)...)
+		match = append(match, addrField(f, false),
+			&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: uint32(len(mask)), Mask: mask, Xor: make([]byte, len(mask))},
+			eq(o.Prefix.Masked().Addr().AsSlice()),
+			addrField(f, false),
+			&expr.Lookup{SourceRegister: 1, SetName: set.Name, SetID: set.ID, Invert: true})
+		for _, chain := range []string{"untranslated", "untranslated_fwd"} {
+			if chain == "untranslated_fwd" && !w.forward {
+				continue
+			}
+			w.add(chain, append(append(slices.Clone(match), l4(unix.IPPROTO_TCP)...), &expr.Reject{Type: unix.NFT_REJECT_TCP_RST})...)
+			w.add(chain, append(slices.Clone(match), &expr.Reject{Type: unix.NFT_REJECT_ICMPX_UNREACH, Code: unix.NFT_REJECT_ICMPX_PORT_UNREACH})...)
 		}
 	}
 	for _, name := range r.Shield {

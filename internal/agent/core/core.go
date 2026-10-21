@@ -10,10 +10,15 @@
 //
 //  1. the device's addresses, routes and MTU;
 //  2. peers added and changed;
-//  3. one nftables transaction, so slots name only installed peers;
-//  4. peers removed, then their conntrack entries and sockets flushed. A
-//     batch that adds peers leaves the flush to lead the next batch, so the
-//     peers it adds register at their relays without waiting on it.
+//  3. one nftables transaction, so slots and the open set name only
+//     installed peers;
+//  4. peers removed, then their conntrack entries and sockets flushed. The
+//     flush ends the first batch that adds no peers, so the peers a batch
+//     adds register at their relays without waiting on it. While the
+//     namespace waits on peers, the flush waits too, at most AckWait, so the
+//     batch that ends a wait opens the peers before it flushes. A flush
+//     leads a batch only when that batch gives a peer an address it
+//     flushes.
 //
 // A peer that would claim an address another installed peer still holds
 // waits until a later batch has removed the holder, so no allowed IP ever
@@ -298,9 +303,11 @@ type nsState struct {
 	// desired state names the peer or the device holds it.
 	relayed map[model.Key]relayed
 	// unflushed holds addresses of removed peers whose flows have yet to
-	// be flushed; sweep asks for a sweep of every flow no installed peer
+	// be flushed, and flushBy ends their flush's wait on the namespace's
+	// other waits; sweep asks for a sweep of every flow no installed peer
 	// accounts for, after a restart lost track.
 	unflushed []netip.Addr
+	flushBy   time.Time
 	sweep     bool
 	// awaiting names the interfaces the namespace waits on: co-located
 	// ones whose devices have yet to hold this namespace's interface as a

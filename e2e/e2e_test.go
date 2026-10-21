@@ -6,10 +6,12 @@
 package e2e
 
 import (
+	"cmp"
 	"context"
 	crand "crypto/rand"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -1255,9 +1257,16 @@ func TestPeersThatDialEachOtherAsTheirEdgeFormsConnectAtOnce(t *testing.T) {
 	// holder first answers.
 	var mu sync.Mutex
 	reached := map[string]time.Time{}
-	stop := make(chan struct{})
-	defer close(stop)
+	// The dialer ends before the test does: the lab's teardown kills
+	// whatever process a namespace holds, and a dial can hold one from the
+	// test binary's main thread.
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	defer func() {
+		close(stop)
+		<-stopped
+	}()
 	go func() {
+		defer close(stopped)
 		for {
 			select {
 			case <-stop:
@@ -1309,4 +1318,131 @@ func TestPeersThatDialEachOtherAsTheirEdgeFormsConnectAtOnce(t *testing.T) {
 	}
 	t.Logf("relay: %v initiations crossed", metric(must(lab.Metrics(relay.Telemetry)), `wirenet_relay_waiting_packets_total{outcome="crossed"}`)+
 		metric(must(lab.Metrics(relay.Telemetry)), `wirenet_relay_dropped_packets_total{reason="crossed_initiation"}`))
+}
+
+// TestCoLocatedMembersThatDialEachOtherConnectAtOnce replaces a member
+// round after round, beside each of two peers in turn, while it and both
+// peers dial each other by name every millisecond, as etcd members do. A
+// member's name answers with its interface's own address, which no slot
+// carries.
+func TestCoLocatedMembersThatDialEachOtherConnectAtOnce(t *testing.T) {
+	l := newLab(t, "e2er")
+	ctx := context.Background()
+	relay := must(l.AddRelay(ctx, "r1"))
+	hs := []*lab.Host{must(l.AddHost(ctx, "h1")), must(l.AddHost(ctx, "h2"))}
+	must(l.Admin.CreateNetwork(ctx, api.CreateNetwork{Name: "shop", Relays: []model.RelayID{relay.ID}}))
+	must(l.Admin.CreateService(ctx, "shop", api.CreateService{Name: "etcd"}))
+	must(l.Admin.CreateRule(ctx, "shop", api.CreateRule{From: "etcd", To: "etcd", Proto: model.TCP, Ports: model.PortRange{Lo: 2380, Hi: 2380}}))
+	member := func(h *lab.Host, workload, name string, replace bool) (api.LocalInterface, net.Listener) {
+		t.Helper()
+		i, err := h.AttachMember(ctx, workload, "shop", "etcd", name, replace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return i, must(lab.Serve(i.Namespace, netip.AddrPortFrom(i.Addr6, 2380), workload))
+	}
+	e1, _ := member(hs[0], "e1", "etcd-1", false)
+	e3, _ := member(hs[1], "e3", "etcd-3", false)
+	_, ln := member(hs[1], "e2-r0", "etcd-2", false)
+	type end struct {
+		ns, name, member string
+	}
+	peers := []end{{e1.Namespace, "e1", "etcd-1"}, {e3.Namespace, "e3", "etcd-3"}}
+	var mu sync.Mutex
+	// reached holds when one end first reached another, by their names.
+	reached := map[[2]string]time.Time{}
+	// dialing dials a name from ns every millisecond, up to 32 dials at
+	// once, until stop closes. Every dial ends before the test does: the
+	// lab's teardown kills whatever process a namespace holds, and a dial
+	// can hold one from the test binary's main thread.
+	var dialers, dials sync.WaitGroup
+	dialing := func(stop chan struct{}, from end, name string) {
+		dialers.Add(1)
+		defer dialers.Done()
+		inflight := make(chan struct{}, 32)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Millisecond):
+			}
+			select {
+			case inflight <- struct{}{}:
+			default:
+				continue
+			}
+			dials.Add(1)
+			go func() {
+				defer dials.Done()
+				defer func() { <-inflight }()
+				addrs, _, err := lab.LookupWithin(from.ns, name, dnsmessage.TypeAAAA, 200*time.Millisecond)
+				if err != nil || len(addrs) == 0 {
+					return
+				}
+				if got, err := lab.Dial(from.ns, netip.AddrPortFrom(addrs[0], 2380), 300*time.Millisecond); err == nil {
+					mu.Lock()
+					if k := [2]string{from.name, got}; reached[k].IsZero() {
+						reached[k] = time.Now()
+					}
+					mu.Unlock()
+				}
+			}()
+		}
+	}
+	stop := make(chan struct{})
+	defer func() {
+		close(stop)
+		dialers.Wait()
+		dials.Wait()
+	}()
+	for _, p := range peers {
+		go dialing(stop, p, "etcd-2.etcd.shop.internal.")
+	}
+	// took holds each first connection's time from the attach request, by
+	// whether the two ends share a host and which end dialed.
+	took := map[[2]string][]time.Duration{}
+	at := 1
+	for round := 1; round <= 40; round++ {
+		ln.Close()
+		at = 1 - at
+		start := time.Now()
+		w := fmt.Sprintf("e2-r%d", round)
+		var moved api.LocalInterface
+		moved, ln = member(hs[at], w, "etcd-2", true)
+		// The new member dials both peers at once, as a starting etcd does.
+		mine := make(chan struct{})
+		for _, p := range peers {
+			go dialing(mine, end{moved.Namespace, w, "etcd-2"}, p.member+".etcd.shop.internal.")
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for i, p := range peers {
+			path := map[bool]string{true: "beside it", false: "through the relay"}[i == at]
+			for _, k := range [][2]string{{p.name, w}, {w, p.name}} {
+				for {
+					mu.Lock()
+					first := reached[k]
+					mu.Unlock()
+					if !first.IsZero() {
+						d := first.Sub(start)
+						dir := map[bool]string{true: "the peer's dial", false: "the new member's dial"}[k[1] == w]
+						took[[2]string{path, dir}] = append(took[[2]string{path, dir}], d)
+						if d > 2*time.Second {
+							t.Errorf("round %d: %s reached %s %s after %v; a crossing costs 5s", round, k[0], k[1], path, d)
+						}
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("round %d: %s never reached %s", round, k[0], k[1])
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+		}
+		close(mine)
+	}
+	for _, k := range slices.SortedFunc(maps.Keys(took), func(a, b [2]string) int { return cmp.Compare(a[0]+a[1], b[0]+b[1]) }) {
+		ds := took[k]
+		slices.Sort(ds)
+		t.Logf("%s, %s: p50 %v, max %v over %d rounds", k[0], k[1], ds[len(ds)/2].Round(100*time.Microsecond), ds[len(ds)-1].Round(100*time.Microsecond), len(ds))
+	}
 }

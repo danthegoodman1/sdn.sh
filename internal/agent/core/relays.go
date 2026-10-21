@@ -461,6 +461,9 @@ func (c *Core) Tick(now time.Time) {
 		if !st.ackBy.IsZero() && !now.Before(st.ackBy) {
 			st.dirty = true
 		}
+		if len(st.unflushed) > 0 && !st.flushBy.IsZero() && !now.Before(st.flushBy) {
+			st.dirty = true
+		}
 	}
 	c.retryReleases(now)
 	if c.cfg.ProbeEvery > 0 && !now.Before(c.lastProbe.Add(c.cfg.ProbeEvery)) {
@@ -524,6 +527,11 @@ func (c *Core) NextWake(now time.Time) time.Time {
 		if !st.dirty {
 			soonest(st.nextDrain)
 			soonest(st.ackBy)
+			// A flush's wait matters until it ends; past it, the next plan
+			// flushes.
+			if len(st.unflushed) > 0 && st.flushBy.After(now) {
+				soonest(st.flushBy)
+			}
 		}
 		if st.dirty && !st.busy && !st.observe && st.retryAt.After(now) {
 			soonest(st.retryAt)

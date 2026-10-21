@@ -122,7 +122,7 @@ func (w *World) open(x *ifIntent, dialed netip.Addr, proto model.Proto, port uin
 	if ns.Rules != nil {
 		translated := false
 		remote, translated = ns.Rules.TranslateOut(dialed, proto, port, w.work.Index(nft.Slots))
-		if !translated && ns.Rules.Rejected(dialed) {
+		if !translated && ns.Rules.Rejected(dialed) || ns.Rules.Closed(remote) {
 			f.state = refused
 			return f
 		}

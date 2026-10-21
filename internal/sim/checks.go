@@ -36,10 +36,10 @@ func (w *World) checkMoves(h *hostNode) {
 }
 
 // checkColocated fails the run if a batch arms keepalive on a co-located
-// peer, or points a slot at one, before that peer's device holds the
-// reverse peer, judged when the agent plans the batch. Anything sent to a
-// device without the reverse peer is dropped, and WireGuard waits five
-// seconds before trying again.
+// peer, points a slot at one, or opens one's address to new flows, before
+// that peer's device holds the reverse peer, judged when the agent plans the
+// batch. Anything sent to a device without the reverse peer is dropped, and
+// WireGuard waits five seconds before trying again.
 func (w *World) checkColocated(h *hostNode, b agentcore.RunBatch) {
 	ns, ok := h.kernel.Named(b.Namespace)
 	if !ok {
@@ -49,6 +49,9 @@ func (w *World) checkColocated(h *hostNode, b agentcore.RunBatch) {
 	if !ok {
 		return
 	}
+	// The device's public key, which every check below asks the other
+	// device about; deriving it is a scalar multiplication.
+	pub := dev.Private.Public()
 	// The endpoint each allowed address routes to, once the batch's peers
 	// are in.
 	route := map[netip.Addr]netip.AddrPort{}
@@ -77,20 +80,52 @@ func (w *World) checkColocated(h *hostNode, b agentcore.RunBatch) {
 				if p, ok := dev.Peers[u.PublicKey]; ok && p.Keepalive > 0 {
 					continue
 				}
-				if !holdsReverse(h, dev, ep) {
+				if !holdsReverse(h, pub, ep) {
 					w.fail("%s: %s arms keepalive toward %s before that device holds the reverse peer", h.name, b.Namespace, w.byKey[u.PublicKey])
 					return
 				}
 			}
 		case kernel.ApplyRules:
 			for _, a := range slotAddrs(op.Rules) {
-				if ep, ok := route[a]; ok && ep.Addr().IsLoopback() && !holdsReverse(h, dev, ep) {
+				if ep, ok := route[a]; ok && ep.Addr().IsLoopback() && !holdsReverse(h, pub, ep) {
 					w.fail("%s: %s points a slot at %v before that device holds the reverse peer", h.name, b.Namespace, a)
+					return
+				}
+			}
+			for _, a := range openedAddrs(op.Rules) {
+				if ep, ok := route[a]; ok && ep.Addr().IsLoopback() && !holdsReverse(h, pub, ep) {
+					w.fail("%s: %s opens %v to new flows before that device holds the reverse peer", h.name, b.Namespace, a)
 					return
 				}
 			}
 		}
 	}
+}
+
+// openedAddrs lists every address a transaction adds to an open set.
+func openedAddrs(tx *nft.Transaction) []netip.Addr {
+	if tx == nil {
+		return nil
+	}
+	open := func(name string) bool {
+		return slices.ContainsFunc([]nft.Family{nft.IPv6, nft.IPv4}, func(f nft.Family) bool { return name == nft.OpenSetName(f) })
+	}
+	written := slices.Clone(tx.AddSets)
+	if tx.Replace != nil {
+		written = append(written, tx.Replace.Sets...)
+	}
+	var out []netip.Addr
+	for _, s := range written {
+		if open(s.Name) {
+			out = append(out, s.Addrs...)
+		}
+	}
+	for _, e := range tx.SetAdd {
+		if open(e.Set) {
+			out = append(out, e.Addrs...)
+		}
+	}
+	return out
 }
 
 // slotAddrs lists every address a transaction writes into a slot.
@@ -113,10 +148,10 @@ func slotAddrs(tx *nft.Transaction) []netip.Addr {
 }
 
 // holdsReverse reports whether the device listening on a loopback endpoint
-// holds dev's key as a peer.
-func holdsReverse(h *hostNode, dev *kmodel.Device, endpoint netip.AddrPort) bool {
+// holds pub as a peer.
+func holdsReverse(h *hostNode, pub model.Key, endpoint netip.AddrPort) bool {
 	other, ok := h.kernel.PortOwner(endpoint.Port())
-	return ok && other.Peers[dev.Private.Public()] != nil
+	return ok && other.Peers[pub] != nil
 }
 
 // checkFlushed fails the run if a Flush or Sweep removed a flow whose
@@ -141,9 +176,10 @@ func (w *World) checkFlushed(h *hostNode) {
 }
 
 // checkTables fails the run if a namespace's table names an address its
-// device cannot route: a slot whose backend has no peer, or a source address
-// no peer holds. It runs after every kernel operation, since a batch must
-// leave every state between its operations safe.
+// device cannot route: a slot whose backend has no peer, a source address
+// no peer holds, or an open address that is neither the namespace's own nor
+// a peer's. It runs after every kernel operation, since a batch must leave
+// every state between its operations safe.
 func (w *World) checkTables(h *hostNode, name string) {
 	ns, ok := h.kernel.Named(name)
 	if !ok || ns.Rules == nil {
@@ -172,9 +208,10 @@ func (w *World) checkTables(h *hostNode, name string) {
 		}
 	}
 	for _, s := range ns.Rules.Sets {
+		open := s.Name == nft.OpenSetName(s.Family)
 		for _, a := range s.Addrs {
-			if _, ok := dev.Route(a); !ok {
-				w.fail("%s: source set %s in %s names %v, which no peer holds", h.name, s.Name, name, a)
+			if _, ok := dev.Route(a); !ok && !(open && holds(own, a)) {
+				w.fail("%s: set %s in %s names %v, which no peer holds", h.name, s.Name, name, a)
 				return
 			}
 		}
@@ -213,6 +250,9 @@ type expected struct {
 type expPeer struct {
 	allowed   []netip.Prefix
 	keepalive bool
+	// reached says x's service reaches the peer's, so x may open flows to
+	// it.
+	reached bool
 }
 
 // expect computes, independently of the compiler and the agent, what one
@@ -272,7 +312,7 @@ func (w *World) expect(net model.NetworkID, rev uint64, id model.InterfaceID) (e
 		if xy != yx {
 			keeps = xy
 		}
-		e.peers[y.PublicKey] = expPeer{allowed: allowed, keepalive: y.Host == x.Host && keeps}
+		e.peers[y.PublicKey] = expPeer{allowed: allowed, keepalive: y.Host == x.Host && keeps, reached: xy}
 	}
 	if rs := egressRules(rules, x.Service); len(rs) > 0 {
 		e.egress = &kernel.EgressConfig{Index: x.ListenPort, Rules: rs}
@@ -386,15 +426,43 @@ func (w *World) compare(ns *kmodel.Netns, dev *kmodel.Device, e expected, strict
 	if !slices.Equal(names, slices.Sorted(maps.Keys(e.maps))) {
 		return fmt.Errorf("slot maps %v, want %v", names, slices.Sorted(maps.Keys(e.maps)))
 	}
+	// A settled namespace waits on no peer, so its own addresses and those
+	// of every peer it reaches but a draining one are open to new flows.
+	sets := maps.Clone(e.sets)
+	if e.live && dev.Link != nil {
+		for _, f := range []nft.Family{nft.IPv6, nft.IPv4} {
+			var open []netip.Addr
+			for _, a := range dev.Link.Addrs {
+				if nft.FamilyOf(a.Addr()) == f {
+					open = append(open, a.Addr())
+				}
+			}
+			if len(open) == 0 {
+				continue
+			}
+			for _, p := range dev.PeerList() {
+				if want, ok := e.peers[p.PublicKey]; !ok || !want.reached {
+					continue
+				}
+				for _, a := range p.Allowed {
+					if nft.FamilyOf(a.Addr()) == f {
+						open = append(open, a.Addr())
+					}
+				}
+			}
+			slices.SortFunc(open, netip.Addr.Compare)
+			sets[nft.OpenSetName(f)] = slices.Compact(open)
+		}
+	}
 	names = nil
 	for _, s := range rs.Sets {
 		names = append(names, s.Name)
-		if want := e.sets[s.Name]; !slices.Equal(s.Addrs, want) {
-			return fmt.Errorf("source set %s holds %v, want %v", s.Name, s.Addrs, want)
+		if want := sets[s.Name]; !slices.Equal(s.Addrs, want) {
+			return fmt.Errorf("set %s holds %v, want %v", s.Name, s.Addrs, want)
 		}
 	}
-	if !slices.Equal(names, slices.Sorted(maps.Keys(e.sets))) {
-		return fmt.Errorf("source sets %v, want %v", names, slices.Sorted(maps.Keys(e.sets)))
+	if !slices.Equal(names, slices.Sorted(maps.Keys(sets))) {
+		return fmt.Errorf("sets %v, want %v", names, slices.Sorted(maps.Keys(sets)))
 	}
 	if !ns.Egress.Equal(e.egress) {
 		return fmt.Errorf("egress %+v, want %+v", ns.Egress, e.egress)
@@ -802,6 +870,12 @@ func (w *World) probeAll() {
 			}
 			if !permits(rules, x.service, y.service, model.TCP, 9) {
 				probes = append(probes, probe{w.open(x, y.addr6, model.TCP, 9), false, fmt.Sprintf("%s to %s on a port policy does not name", x.id, y.id)})
+			}
+			// A member's name answers its holder's own address, which a
+			// flow reaches wherever policy lets x reach y.
+			if i := slices.IndexFunc(pts, func(p point) bool { return permits(rules, x.service, y.service, p.proto, p.port) }); i >= 0 {
+				probes = append(probes, probe{w.open(x, y.addr6, pts[i].proto, pts[i].port), true,
+					fmt.Sprintf("%s to %s's own address over %s/%d", x.id, y.id, pts[i].proto, pts[i].port)})
 			}
 		}
 	}

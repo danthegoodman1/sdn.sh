@@ -49,6 +49,9 @@ func (w *World) checkColocated(h *hostNode, b agentcore.RunBatch) {
 	if !ok {
 		return
 	}
+	// The device's public key, which every check below asks the other
+	// device about; deriving it is a scalar multiplication.
+	pub := dev.Private.Public()
 	// The endpoint each allowed address routes to, once the batch's peers
 	// are in.
 	route := map[netip.Addr]netip.AddrPort{}
@@ -77,20 +80,20 @@ func (w *World) checkColocated(h *hostNode, b agentcore.RunBatch) {
 				if p, ok := dev.Peers[u.PublicKey]; ok && p.Keepalive > 0 {
 					continue
 				}
-				if !holdsReverse(h, dev, ep) {
+				if !holdsReverse(h, pub, ep) {
 					w.fail("%s: %s arms keepalive toward %s before that device holds the reverse peer", h.name, b.Namespace, w.byKey[u.PublicKey])
 					return
 				}
 			}
 		case kernel.ApplyRules:
 			for _, a := range slotAddrs(op.Rules) {
-				if ep, ok := route[a]; ok && ep.Addr().IsLoopback() && !holdsReverse(h, dev, ep) {
+				if ep, ok := route[a]; ok && ep.Addr().IsLoopback() && !holdsReverse(h, pub, ep) {
 					w.fail("%s: %s points a slot at %v before that device holds the reverse peer", h.name, b.Namespace, a)
 					return
 				}
 			}
 			for _, a := range openedAddrs(op.Rules) {
-				if ep, ok := route[a]; ok && ep.Addr().IsLoopback() && !holdsReverse(h, dev, ep) {
+				if ep, ok := route[a]; ok && ep.Addr().IsLoopback() && !holdsReverse(h, pub, ep) {
 					w.fail("%s: %s opens %v to new flows before that device holds the reverse peer", h.name, b.Namespace, a)
 					return
 				}
@@ -145,10 +148,10 @@ func slotAddrs(tx *nft.Transaction) []netip.Addr {
 }
 
 // holdsReverse reports whether the device listening on a loopback endpoint
-// holds dev's key as a peer.
-func holdsReverse(h *hostNode, dev *kmodel.Device, endpoint netip.AddrPort) bool {
+// holds pub as a peer.
+func holdsReverse(h *hostNode, pub model.Key, endpoint netip.AddrPort) bool {
 	other, ok := h.kernel.PortOwner(endpoint.Port())
-	return ok && other.Peers[dev.Private.Public()] != nil
+	return ok && other.Peers[pub] != nil
 }
 
 // checkFlushed fails the run if a Flush or Sweep removed a flow whose

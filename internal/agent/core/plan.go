@@ -263,7 +263,9 @@ func (c *Core) planReconcile(now time.Time, st *nsState, i *iface) []kernel.Op {
 		return slices.ContainsFunc(u.Allowed, func(a netip.Prefix) bool { return slices.Contains(st.unflushed, a.Addr()) })
 	})
 	if claims {
+		// What this batch removes starts a wait of its own.
 		ops = slices.Insert(ops, 0, kernel.Op{Kind: kernel.Flush, Namespace: st.name, Addrs: slices.Clone(st.unflushed)})
+		st.flushBy = time.Time{}
 	} else {
 		flush = slices.Concat(st.unflushed, flush)
 	}

@@ -448,10 +448,16 @@ func (c *Core) rules(n *api.NetworkState, x *api.Interface, peers []tpeer) *nft.
 		}
 	}
 	// A new flow into the network goes only to the namespace's own
-	// addresses and to the peers a slot may name. A dial to a waiting peer's
+	// addresses and to the peers a slot may name: those whose wait has
+	// ended, of a service the namespace reaches. A dial to a waiting peer's
 	// own address, which a member's name gives, would send the handshake
-	// initiation the wait holds back, and a draining peer takes no new flow
-	// by any address.
+	// initiation the wait holds back; a draining peer takes no new flow by
+	// any address; and one the namespace does not reach would only drop it,
+	// after a handshake that could cross the peer's own.
+	reached := map[model.ServiceID]bool{}
+	for _, r := range x.Reach {
+		reached[r.Service] = true
+	}
 	for _, f := range families {
 		prefix := n.Prefix6
 		if f == nft.IPv4 {
@@ -467,8 +473,16 @@ func (c *Core) rules(n *api.NetworkState, x *api.Interface, peers []tpeer) *nft.
 			}
 		}
 		for _, p := range peers {
-			if live[p.peer.Interface] {
-				set.Addrs = append(set.Addrs, inFamily(p.peer.Allowed, f)...)
+			if !live[p.peer.Interface] {
+				continue
+			}
+			if reached[p.peer.Service] {
+				set.Addrs = append(set.Addrs, inFamily(own(p.peer), f)...)
+			}
+			for _, fr := range p.peer.Fronts {
+				if reached[fr.Service] {
+					set.Addrs = append(set.Addrs, inFamily(fr.Allowed, f)...)
+				}
 			}
 		}
 		rs.Sets = append(rs.Sets, set)

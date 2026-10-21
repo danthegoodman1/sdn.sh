@@ -247,6 +247,9 @@ type expected struct {
 type expPeer struct {
 	allowed   []netip.Prefix
 	keepalive bool
+	// reached says x's service reaches the peer's, so x may open flows to
+	// it.
+	reached bool
 }
 
 // expect computes, independently of the compiler and the agent, what one
@@ -306,7 +309,7 @@ func (w *World) expect(net model.NetworkID, rev uint64, id model.InterfaceID) (e
 		if xy != yx {
 			keeps = xy
 		}
-		e.peers[y.PublicKey] = expPeer{allowed: allowed, keepalive: y.Host == x.Host && keeps}
+		e.peers[y.PublicKey] = expPeer{allowed: allowed, keepalive: y.Host == x.Host && keeps, reached: xy}
 	}
 	if rs := egressRules(rules, x.Service); len(rs) > 0 {
 		e.egress = &kernel.EgressConfig{Index: x.ListenPort, Rules: rs}
@@ -421,7 +424,7 @@ func (w *World) compare(ns *kmodel.Netns, dev *kmodel.Device, e expected, strict
 		return fmt.Errorf("slot maps %v, want %v", names, slices.Sorted(maps.Keys(e.maps)))
 	}
 	// A settled namespace waits on no peer, so its own addresses and those
-	// of every peer but a draining one are open to new flows.
+	// of every peer it reaches but a draining one are open to new flows.
 	sets := maps.Clone(e.sets)
 	if e.live && dev.Link != nil {
 		for _, f := range []nft.Family{nft.IPv6, nft.IPv4} {
@@ -435,7 +438,7 @@ func (w *World) compare(ns *kmodel.Netns, dev *kmodel.Device, e expected, strict
 				continue
 			}
 			for _, p := range dev.PeerList() {
-				if _, ok := e.peers[p.PublicKey]; !ok {
+				if want, ok := e.peers[p.PublicKey]; !ok || !want.reached {
 					continue
 				}
 				for _, a := range p.Allowed {
@@ -864,6 +867,12 @@ func (w *World) probeAll() {
 			}
 			if !permits(rules, x.service, y.service, model.TCP, 9) {
 				probes = append(probes, probe{w.open(x, y.addr6, model.TCP, 9), false, fmt.Sprintf("%s to %s on a port policy does not name", x.id, y.id)})
+			}
+			// A member's name answers its holder's own address, which a
+			// flow reaches wherever policy lets x reach y.
+			if i := slices.IndexFunc(pts, func(p point) bool { return permits(rules, x.service, y.service, p.proto, p.port) }); i >= 0 {
+				probes = append(probes, probe{w.open(x, y.addr6, pts[i].proto, pts[i].port), true,
+					fmt.Sprintf("%s to %s's own address over %s/%d", x.id, y.id, pts[i].proto, pts[i].port)})
 			}
 		}
 	}

@@ -641,6 +641,46 @@ func TestAFlushWaitsOnAddsAtMostAckWait(t *testing.T) {
 	}
 }
 
+// TestAFlushThatLeadsLeavesTheBatchsRemovalsToALaterOne: a peer's removal
+// leaves its flush to a later batch, and once AckWait has passed, one batch
+// installs a peer claiming the flushed address and removes another peer. The
+// claimed address's flush leads that batch, and the other removal's flush
+// waits behind the batch's new peers like any other.
+func TestAFlushThatLeadsLeavesTheBatchsRemovalsToALaterOne(t *testing.T) {
+	c, now := adopted(t)
+	peerAt := func(key byte, addr string) api.Peer {
+		return api.Peer{Interface: model.InterfaceID(fmt.Sprintf("if-%d", key)), Service: "svc-2", PublicKey: model.Key{key},
+			Allowed: []netip.Prefix{pfx(addr + "/128")}}
+	}
+	a, b, d := peerAt(1, "fd00::9"), peerAt(2, "fd00::11"), peerAt(3, "fd00::10")
+	if err := c.State(now, state(3, nil, a, b)); err != nil {
+		t.Fatal(err)
+	}
+	for len(drive(c, now, succeed)) > 0 {
+	}
+	if err := c.State(now, state(4, nil, b, d)); err != nil {
+		t.Fatal(err)
+	}
+	drive(c, now, succeed)
+	now = now.Add(c.cfg.AckWait)
+	if err := c.State(now, state(5, nil, d, peerAt(4, "fd00::9"))); err != nil {
+		t.Fatal(err)
+	}
+	var flushes [][]netip.Addr
+	var first kernel.OpKind
+	for _, bt := range drive(c, now, succeed) {
+		first = bt.Ops[0].Kind
+		for _, op := range bt.Ops {
+			if op.Kind == kernel.Flush {
+				flushes = append(flushes, op.Addrs)
+			}
+		}
+	}
+	if first != kernel.Flush || len(flushes) != 1 || !slices.Equal(flushes[0], []netip.Addr{netip.MustParseAddr("fd00::9")}) {
+		t.Fatalf("the claiming batch led with %s and flushed %v, want one leading flush of fd00::9", first, flushes)
+	}
+}
+
 // TestAFlushWaitsOnACoLocatedPeerAtMostAckWait swaps if-a's remote peer for
 // a co-located one whose namespace has yet to hold if-a, as when that
 // namespace's batches stall. Nothing ends that wait, so the swap's flush
@@ -960,7 +1000,8 @@ func opened(c *Core, ns string, addr netip.Addr) bool {
 // each reach the other, if-a, which keeps the pair alive, opens if-b's
 // address once if-b's device holds if-a, and if-b opens if-a's once its
 // device holds a session; a relay peer new to a namespace opens once its
-// relay acknowledges. Each namespace's own address is open throughout.
+// relay acknowledges, and a peer of a service the namespace does not reach
+// never does. Each namespace's own address is open throughout.
 func TestAPeerTakesNewFlowsAtItsOwnAddressOnlyOnceASlotMayNameIt(t *testing.T) {
 	a6, b6 := netip.MustParseAddr("fd00::5"), netip.MustParseAddr("fd00::6")
 	c, now, u := pairOnOneHost(t)
@@ -998,8 +1039,14 @@ func TestAPeerTakesNewFlowsAtItsOwnAddressOnlyOnceASlotMayNameIt(t *testing.T) {
 		t.Fatal("b never opened a once its session showed")
 	}
 
+	// A peer of a service if-a does not reach, there because it reaches
+	// if-a, stays closed: a dial to it would only drop at its end.
 	c, now = adopted(t)
-	if err := c.State(now, state(4, nil, backend("if-b", peer, "fd00::6"))); err != nil {
+	n := client(4, "if-a", self, backend("if-b", peer, "fd00::6"))
+	n.Interfaces[0].Peers = append(n.Interfaces[0].Peers,
+		api.Peer{Interface: "if-c", Service: "svc-9", PublicKey: model.Key{13}, Allowed: []netip.Prefix{pfx("fd00::7/128")}})
+	if err := c.State(now, api.StateUpdate{Host: "h1", Generation: 4, Networks: []api.NetworkState{n},
+		Present: []api.NetworkRef{{Network: "net-1", Revision: 4}}}); err != nil {
 		t.Fatal(err)
 	}
 	drive(c, now, succeed)
@@ -1008,8 +1055,9 @@ func TestAPeerTakesNewFlowsAtItsOwnAddressOnlyOnceASlotMayNameIt(t *testing.T) {
 	}
 	c.RegistrationAcked(now, 40000, relayAt, c.counter)
 	drive(c, now, succeed)
-	if !opened(c, "wirenet-a", b6) {
-		t.Fatal("the acknowledged relay peer never opened")
+	if !opened(c, "wirenet-a", b6) || opened(c, "wirenet-a", netip.MustParseAddr("fd00::7")) {
+		t.Fatalf("once acknowledged: the db backend opened %v, the peer if-a does not reach %v; want true, false",
+			opened(c, "wirenet-a", b6), opened(c, "wirenet-a", netip.MustParseAddr("fd00::7")))
 	}
 }
 

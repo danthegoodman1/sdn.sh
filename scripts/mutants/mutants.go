@@ -184,6 +184,18 @@ var Mutants = []Mutant{
 		Catch:  []string{"agent-core"},
 	},
 	{
+		ID:     "leading-flush-keeps-deadline",
+		Breaks: "a flush that leads a batch leaves the batch's own removals a wait of their own behind its new peers",
+		Edits:  []Edit{{agentPlan, "\t\tst.flushBy = time.Time{}\n\t} else {\n", "\t} else {\n"}},
+		Catch:  []string{"agent-core"},
+	},
+	{
+		ID:     "unreached-peer-opened",
+		Breaks: "a namespace opens only peers of the services it reaches, so a dial to another sends no handshake that could cross the peer's own",
+		Edits:  []Edit{{agentTarget, "\t\t\tif reached[p.peer.Service] {\n", "\t\t\tif true {\n"}},
+		Catch:  []string{"agent-core", "sim"},
+	},
+	{
 		ID:     "wake-ignores-flush-wait",
 		Breaks: "the core wakes when a flush's wait on the namespace's waits ends",
 		Edits:  []Edit{{agentRelays, "\t\t\tif len(st.unflushed) > 0 && st.flushBy.After(now) {\n\t\t\t\tsoonest(st.flushBy)\n\t\t\t}\n", ""}},
@@ -898,13 +910,13 @@ var Mutants = []Mutant{
 	{
 		ID:     "waiting-peer-opened",
 		Breaks: "a peer takes new flows at its own address only once a slot may name it, so a dial to a member's name sends no initiation a wait holds back",
-		Edits:  []Edit{{agentTarget, "\t\t\tif live[p.peer.Interface] {\n", "\t\t\tif !p.peer.Draining {\n"}},
+		Edits:  []Edit{{agentTarget, "\t\t\tif !live[p.peer.Interface] {\n", "\t\t\tif p.peer.Draining {\n"}},
 		Catch:  []string{"agent-core", "sim"},
 	},
 	{
 		ID:     "draining-peer-opened",
 		Breaks: "a draining peer takes no new flow at its own address",
-		Edits:  []Edit{{agentTarget, "\t\t\tif live[p.peer.Interface] {\n", "\t\t\tif !p.awaiting {\n"}},
+		Edits:  []Edit{{agentTarget, "\t\t\tif !live[p.peer.Interface] {\n", "\t\t\tif p.awaiting {\n"}},
 		Catch:  []string{"sim"},
 	},
 	{

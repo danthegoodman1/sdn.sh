@@ -42,7 +42,7 @@ Nine c6i.xlarge instances (4 vCPU, up to 12.5 Gb/s) in one placement group in us
 | A new workload's first connection to a peer on another host, 20 peers | 50 ms p50, 60 ms max |
 | A backend replaced, until every client reaches the new one | 25–45 ms p50, 36–55 ms p99 |
 | One of two backends removed, rewriting half of each client's slots | 99–123 ms p50, 137–161 ms p99 |
-| An etcd member moved to another host: its first connection to a peer, from the attach | 26–28 ms p50, 35 ms max |
+| An etcd member moved to another host: its first connection to a peer, from the attach | 29 ms p50, 39 ms max |
 | Its peers' lookups of its name answering the new address, from the commit | 10–11 ms p50, 17 ms max |
 | A deny closing a wildcard to 30 sandboxes, from its commit | 9–11 ms p50, 16 ms max |
 | The deny lifted, until every sandbox reaches db again | 20–25 ms p50, 64 ms max |

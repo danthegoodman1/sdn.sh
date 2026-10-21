@@ -49,18 +49,21 @@ func (m *etcdMember) dir() string { return etcdDirs + "/" + m.li.Name }
 // etcd's log has the new member's first attempt to publish itself to the
 // cluster timing out.
 type memberMove struct {
-	Member      string            `json:"member"`
-	From        string            `json:"from"`
-	To          string            `json:"to"`
-	Attach      bench.AttachRound `json:"attach"`
-	Commit      time.Time         `json:"commit"`
-	Started     int64             `json:"started_unix_ns"`
-	Lookups     []bench.Lookup    `json:"lookups"`
-	Inbound     []bench.Dial      `json:"inbound"`
-	Healthy     int64             `json:"healthy_unix_ns"`
-	Synced      int64             `json:"synced_unix_ns"`
-	Republished bool              `json:"republished"`
-	Fenced      bool              `json:"fenced"`
+	Member  string            `json:"member"`
+	From    string            `json:"from"`
+	To      string            `json:"to"`
+	Attach  bench.AttachRound `json:"attach"`
+	Commit  time.Time         `json:"commit"`
+	Started int64             `json:"started_unix_ns"`
+	// PeerHosts names the host of each peer whose lookup and dial
+	// Lookups and Inbound hold, in their order.
+	PeerHosts   []string       `json:"peer_hosts"`
+	Lookups     []bench.Lookup `json:"lookups"`
+	Inbound     []bench.Dial   `json:"inbound"`
+	Healthy     int64          `json:"healthy_unix_ns"`
+	Synced      int64          `json:"synced_unix_ns"`
+	Republished bool           `json:"republished"`
+	Fenced      bool           `json:"fenced"`
 }
 
 // memberURL is the URL a member is known by at one of its ports.
@@ -259,6 +262,7 @@ func (r *run) moveMember(m *etcdMember, members []*etcdMember, to Node, round in
 	mv.Inbound = make([]bench.Dial, len(peers))
 	var fns []func() error
 	for i, p := range peers {
+		mv.PeerHosts = append(mv.PeerHosts, p.host.Name)
 		fns = append(fns, func() error {
 			return r.bench(p.host, &mv.Lookups[i], "lookup", "--netns="+p.li.Namespace, "--name", name, "--unlike", old.Addr6.String(), "--until", "20s")
 		}, func() error {
@@ -448,7 +452,9 @@ func (r *run) membersTable(moves []memberMove) {
 		return
 	}
 	r.data("moves", moves)
-	var attach, first, names, inbound []time.Duration
+	var attach, first, names []time.Duration
+	// inbound splits on whether the peer shares the new member's host.
+	inbound := map[bool][]time.Duration{}
 	// healthy and synced split on whether the first publish timed out.
 	healthy, synced := map[bool][]time.Duration{}, map[bool][]time.Duration{}
 	fenced := 0
@@ -467,9 +473,10 @@ func (r *run) membersTable(moves []memberMove) {
 		if mv.Started == 0 {
 			continue
 		}
-		for _, d := range mv.Inbound {
+		for i, d := range mv.Inbound {
 			if d.Reached {
-				inbound = append(inbound, fromStart(d.FirstDone))
+				beside := i < len(mv.PeerHosts) && mv.PeerHosts[i] == mv.To
+				inbound[beside] = append(inbound[beside], fromStart(d.FirstDone))
 			}
 		}
 		healthy[mv.Republished] = append(healthy[mv.Republished], fromStart(mv.Healthy))
@@ -489,7 +496,16 @@ func (r *run) membersTable(moves []memberMove) {
 	row("The replacing attach answers", "from its request", attach)
 	row("The new member's first connection reaches etcd-1", "from the attach request", first)
 	row("A peer's namespace resolves etcd-2 to its new address", "from the commit", names)
-	row("A peer's connection by name reaches the new etcd-2", "from its start", inbound)
+	for _, beside := range []bool{true, false} {
+		if len(inbound[beside]) == 0 {
+			continue
+		}
+		which := "a peer on another host"
+		if beside {
+			which = "the peer on its host"
+		}
+		row("A peer's connection by name reaches the new etcd-2, "+which, "from its start", inbound[beside])
+	}
 	for _, lost := range []bool{false, true} {
 		if len(healthy[lost]) == 0 {
 			continue

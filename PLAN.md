@@ -69,10 +69,10 @@ Status ledger:
 ## Phase 0: Scaffold
 
 Goal:
-A module on Go 1.27.2 with the deterministic-package rules enforced, a simulator that replays a seed exactly, a planted-bug harness, telemetry wiring, and CI.
+A module on Go 1.27.3 with the deterministic-package rules enforced, a simulator that replays a seed exactly, a planted-bug harness, telemetry wiring, and CI.
 
 Scope:
-- Go 1.27.2 through `go.mod`'s `toolchain` line; the package layout of deterministic cores and the daemons around them.
+- Go 1.27.3 through `go.mod`'s `go` line; the package layout of deterministic cores and the daemons around them.
 - `internal/detcheck`: a test that loads every deterministic package and fails on clocks, goroutines, global randomness, I/O imports and unsorted map iteration.
 - The simulator's frame: a PRNG with per-purpose streams, a simulated clock and event queue, a message network with delay, loss and partitions, `cmd/wirenet-sim` with seed replay and parallel sweeps.
 - `scripts/mutants`, which plants each known bug in a scratch copy and runs the layers that should catch it.
@@ -89,7 +89,7 @@ Status ledger:
 
 | Status | Type | Item | Evidence / Gap |
 | --- | --- | --- | --- |
-| Complete | Work | 0A: Go 1.27.2 and package layout | `go.mod` (`go 1.27.2`); deterministic cores in `internal/agent/core`, `internal/relay/core`, `internal/cp`, `internal/compile`, `internal/dns`, `internal/nft`, `internal/sim`, each with its daemon around it. |
+| Complete | Work | 0A: Go 1.27.3 and package layout | `go.mod` (`go 1.27.3`); deterministic cores in `internal/agent/core`, `internal/relay/core`, `internal/cp`, `internal/compile`, `internal/dns`, `internal/nft`, `internal/sim`, each with its daemon around it. |
 | Complete | Work | 0B: Determinism check | `internal/detcheck`: `TestModuleIsDeterministic` loads every `//wirenet:deterministic` package; `TestFixtureViolatesEveryRule` fails a fixture on clocks, goroutines, channels, global randomness, I/O imports, package variables and unsorted map iteration. |
 | Complete | Work | 0C: Simulator frame with seed replay and sweeps | `internal/sim` (`TestASeedReplaysExactly`, `TestNetworkReplaysFromItsSeed`, `TestEventsAtOneInstantRunInScheduleOrder`, `TestPartitionHoldsBackDelivery`); `cmd/wirenet-sim --seeds N S` sweeps in parallel and `--trace SEED` replays with the last events. |
 | Complete | Work | 0D: Planted-bug harness | `scripts/mutants`: 94 mutants across 17 layers, `pgstore` among them when `WIRENET_TEST_POSTGRES` is set, `-root -all-layers`, `-only`, `-plant`; `TestEveryMutantApplies` fails when a mutant's anchor stops matching. Skips nested repositories such as worktrees. |
